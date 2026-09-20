@@ -1,0 +1,156 @@
+# name: test/sql/hive/dml/insert/insert_custom_location_partition.test
+# description: INSERT into a partition registered at a custom location must write into that location, not into the
+# group: [insert]
+#              default <table location>/<key>=<value>/ path. Before this was fixed the INSERT was accepted and the
+#              rows were written to the default path while the partition still pointed elsewhere, so they were
+#              orphaned in S3 and invisible to every reader -- an acknowledged write that silently did not persist.
+#
+# Deliberately uses only NON-NESTED custom locations under the table location, so this file does not depend on the
+# deepest-location read fix. Nested and out-of-root locations are refused on write; see insert_refused_layouts.test.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_custom;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_custom (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+# dt=2020-01-01 lives at a custom location under the table location, not named <key>=<value>
+statement ok
+CALL glue_add_partition('my_datalake.default.ins_custom', {dt: '2020-01-01'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom/custom_jan');
+
+# ---------------------------------------------------------------------------
+# claim: the rows are readable after the INSERT. This is the whole defect: it used to report success and
+# lose them.
+# ---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.ins_custom VALUES (1, 10.0, '2020-01-01');
+
+query III
+SELECT id, amount, dt FROM my_datalake.default.ins_custom ORDER BY id;
+----
+1	10.0	2020-01-01
+
+# ---------------------------------------------------------------------------
+# claim: they are in the REGISTERED location, and nothing was written to the default hive path.
+# Asserting only the read would pass if the file had been written to both.
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom/custom_jan/**/*.parquet');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom/dt=2020-01-01/**/*.parquet');
+----
+0
+
+# the partition still points where it did; the INSERT must not silently repoint it
+query I
+SELECT location FROM glue_partitions('my_datalake.default.ins_custom') WHERE dt = '2020-01-01';
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom/custom_jan
+
+# ---------------------------------------------------------------------------
+# claim: appending again lands in the same place and both rows read back
+# ---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.ins_custom VALUES (2, 20.0, '2020-01-01');
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.ins_custom;
+----
+2	3
+
+query I
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom/custom_jan/**/*.parquet');
+----
+2
+
+# ---------------------------------------------------------------------------
+# claim: a mix of custom and default partitions in one statement, both correct. A new partition still gets
+# the default hive path, byte-identical to before this change.
+# ---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.ins_custom VALUES (3, 30.0, '2020-01-01'), (4, 40.0, '2020-01-02');
+
+query III
+SELECT id, amount, dt FROM my_datalake.default.ins_custom ORDER BY id;
+----
+1	10.0	2020-01-01
+2	20.0	2020-01-01
+3	30.0	2020-01-01
+4	40.0	2020-01-02
+
+# the custom partition got the new row
+query I
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom/custom_jan/**/*.parquet');
+----
+3
+
+# ...and dt=2020-01-02, which was not registered, was created at the default hive path and registered there
+query I
+SELECT location FROM glue_partitions('my_datalake.default.ins_custom') WHERE dt = '2020-01-02';
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom/dt=2020-01-02
+
+query I
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom/dt=2020-01-02/**/*.parquet');
+----
+1
+
+# ---------------------------------------------------------------------------
+# claim: partition values needing hive escaping still work, so the fallback matches DuckDB's own escaping
+# ---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_custom_esc;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_custom_esc (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ins_custom_esc', {k: 'a/b'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom_esc/slashy');
+
+statement ok
+INSERT INTO my_datalake.default.ins_custom_esc VALUES (1, 'a/b'), (2, 'plain');
+
+query II
+SELECT id, k FROM my_datalake.default.ins_custom_esc ORDER BY id;
+----
+1	a/b
+2	plain
+
+# the registered partition took its row
+query I
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom_esc/slashy/**/*.parquet');
+----
+1
+
+# 'plain' was created at the default path, escaped by DuckDB's own rule
+query I
+SELECT location FROM glue_partitions('my_datalake.default.ins_custom_esc') WHERE k = 'plain';
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_custom_esc/k=plain
+
+statement ok
+DROP TABLE my_datalake.default.ins_custom;
+
+statement ok
+DROP TABLE my_datalake.default.ins_custom_esc;
