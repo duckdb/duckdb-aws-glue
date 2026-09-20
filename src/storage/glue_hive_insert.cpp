@@ -122,8 +122,9 @@ void ClassifyPartitions(const GlueTableInfo &table_info, const string &location,
 	auto describe = [](const GluePartitionInfo &partition) {
 		return StringUtil::Format("(%s)", StringUtil::Join(partition.values, ", "));
 	};
-	// partition key -> its relative directory, plus the sorted list used for the overlap check below
-	vector<pair<string, string>> relative_keys;
+	// a writable partition's relative directory, with every key it is indexed under (the value as Glue reports it,
+	// plus its unescaped form when those differ), for the overlap check below
+	vector<pair<string, vector<string>>> relative_keys;
 	for (auto &partition : partitions) {
 		auto partition_location = partition.location;
 		StringUtil::RTrim(partition_location, "/");
@@ -136,6 +137,15 @@ void ClassifyPartitions(const GlueTableInfo &table_info, const string &location,
 			values.push_back(value);
 		}
 		auto key = PartitionValuesKey(values);
+		// A catalog written before the values were stored unescaped holds the escaped form ('a%20b') where the data
+		// says 'a b', and the write matches on the values Glue reports. Registering the value unescaped stops new
+		// catalogs looking like that but repairs none of the existing ones, and one such partition is enough to send
+		// a write to the wrong place -- so index the unescaped form as well and accept either.
+		vector<string> unescaped_values;
+		for (auto &value : values) {
+			unescaped_values.push_back(HivePartitioning::Unescape(value));
+		}
+		auto unescaped_key = PartitionValuesKey(unescaped_values);
 		GluePartitionDirectory entry;
 		if (partition_location == location) {
 			entry.refusal = StringUtil::Format(
@@ -151,7 +161,14 @@ void ClassifyPartitions(const GlueTableInfo &table_info, const string &location,
 			    describe(partition), table_info.database_name, table_info.name, partition_location, location);
 		} else {
 			entry.directory = partition_location.substr(location.size() + 1);
-			relative_keys.emplace_back(entry.directory, key);
+			vector<string> keys {key};
+			if (unescaped_key != key) {
+				keys.push_back(unescaped_key);
+			}
+			relative_keys.emplace_back(entry.directory, std::move(keys));
+		}
+		if (unescaped_key != key) {
+			directories.by_values[unescaped_key] = entry;
 		}
 		directories.by_values[key] = std::move(entry);
 	}
@@ -177,8 +194,12 @@ void ClassifyPartitions(const GlueTableInfo &table_info, const string &location,
 		                             "which of the two a new directory belongs to. Reading the table is unaffected",
 		                             table_info.database_name, table_info.name, current.first, previous.first);
 		// both sides of the overlap are unwritable, either one being written is ambiguous
-		directories.by_values[previous.second].refusal = refusal;
-		directories.by_values[current.second].refusal = refusal;
+		for (auto &key : previous.second) {
+			directories.by_values[key].refusal = refusal;
+		}
+		for (auto &key : current.second) {
+			directories.by_values[key].refusal = refusal;
+		}
 	}
 }
 
@@ -512,7 +533,10 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	// a <key>=<value> path, so parsing it would fail (which is what used to make redirected writes impossible).
 	auto location = table_info.location;
 	StringUtil::RTrim(location, "/");
-	case_insensitive_map_t<GluePartitionInput> partitions;
+	// Keyed case-sensitively, because the key is an S3 path and S3 is case-sensitive: country=US and country=us are
+	// two real directories that both receive files, and folding them together registered only the first, leaving the
+	// other one's rows written but invisible
+	unordered_map<string, GluePartitionInput> partitions;
 	for (auto &file : state.written_files) {
 		auto directory = file.substr(0, file.find_last_of('/'));
 		if (partitions.find(directory) != partitions.end()) {
@@ -529,7 +553,10 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 			if (value == parsed.end()) {
 				throw InternalException("Written file '%s' has no value for partition key '%s'", file, key.name);
 			}
-			partition.values.push_back(value->second);
+			// Parse is a path parser and deliberately does not unescape, so its result is the escaped path component
+			// ('a%20b'), not the value. Glue must hold the value, the way every other engine stores it -- the
+			// escaping belongs to the directory name alone
+			partition.values.push_back(HivePartitioning::Unescape(value->second));
 		}
 		partitions.emplace(directory, std::move(partition));
 	}

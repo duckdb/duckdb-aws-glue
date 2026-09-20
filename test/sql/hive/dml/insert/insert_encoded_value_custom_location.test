@@ -1,0 +1,90 @@
+# name: test/sql/hive/dml/insert/insert_encoded_value_custom_location.test
+# description: A partition whose Glue value is percent-encoded AND whose location is custom. This composition is
+# group: [insert]
+#              the case neither of the two individual fixes covers on its own, so it gets a file of its own.
+#
+# Writing into a custom-located partition works by matching the values Glue reports against the values in the data.
+# A catalog that already holds 'a%20b' where the data says 'a b' therefore missed the match, fell through to the
+# default hive layout, and wrote the rows where nothing pointed -- silently re-opening the very defect the redirect
+# was added to fix. Registering the decoded value stops NEW catalogs looking like this; it does not repair the ones
+# already out there, so the lookup has to match either form.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_enc_custom;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_enc_custom (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+# A partition registered the way a catalog damaged by the old encoding bug looks: the value is the ENCODED form,
+# and it points at a custom location. glue_add_partition stores the value as given, so this reproduces it exactly.
+statement ok
+CALL glue_add_partition('my_datalake.default.ins_enc_custom', {k: 'a%20b'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_enc_custom/moved');
+
+query II
+SELECT k, location FROM glue_partitions('my_datalake.default.ins_enc_custom');
+----
+a%20b	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_enc_custom/moved
+
+# ---------------------------------------------------------------------------
+# claim: a write carrying the DECODED value still finds that partition and lands in its registered location.
+# Before, the values did not match, so this fell back to the default layout and the rows were orphaned.
+# ---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.ins_enc_custom VALUES (1, 'a b');
+
+query I
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_enc_custom/moved/**/*.parquet');
+----
+1
+
+# nothing at the default hive path
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_enc_custom/k=a%20b/**/*.parquet');
+----
+0
+
+# and the row is readable, which is the whole point
+query II
+SELECT id, k FROM my_datalake.default.ins_enc_custom;
+----
+1	a b
+
+# the partition was not duplicated or repointed by the write
+query II
+SELECT k, location FROM glue_partitions('my_datalake.default.ins_enc_custom');
+----
+a%20b	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_enc_custom/moved
+
+# appending again stays in the same place
+statement ok
+INSERT INTO my_datalake.default.ins_enc_custom VALUES (2, 'a b');
+
+query I
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_enc_custom/moved/**/*.parquet');
+----
+2
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.ins_enc_custom;
+----
+2	3
+
+statement ok
+DROP TABLE my_datalake.default.ins_enc_custom;
