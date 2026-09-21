@@ -128,6 +128,16 @@ private:
 	mutable bool partition_locations_built = false;
 };
 
+//! One partition key's value as Glue stores it, converted to the column's declared type: the hive sentinel (and, for a
+//! non-string column, "NULL" or an empty string) becomes NULL, anything else is cast, and a value the type cannot hold
+//! throws naming the key.
+//!
+//! Deliberately NOT HivePartitioning::GetValue, which additionally unescapes. That is correct for its own callers,
+//! which read a value out of a <key>=<value> directory name, and wrong here: Glue's Partition.Values holds the RAW
+//! value -- the escaping belongs to the path, which is the distinction G23 established -- so unescaping it again
+//! corrupts any value that legitimately contains an escape sequence. 'a%20b' is a five-character value, not 'a b'.
+Value GluePartitionValue(ClientContext &context, const string &key, const string &str_value, const LogicalType &type);
+
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of
 //! 'scan_info' with the HiveMultiFileReader. Returns the bound table function and fills in 'bind_data'; the scan
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.

@@ -425,6 +425,30 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 }
 
 //===--------------------------------------------------------------------===//
+// Partition values
+//===--------------------------------------------------------------------===//
+Value GluePartitionValue(ClientContext &context, const string &key, const string &str_value, const LogicalType &type) {
+	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+		return Value(type);
+	}
+	if (type.id() == LogicalTypeId::VARCHAR) {
+		// verbatim: what Glue holds IS the value
+		return Value(str_value);
+	}
+	// for a non-string column these are the spellings a NULL arrives as
+	if (StringUtil::CIEquals(str_value, "NULL") || str_value.empty()) {
+		return Value(type);
+	}
+	Value value(str_value);
+	auto cast = value.TryCastAs(context, type);
+	if (!cast) {
+		throw InvalidInputException("Unable to cast '%s' (from Glue partition column '%s') to: '%s'", str_value,
+		                            StringUtil::Upper(key), type.ToString());
+	}
+	return std::move(*cast);
+}
+
+//===--------------------------------------------------------------------===//
 // Cardinality sample
 //===--------------------------------------------------------------------===//
 //! List ONE partition and open ONE of its files, so the scan's cost reflects its data. Glue carries no statistics of
@@ -599,10 +623,9 @@ static unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context
 		}
 		Value value;
 		try {
-			// the value as the scan emits it: unescaped, the hive NULL sentinel mapped to NULL, and converted to the
-			// column's declared type. The same call the pruning above uses, so statistics and pruning cannot disagree
-			value =
-			    HivePartitioning::GetValue(context, info.partition_keys[key_index], partition.values[key_index], type);
+			// the value as the scan emits it: the hive NULL sentinel mapped to NULL, converted to the column's declared
+			// type. The same call the scan and the pruning use, so none of the three can disagree about a partition
+			value = GluePartitionValue(context, info.partition_keys[key_index], partition.values[key_index], type);
 		} catch (std::exception &) {
 			// a value the column's type cannot hold: reading the partition would fail, but planning must not
 			return nullptr;
@@ -768,7 +791,7 @@ static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expres
 			return;
 		}
 		auto &key = info.partition_keys[entry->second];
-		auto value = HivePartitioning::GetValue(context, key, partition.values[entry->second], colref.GetReturnType());
+		auto value = GluePartitionValue(context, key, partition.values[entry->second], colref.GetReturnType());
 		expr = make_uniq<BoundConstantExpression>(std::move(value));
 		return;
 	}
@@ -877,7 +900,7 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 		if (key_index != DConstants::INVALID_INDEX) {
 			// a partition column is a constant: the value Glue stores for the file's partition
 			auto &key = info.partition_keys[key_index];
-			auto value = HivePartitioning::GetValue(context, key, partition->values[key_index], global_column.type);
+			auto value = GluePartitionValue(context, key, partition->values[key_index], global_column.type);
 			reader_data.constant_map.Add(MultiFileGlobalIndex(i), std::move(value));
 			continue;
 		}

@@ -60,11 +60,18 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_enc_cust
 ----
 0
 
-# and the row is readable, which is the whole point
+# and the row is readable, which is the whole point: it landed somewhere the catalog points at, so it is not orphaned.
+#
+# It reads back as 'a%20b' -- the value this deliberately-damaged catalog actually holds -- not as the 'a b' that was
+# written. That is G25: a Glue partition value is RAW, so the scan reports what Glue stores and does not unescape it.
+# It used to answer 'a b' here, and the price was corrupting every genuine value containing a valid escape (see
+# bugs/s3_partition_value_valid_escape.test). The repair this file exists to test is on the WRITE side and is
+# unaffected: the lookup matches either spelling, which is what found the partition above. A damaged catalog is
+# writable and readable; it simply displays the value it really contains.
 query II
 SELECT id, k FROM my_datalake.default.ins_enc_custom;
 ----
-1	a b
+1	a%20b
 
 # the partition was not duplicated or repointed by the write
 query II
