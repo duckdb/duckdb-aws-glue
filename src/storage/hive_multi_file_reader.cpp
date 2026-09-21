@@ -7,7 +7,9 @@
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -393,6 +395,73 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 	return *function_set.functions.GetFunctionByArguments(context, {LogicalType::LIST(LogicalType::VARCHAR)});
 }
 
+//===--------------------------------------------------------------------===//
+// Partition column statistics
+//===--------------------------------------------------------------------===//
+//! Statistics for a partition column, from the values of the partitions the scan will read. Those values are the
+//! complete set of values the column takes, so min/max, the distinct count and has-null are exact and cost no file I/O.
+//! DuckDB otherwise declines statistics for a hive column entirely: the file holds the column the partition value
+//! overrides, and may type it differently. Any column that is not a partition key is left to the format's own function.
+static unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context,
+                                                          TableFunctionGetStatisticsInput &input) {
+	auto &bind_data = input.bind_data->Cast<MultiFileBindData>();
+	auto hive_list = dynamic_cast<const HiveMultiFileList *>(bind_data.file_list.get());
+	if (!hive_list) {
+		return nullptr;
+	}
+	auto &info = hive_list->ScanInfo();
+
+	// the column is a partition key only when it is a whole top-level column of the table
+	idx_t key_index = DConstants::INVALID_INDEX;
+	if (input.column_index.HasPrimaryIndex() && !input.column_index.HasChildren()) {
+		auto column_id = input.column_index.GetPrimaryIndex();
+		if (column_id < bind_data.columns.size()) {
+			key_index = info.GetPartitionKeyIndex(bind_data.columns[column_id].name.GetIdentifierName());
+		}
+	}
+	if (key_index == DConstants::INVALID_INDEX) {
+		// a data column, a struct field or a virtual column: what the files hold is not ours to describe
+		return info.format_statistics ? info.format_statistics(context, input) : nullptr;
+	}
+
+	// the partitions left after pruning: filter pushdown runs before statistics are asked for
+	auto &partition_indexes = hive_list->PartitionIndexes();
+	if (partition_indexes.empty()) {
+		return nullptr;
+	}
+	auto &type = bind_data.columns[input.column_index.GetPrimaryIndex()].type;
+	unique_ptr<BaseStatistics> result;
+	value_set_t distinct_values;
+	for (auto partition_index : partition_indexes) {
+		auto &partition = info.partitions[partition_index];
+		if (key_index >= partition.values.size()) {
+			// Glue registered the partition with fewer values than the table has keys
+			return nullptr;
+		}
+		Value value;
+		try {
+			// the value as the scan emits it: unescaped, the hive NULL sentinel mapped to NULL, and converted to the
+			// column's declared type. The same call the pruning above uses, so statistics and pruning cannot disagree
+			value =
+			    HivePartitioning::GetValue(context, info.partition_keys[key_index], partition.values[key_index], type);
+		} catch (std::exception &) {
+			// a value the column's type cannot hold: reading the partition would fail, but planning must not
+			return nullptr;
+		}
+		auto value_stats = BaseStatistics::FromConstant(value);
+		if (!result) {
+			result = value_stats.ToUnique();
+		} else {
+			// a union of single values, not an accumulation over rows: expand the bounds and claim nothing more
+			result->Merge(value_stats, StatsMergeType::EXPAND_BOUNDS);
+		}
+		distinct_values.insert(std::move(value));
+	}
+	// every value of the column is a partition value, so the count is exact rather than estimated
+	result->SetDistinctCount(distinct_values.size());
+	return result;
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -437,6 +506,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
+	// partition columns are answered from the partition values; the format keeps every other column
+	scan_info->format_statistics = scan_function.statistics_extended;
+	scan_function.statistics_extended = HivePartitionStatistics;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;

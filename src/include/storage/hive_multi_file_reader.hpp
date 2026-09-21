@@ -40,6 +40,9 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
+	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
+	table_statistics_extended_t format_statistics = nullptr;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
@@ -62,6 +65,9 @@ public:
 
 	const vector<idx_t> &PartitionIndexes() const {
 		return partition_indexes;
+	}
+	const HiveScanInfo &ScanInfo() const {
+		return *scan_info;
 	}
 	FileExpandResult GetExpandResult() const override;
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
