@@ -84,10 +84,13 @@ SELECT
 # ----------------------------------------------------------------------------------------------------
 
 # A 200,000-row table must not be estimated at five thousand-ish rows. Today it is.
+# EXPLAIN renders thousands with a comma ("~200,000 rows"), so the six-figure bound is written over digits
+# AND commas: a leading digit plus six or more characters is 100,000 or more, and 99,999 ("9" + "9,999")
+# is five and does not qualify.
 query II
 EXPLAIN SELECT * FROM my_datalake.default.card_large;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~[0-9]{6,} rows.*
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9][0-9,]{6,} rows.*
 
 # And the estimate must distinguish a 200,000-row table from a 4,000-row one with the same partition
 # count. Today both are ~8,000, so this fails for the small table too once the large one is right.
