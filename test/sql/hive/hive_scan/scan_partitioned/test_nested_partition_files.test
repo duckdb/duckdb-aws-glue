@@ -1,0 +1,140 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_nested_partition_files.test
+# description: Data files in nested subdirectories under a partition are read, and the answer does not
+# group: [scan_partitioned]
+
+#              depend on hive_partition_listing_threshold.
+#
+# A partition location is a PREFIX, not a single directory level. DuckDB's own read_parquet descends
+# into subdirectories when it is given a directory, and Glue stores nothing but the prefix, so a file
+# in a nested directory under a partition belongs to that partition. Athena behaves this way too;
+# plain Hive does not (it needs mapred.input.dir.recursive), so Hive is the outlier here rather than
+# the model.
+#
+# hive_partition_listing_threshold selects HOW the files are found: at or above it, one recursive
+# listing of the table root; below it, one listing per partition. That is a performance decision, so
+# it must not change the result. It used to: the per-partition path listed a single level and missed
+# nested files, while the root path was recursive, so the same query returned different row counts
+# depending only on how many partitions it touched.
+#
+# The sweep below is the point of this test. Rather than probing two hand-picked threshold values, it
+# asserts the same answer for values below, at, and above the partition count, plus the built-in
+# default via RESET -- so the invariant holds no matter what the default is changed to.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.nested_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.nested_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+# two partitions, registered by the INSERT, each with a file directly in its directory
+statement ok
+INSERT INTO my_datalake.default.nested_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15');
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.nested_orders');
+----
+2
+
+# A third file in a NESTED subdirectory under an existing, registered partition: what a Spark/EMR job
+# writing through a task directory, or a compaction job, leaves behind. It is still dt=2016-05-14.
+statement ok
+COPY (SELECT 3 AS id, 30.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-14/nested/data.parquet';
+
+# a second level down, to show the depth is not special
+statement ok
+COPY (SELECT 4 AS id, 40.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-15/a/b/data.parquet';
+
+# still two registered partitions: nesting does not create partitions
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.nested_orders');
+----
+2
+
+#---------------------------------------------------------------------------
+# the invariant: identical results across the whole threshold range
+#---------------------------------------------------------------------------
+# 1 and 2 are at or below the partition count (recursive root listing); 3, 10 and 1000 are above it
+# (one listing per partition). The answer must not move.
+foreach threshold 1 2 3 10 1000
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.nested_orders;
+----
+4	10
+
+query III
+SELECT id, amount, dt FROM my_datalake.default.nested_orders ORDER BY id;
+----
+1	10.0	2016-05-14
+2	20.0	2016-05-15
+3	30.0	2016-05-14
+4	40.0	2016-05-15
+
+# the nested files are attributed to the partition whose prefix contains them, so a filter on the
+# partition key still finds them
+query I
+SELECT count(*) FROM my_datalake.default.nested_orders WHERE dt = '2016-05-14';
+----
+2
+
+endloop
+
+#---------------------------------------------------------------------------
+# and with whatever the built-in default happens to be
+#---------------------------------------------------------------------------
+statement ok
+RESET hive_partition_listing_threshold;
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.nested_orders;
+----
+4	10
+
+#---------------------------------------------------------------------------
+# hidden subdirectories are not data, at any depth
+#---------------------------------------------------------------------------
+# Recursing brings staging directories into scope that a single-level listing could never see. A file
+# under _temporary/ or .hive-staging/ is no more data than a _SUCCESS file is, so the counts above
+# must not move.
+statement ok
+COPY (SELECT 99 AS id, 99.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-14/_temporary/data.parquet';
+
+statement ok
+COPY (SELECT 98 AS id, 98.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-15/.hive-staging/data.parquet';
+
+foreach threshold 1 1000
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.nested_orders;
+----
+4	10
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.nested_orders;

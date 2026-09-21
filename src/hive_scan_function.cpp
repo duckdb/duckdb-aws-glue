@@ -155,6 +155,18 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 	if (partitions) {
 		ParsePartitions(*scan_info, *partitions);
 	}
+	// 'partition_keys' with no 'partitions' argument at all reads nothing: declaring the keys makes the table
+	// partitioned, and a partitioned table reads only the partitions it is given. That combination is a caller who
+	// meant to pass partitions, so say so instead of returning an empty result.
+	//
+	// 'partitions := []' is a different statement -- the table has no registered partition -- and stays a legal empty
+	// scan, matching a Glue table whose partitions have not been registered: unregistered data is not visible.
+	if (partition_keys && !partitions) {
+		throw BinderException("hive_scan: 'partition_keys' was given without 'partitions', which would read no rows. "
+		                      "Pass the partitions to read, e.g. partitions := [{%s: '...'}]; pass partitions := [] "
+		                      "for a table that has no registered partition",
+		                      scan_info->partition_keys.empty() ? "dt" : scan_info->partition_keys[0]);
+	}
 	for (auto &key : scan_info->partition_keys) {
 		bool found = false;
 		for (auto &column : scan_info->names) {

@@ -1,0 +1,126 @@
+# name: test/sql/hive/hive_scan/test_partitions_argument.test
+# description: hive_scan distinguishes a missing 'partitions' argument from an empty partition list.
+# group: [hive_scan]
+
+# Two different things look similar and must not be conflated:
+#
+#   1. The ARGUMENT is absent.  hive_scan(root, schema := ..., partition_keys := ['dt'])
+#      The caller declared the table partitioned and then never said which partitions to read, so the
+#      scan would read nothing. That is a caller mistake, not an answer, and it errors.
+#
+#   2. The DATA has no registered partition.  partitions := []
+#      The caller states that the table has no partition registered. Reading nothing is the correct
+#      answer, and it matches a Glue table whose partitions have not been registered -- see
+#      ddl/alter_partition/alter_table_add_partition.test, "unregistered data is not visible", where a
+#      partitioned Glue table with data in S3 but no registered partition returns 0 rows. That is Hive
+#      and Glue semantics, and the reason glue_repair_table exists.
+#
+# Both returned 0 rows with no error before, so a shim that forgot to pass its partition list got a
+# silently empty result rather than a complaint.
+#
+# Note the asymmetry this preserves, which is intended: with NO partition_keys and no partitions the
+# table is not partitioned at all, and the whole root is read.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pa_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.pa_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.pa_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15');
+
+# the data is really there, so an empty result below can never be blamed on missing data
+query I
+SELECT count(*) FROM my_datalake.default.pa_orders;
+----
+2
+
+#---------------------------------------------------------------------------
+# 1. the argument is absent: an error, not an empty result
+#---------------------------------------------------------------------------
+statement error
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partition_keys := ['dt']);
+----
+'partition_keys' was given without 'partitions'
+
+# the message names the partition key, so the fix is obvious from the error alone
+statement error
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partition_keys := ['dt']);
+----
+partitions := [{dt: '...'}]
+
+#---------------------------------------------------------------------------
+# 2. the data has no registered partition: 0 rows, no error
+#---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partition_keys := ['dt'],
+    partitions := []);
+----
+0
+
+# An empty list without partition_keys is a different thing again, and reads the whole root. What makes
+# a table partitioned is the partition KEYS -- given explicitly, or inferred from the first partition.
+# An empty list carries no keys to infer, so this is equivalent to passing neither argument (case 4)
+# rather than to the case above.
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := []);
+----
+2
+
+#---------------------------------------------------------------------------
+# 3. partitions supplied: the normal case still works
+#---------------------------------------------------------------------------
+query II
+SELECT id, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partition_keys := ['dt'],
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
+ORDER BY id;
+----
+1	2016-05-14
+2	2016-05-15
+
+# partition_keys may be omitted when partitions are given: the keys come from the first partition
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}]);
+----
+1
+
+#---------------------------------------------------------------------------
+# 4. neither argument: an unpartitioned scan of the whole root, which is unaffected
+#---------------------------------------------------------------------------
+# No partition_keys means the table is not partitioned, so the root is read and the dt column comes
+# from the files rather than from a partition value. The Hive-style directories hold no dt column, so
+# dt reads as NULL; the point here is that the rows are found at all.
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'});
+----
+2
+
+statement ok
+DROP TABLE my_datalake.default.pa_orders;

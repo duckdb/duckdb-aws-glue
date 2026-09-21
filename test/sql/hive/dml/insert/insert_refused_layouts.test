@@ -1,0 +1,162 @@
+# name: test/sql/hive/dml/insert/insert_refused_layouts.test
+# description: Two partition layouts Glue permits cannot be written by DuckDB, so INSERT refuses them up front:
+# group: [insert]
+#              a partition nested inside another partition's location, and a partition outside the table location.
+#
+# This is deliberately stricter than Glue. Glue puts no constraint on partition locations, but DuckDB's partitioned
+# writer refuses overlapping directories (PartitionWriteManager::ClaimDirectory) and refuses a partition directory
+# outside the COPY target (PartitionFileRequestBuilder::BuildDirectory). Adopting that strictness is the right call:
+#   - nesting is genuinely ambiguous on WRITE. Deepest-registration-wins resolves files that already exist, but
+#     cannot tell a writer which of two overlapping partitions a new directory belongs to.
+#   - writing outside the table location creates objects that OVERWRITE never cleans and that failure cleanup does
+#     not cover.
+# Refusing is also strictly better than what happened before, which was to write to the wrong place silently.
+#
+# READS of both layouts keep working, and this file asserts that too -- that is what makes the trade acceptable.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_external_file_cache=false;
+
+# ---------------------------------------------------------------------------
+# a partition outside the table location
+# ---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_outside;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_outside (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ins_outside', {dt: 'elsewhere'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/outside_the_table');
+
+statement error
+INSERT INTO my_datalake.default.ins_outside VALUES (1, 'elsewhere');
+----
+outside the table location
+
+# the refusal names the partition and where it points
+statement error
+INSERT INTO my_datalake.default.ins_outside VALUES (1, 'elsewhere');
+----
+outside_the_table
+
+# nothing was written anywhere
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/outside_the_table/**/*.parquet');
+----
+0
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_outside/**/*.parquet');
+----
+0
+
+# reading that layout is unaffected: data placed there out of band is visible with its partition value
+statement ok
+COPY (SELECT 7 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/outside_the_table/data.parquet';
+
+query II
+SELECT id, dt FROM my_datalake.default.ins_outside;
+----
+7	elsewhere
+
+# ---------------------------------------------------------------------------
+# the refusal is per partition WRITTEN, not per table: an INSERT that never touches the unwritable partition
+# still works. This matters because ALTER TABLE ... SET LOCATION leaves older partitions outside the new table
+# location, and writing to new partitions of such a table has to keep working.
+# ---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.ins_outside VALUES (8, 'fine');
+
+query II
+SELECT id, dt FROM my_datalake.default.ins_outside ORDER BY id;
+----
+7	elsewhere
+8	fine
+
+# the writable partition was created at the default hive path
+query I
+SELECT location FROM glue_partitions('my_datalake.default.ins_outside') WHERE dt = 'fine';
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_outside/dt=fine
+
+# ---------------------------------------------------------------------------
+# a partition nested inside another partition's location
+# ---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_nested;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_nested (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ins_nested', {dt: 'outer'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_nested/outer');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ins_nested', {dt: 'inner'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_nested/outer/inner');
+
+statement error
+INSERT INTO my_datalake.default.ins_nested VALUES (1, 'inner');
+----
+nested inside
+
+# either side of the overlap is ambiguous, so writing the OUTER one is refused too
+statement error
+INSERT INTO my_datalake.default.ins_nested VALUES (1, 'outer');
+----
+nested inside
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_nested/**/*.parquet');
+----
+0
+
+# ...but a third, unrelated partition of the same table is still writable
+statement ok
+INSERT INTO my_datalake.default.ins_nested VALUES (3, 'unrelated');
+
+query I
+SELECT location FROM glue_partitions('my_datalake.default.ins_nested') WHERE dt = 'unrelated';
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_nested/dt=unrelated
+
+# reading the nested layout still attributes each file to the deepest registered location
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_nested/outer/f_outer.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_nested/outer/inner/f_inner.parquet';
+
+query II
+SELECT id, dt FROM my_datalake.default.ins_nested WHERE dt IN ('outer', 'inner') ORDER BY id;
+----
+1	outer
+2	inner
+
+# ...and still does when a filter prunes the inner partition away
+query II
+SELECT id, dt FROM my_datalake.default.ins_nested WHERE dt = 'outer';
+----
+1	outer
+
+statement ok
+DROP TABLE my_datalake.default.ins_outside;
+
+statement ok
+DROP TABLE my_datalake.default.ins_nested;

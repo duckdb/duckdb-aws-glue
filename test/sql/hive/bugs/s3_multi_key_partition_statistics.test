@@ -1,0 +1,74 @@
+# name: test/sql/hive/bugs/s3_multi_key_partition_statistics.test
+# description: S3 - partition-column statistics with TWO partition keys: each key's statistics must
+# group: [bugs]
+#              describe that key, and neither may prune the other's rows.
+#
+# Every other test in this set uses a single partition key. Two keys add the failure this cannot show: the
+# statistics for key i must be built from position i of each partition's value vector. An off-by-one gives
+# column 'country' the statistics of column 'dt' -- and because those ranges are disjoint, the optimizer
+# would then prove real filters impossible and return empty results. Wrong answers, not bad plans, from a
+# one-character mistake that a single-key test cannot reach.
+#
+# The correctness half is GREEN today and must stay green. The group-count half is RED, the same defect as
+# the single-key tests, asserted on the SECOND key so that a fix which only handles the first is caught.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mkey;
+
+statement ok
+CREATE TABLE my_datalake.default.mkey (id INTEGER, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+
+# 2 dt values x 3 country values = 6 partitions, deliberately disjoint value ranges per key
+statement ok
+INSERT INTO my_datalake.default.mkey SELECT i, 'd' || (i % 2), 'c' || (i % 3) FROM generate_series(1,600) t(i);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.mkey');
+----
+6
+
+# GREEN: a filter on the FIRST key finds its rows
+query I
+SELECT count(*) FROM my_datalake.default.mkey WHERE dt = 'd1';
+----
+300
+
+# GREEN: a filter on the SECOND key finds its rows -- this is what an off-by-one in the key index breaks
+query I
+SELECT count(*) FROM my_datalake.default.mkey WHERE country = 'c2';
+----
+200
+
+# GREEN: both keys together
+query I
+SELECT count(*) FROM my_datalake.default.mkey WHERE dt = 'd1' AND country = 'c2';
+----
+100
+
+# GREEN: a value that exists for one key but is nonsense for the other must not be confused with it
+query I
+SELECT count(*) FROM my_datalake.default.mkey WHERE country = 'd1';
+----
+0
+
+# RED: three distinct countries, so at most three groups
+query II
+EXPLAIN SELECT country, count(*) FROM my_datalake.default.mkey GROUP BY country;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~[0-9]{1,2} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.mkey;

@@ -1,0 +1,85 @@
+# name: test/sql/hive/bugs/s3_cardinality_join_inputs.test
+# description: S3 - a 100,000-row fact table and a 40-row dimension table are estimated IDENTICALLY, so a
+# group: [bugs]
+#              join between them is planned with no information about either side.
+#
+# This is the consequence the other tests describe, made concrete, and it is the reason any of this
+# matters. Both tables have four partitions, so both estimate 1000 x 4 x 2 = 8,000: the fact table 12x
+# low, the dimension table 200x HIGH. Measured in one plan, both Read Parquet operators report ~8,000.
+#
+# With equal estimates the optimizer has nothing to choose a hash-join build side with, so which table
+# gets hashed is decided by something other than size. Getting it backwards means building a hash table
+# over 100,000 rows to probe it with 40, and at real scale that is the difference between a join that
+# fits in memory and one that spills.
+#
+# The assertions are deliberately on the two tables SCANNED SEPARATELY rather than on the join plan.
+# Which side of a hash join is the build side is not something a text plan asserts robustly, and the
+# defect does not need it: if the two scans are estimated correctly the optimizer has what it needs, and
+# if they are not, no amount of join heuristics can recover. This keeps the test independent of HOW the
+# estimate gets fixed -- it holds for any mechanism.
+#
+# Correct behaviour: a 100,000-row table and a 40-row table look different to the planner.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.j_fact;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.j_dim;
+
+statement ok
+CREATE TABLE my_datalake.default.j_fact (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CREATE TABLE my_datalake.default.j_dim (id INTEGER, lbl VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.j_fact SELECT i, 'd' || (i % 4) FROM generate_series(1,100000) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.j_dim SELECT i, 'L' || i, 'd' || (i % 4) FROM generate_series(1,40) t(i);
+
+# 2,500x apart in reality, and the same number of partitions
+query IIII
+SELECT (SELECT count(*) FROM my_datalake.default.j_fact),
+       (SELECT count(*) FROM my_datalake.default.j_dim),
+       (SELECT count(*) FROM glue_partitions('my_datalake.default.j_fact')),
+       (SELECT count(*) FROM glue_partitions('my_datalake.default.j_dim'));
+----
+100000	40	4	4
+
+# the join returns the right rows today -- this is a planning defect, not a correctness one
+query I
+SELECT count(*) FROM my_datalake.default.j_fact f JOIN my_datalake.default.j_dim d ON f.id = d.id;
+----
+40
+
+# the fact table must not look small. Today: ~8,000.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.j_fact;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~[0-9]{2,3},[0-9]{3} rows.*
+
+# and the dimension table must not look big. Today: ~8,000, for forty rows.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.j_dim;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9][0-9]{0,2} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.j_fact;
+
+statement ok
+DROP TABLE my_datalake.default.j_dim;

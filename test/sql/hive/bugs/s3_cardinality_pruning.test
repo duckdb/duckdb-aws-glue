@@ -1,0 +1,69 @@
+# name: test/sql/hive/bugs/s3_cardinality_pruning.test
+# description: S3 - partition pruning IS reflected in the estimate (green, and worth protecting), but the
+# group: [bugs]
+#              pruned estimate is still the same fabricated constant, now over fewer partitions.
+#
+# Two separate things, deliberately in one file because a fix could easily get one right and the other
+# wrong:
+#
+#  1. GREEN: the estimate is computed over the PRUNED partition set. HiveMultiFileReader::
+#     ComplexFilterPushdown returns a new HiveMultiFileList with partition_indexes narrowed, and the
+#     cardinality path sees that narrowed list. Both proposed modifications rely on this and it was an
+#     unverified assumption until measured here. It must keep holding.
+#
+#  2. RED: pruning to 10 of 20 partitions gives 1000 x 10 x 2 = ~20,000 where the truth is ~2,000.
+#     Narrowing the fabrication is not the same as fixing it.
+#
+# One more thing visible here and worth recording, because it is a second reason to want partition-column
+# statistics: filtering to a single partition estimates ~400 where the truth is 200. The 400 is
+# 2,000 x 0.2 -- DuckDB's DEFAULT_SELECTIVITY, applied because the column has no statistics to consult
+# (relation_statistics_scan.cpp falls back to it when filters exist but column stats do not). After
+# pruning, a filter on the partition column is always TRUE for every surviving row, so exact min/max
+# would let the optimizer use selectivity 1.0 instead of guessing 0.2. That is a Mod 1 win that has
+# nothing to do with row counts.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.prune20;
+
+statement ok
+CREATE TABLE my_datalake.default.prune20 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+# 20 partitions x 200 rows. 20 is above hive_partition_listing_threshold (10), so this also exercises the
+# root-glob listing branch rather than the per-partition one -- the two count files differently.
+statement ok
+INSERT INTO my_datalake.default.prune20 SELECT i, 'd' || (i % 20) FROM generate_series(1,4000) t(i);
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.prune20')), (SELECT count(*) FROM my_datalake.default.prune20);
+----
+20	4000
+
+# GREEN: one partition of twenty is estimated in the hundreds, not the table's ~40,000. Pruning reaches
+# the estimate. Protect this.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.prune20 WHERE dt = 'd7';
+----
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9][0-9]{0,2} rows.*
+
+# RED: ten partitions of twenty hold ~2,000 rows. Today: ~20,000, because the constant just follows the
+# pruned partition count.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.prune20 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9],[0-9]{3} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.prune20;

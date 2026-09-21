@@ -1,0 +1,96 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_date_key.test
+# description: S3 - partition-column statistics on a DATE key, the other shape real tables use, and the
+# group: [bugs]
+#              one where a range filter is the whole point.
+#
+# TPC-DS partitions by ss_sold_date_sk, an INTEGER (covered by the numeric sibling). Date-partitioned
+# tables written by Spark or Hive commonly use a DATE or a date-shaped string instead, and date RANGE
+# predicates are the dominant filter on them -- which is exactly what min/max statistics are for, and
+# exactly what returns wrong answers if the bounds are built wrong.
+#
+# Glue stores every partition value as a string, so a DATE key is a string -> DATE conversion on the way
+# in. Get it wrong and the bounds are nonsense; compare lexicographically instead of chronologically and
+# the bounds are subtly wrong only for some date formats. Either way a range filter starts losing rows,
+# which is why the correctness assertions here matter more than the estimate one.
+#
+# Correct behaviour: range filters return every matching row, and three partitions means at most three
+# groups.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.dkey;
+
+statement ok
+CREATE TABLE my_datalake.default.dkey (id INTEGER, d DATE) PARTITIONED BY (d);
+
+statement ok
+INSERT INTO my_datalake.default.dkey VALUES (1, DATE '2026-01-01'), (2, DATE '2026-06-15'), (3, DATE '2026-12-31');
+
+# the DATE key round-trips through Glue's string storage
+query IT
+SELECT id, d FROM my_datalake.default.dkey ORDER BY id;
+----
+1	2026-01-01
+2	2026-06-15
+3	2026-12-31
+
+query T
+SELECT d FROM glue_partitions('my_datalake.default.dkey') ORDER BY d;
+----
+2026-01-01
+2026-06-15
+2026-12-31
+
+# GREEN and the important half: range filters must keep every matching row
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d >= DATE '2026-06-01';
+----
+2
+
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d < DATE '2026-06-01';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d BETWEEN DATE '2026-01-01' AND DATE '2026-12-31';
+----
+3
+
+# the exact bounds must be inclusive at both ends -- an off-by-one in min/max shows up here first
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d = DATE '2026-01-01';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d = DATE '2026-12-31';
+----
+1
+
+# a range entirely outside the data is allowed to return nothing
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d > DATE '2027-01-01';
+----
+0
+
+# RED: three partitions, so at most three groups
+query II
+EXPLAIN SELECT d, count(*) FROM my_datalake.default.dkey GROUP BY d;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~[0-9]{1,2} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.dkey;

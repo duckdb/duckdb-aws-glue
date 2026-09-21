@@ -1,0 +1,139 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_overlapping_partition_locations.test
+# description: When one partition's location is nested inside another's, a file belongs to the most
+# group: [scan_partitioned]
+
+#              specific (deepest) registered location, and the answer does not depend on
+#              hive_partition_listing_threshold.
+#
+# Glue puts no constraint on partition locations: glue_add_partition(..., location := ...) accepts any
+# S3 location, so nothing stops one partition from pointing inside another partition's prefix. That
+# makes the prefixes overlap, and a file under the inner location matches BOTH partitions.
+#
+# The deepest registration wins. That is the only unambiguous reading -- the inner location was
+# registered for the inner partition, so its files are that partition's -- and it is the rule DuckDB
+# already uses elsewhere: an S3 secret is resolved by longest-matching SCOPE, not by any matching one.
+#
+# The two listing paths used to disagree here. The recursive root listing already walked up from each
+# file to the deepest registered location, so it got this right; the per-partition listing globbed its
+# own location and claimed everything underneath, so a file in the inner partition came back carrying
+# the OUTER partition's values. The row count was identical either way -- only the partition column
+# was wrong, which is why it is worth a test of its own.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.overlap_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.overlap_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+# dt=outer at its default location .../overlap_orders/dt=outer
+statement ok
+CALL glue_add_partition('my_datalake.default.overlap_orders', {dt: 'outer'});
+
+# dt=inner at a custom location NESTED INSIDE dt=outer's location
+statement ok
+CALL glue_add_partition('my_datalake.default.overlap_orders', {dt: 'inner'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/sub');
+
+# one file directly in the outer location, one in the inner location
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/f_outer.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/sub/f_inner.parquet';
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.overlap_orders');
+----
+2
+
+#---------------------------------------------------------------------------
+# the file under the inner location carries the inner partition's values, on both listing paths
+#---------------------------------------------------------------------------
+# 1 is at or below the partition count (recursive root listing); 1000 is above it (per-partition).
+foreach threshold 1 1000
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT id, dt FROM my_datalake.default.overlap_orders ORDER BY id;
+----
+1	outer
+2	inner
+
+# and the same seen from the partition column
+query I
+SELECT dt FROM my_datalake.default.overlap_orders WHERE id = 2;
+----
+inner
+
+#---------------------------------------------------------------------------
+# pruning must not leak the inner partition's file into the outer partition
+#---------------------------------------------------------------------------
+# This is the case the per-partition path got wrong even when only one partition is read: filtering to
+# dt='outer' prunes dt=inner away, and then the listing of dt=outer's location must still not pick up
+# the file that belongs to dt=inner.
+query I
+SELECT count(*) FROM my_datalake.default.overlap_orders WHERE dt = 'outer';
+----
+1
+
+query I
+SELECT id FROM my_datalake.default.overlap_orders WHERE dt = 'outer';
+----
+1
+
+# the inner partition on its own
+query I
+SELECT id FROM my_datalake.default.overlap_orders WHERE dt = 'inner';
+----
+2
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+#---------------------------------------------------------------------------
+# a nested directory that is NOT a registered partition still belongs to the enclosing partition
+#---------------------------------------------------------------------------
+# Only a registered location takes a file away from its enclosing partition; an ordinary subdirectory
+# does not (that is what test_nested_partition_files.test covers).
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/plain/f.parquet';
+
+foreach threshold 1 1000
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT id, dt FROM my_datalake.default.overlap_orders ORDER BY id;
+----
+1	outer
+2	inner
+3	outer
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.overlap_orders;

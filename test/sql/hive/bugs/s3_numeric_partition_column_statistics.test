@@ -1,0 +1,62 @@
+# name: test/sql/hive/bugs/s3_numeric_partition_column_statistics.test
+# description: S3 - partition-column statistics are missing for a NUMERIC partition key too, which is the
+# group: [bugs]
+#              shape real tables use: TPC-DS partitions store_sales by ss_sold_date_sk, an INTEGER.
+#
+# The sibling partition-statistics test uses a VARCHAR key. This one exists because the numeric case goes
+# through a type conversion the string case does not: Glue stores every partition value as a STRING, so an
+# INTEGER partition column has to be cast on the way in. That conversion already has a known-buggy
+# neighbour -- PartitionValueToValue discards its cast result, skips unescaping and NULLs anything it
+# cannot parse (recorded as G25) -- so min/max and distinct count on a numeric partition key are exactly
+# where a plausible implementation would go wrong while the VARCHAR test stayed green.
+#
+# The reads themselves are fine today, asserted below, so this is specifically about statistics.
+#
+# Correct behaviour: four partitions means at most four groups, and min/max on the key are the real
+# numeric bounds rather than absent.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.numpart;
+
+statement ok
+CREATE TABLE my_datalake.default.numpart (id INTEGER, sk INTEGER) PARTITIONED BY (sk);
+
+statement ok
+INSERT INTO my_datalake.default.numpart SELECT i, 2450000 + (i % 4) FROM generate_series(1,4000) t(i);
+
+# the numeric partition column round-trips correctly today -- this file is about statistics, not reads
+query II
+SELECT sk, count(*) FROM my_datalake.default.numpart GROUP BY sk ORDER BY sk;
+----
+2450000	1000
+2450001	1000
+2450002	1000
+2450003	1000
+
+# and Glue holds the four values
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.numpart');
+----
+4
+
+# THE DEFECT: four partitions, so at most four groups, on an INTEGER key.
+query II
+EXPLAIN SELECT sk, count(*) FROM my_datalake.default.numpart GROUP BY sk;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~[0-9]{1,2} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.numpart;

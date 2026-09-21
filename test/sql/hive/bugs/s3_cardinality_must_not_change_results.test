@@ -1,0 +1,80 @@
+# name: test/sql/hive/bugs/s3_cardinality_must_not_change_results.test
+# description: S3 guard - the cardinality estimate must never change an ANSWER. GREEN today, and the
+# group: [bugs]
+#              counterpart of s3_partition_statistics_must_not_prune for the row-count half.
+#
+# NodeStatistics can carry two things: estimated_cardinality, a hint, and max_cardinality, which the
+# optimizer may treat as a GUARANTEE the scan cannot exceed. Any row count we get from Glue is stale by
+# construction -- nothing in the estate populates it, and our own INSERT does not update it -- so
+# max_cardinality must never be set from it. That rule is written down in the plan, and nothing enforces
+# it, which is what this file is for: if a future change passes a Glue row count as a bound and it is too
+# low, the optimizer may cap a LIMIT or short-circuit an aggregate, and the query returns the wrong
+# answer rather than a slow one.
+#
+# Every assertion here is about an exact answer, not a plan. They are green now and must stay green
+# through any cardinality work. A failure here is strictly more serious than every red test in this set.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.exact;
+
+statement ok
+CREATE TABLE my_datalake.default.exact (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+# 20,000 rows over 4 partitions. The estimate for this table is ~8,000 today, i.e. well BELOW the truth --
+# exactly the direction in which a bound would start removing rows.
+statement ok
+INSERT INTO my_datalake.default.exact SELECT i, 'd' || (i % 4) FROM generate_series(1,20000) t(i);
+
+query I
+SELECT count(*) FROM my_datalake.default.exact;
+----
+20000
+
+# a LIMIT above the estimate but below the truth must still be satisfied in full
+query I
+SELECT count(*) FROM (SELECT * FROM my_datalake.default.exact LIMIT 12000) x;
+----
+12000
+
+# a LIMIT above the truth returns everything, not the estimate
+query I
+SELECT count(*) FROM (SELECT * FROM my_datalake.default.exact LIMIT 999999) x;
+----
+20000
+
+# aggregates over the whole table are exact
+query II
+SELECT sum(id), max(id) FROM my_datalake.default.exact;
+----
+200010000	20000
+
+# ORDER BY + LIMIT must see rows beyond the estimate: id 20000 is the largest and sits past ~8,000
+query I
+SELECT id FROM my_datalake.default.exact ORDER BY id DESC LIMIT 1;
+----
+20000
+
+# per-partition counts are exact too
+query II
+SELECT dt, count(*) FROM my_datalake.default.exact GROUP BY dt ORDER BY dt;
+----
+d0	5000
+d1	5000
+d2	5000
+d3	5000
+
+statement ok
+DROP TABLE my_datalake.default.exact;

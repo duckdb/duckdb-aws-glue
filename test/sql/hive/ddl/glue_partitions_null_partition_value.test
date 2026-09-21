@@ -1,0 +1,147 @@
+# name: test/sql/hive/ddl/glue_partitions_null_partition_value.test
+# description: a NULL partition value round-trips through Glue as the hive sentinel, and reads as NULL on both surfaces
+# group: [ddl]
+
+# Hive and Glue have no way to store a NULL partition value, because a partition value is a directory name. They store
+# the literal '__HIVE_DEFAULT_PARTITION__' instead, and every engine maps that back to NULL. This file pins that
+# round trip, which was untested: insert_partition_value_fidelity.test deliberately leaves NULL values out (its
+# comment says they "would confound this file"), so nothing covered them.
+#
+# It is also the one partition-value behaviour that G25a does NOT change -- both the old local helper and the shared
+# GluePartitionValue treat the sentinel as their first check and return a typed NULL -- so this should be green
+# before the change, after it, and if the conversion is ever touched again. That makes it the regression guard for
+# the part of the refactor nobody is watching.
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gp_nullpart;
+
+statement ok
+CREATE TABLE my_datalake.default.gp_nullpart (id INTEGER, k INTEGER) PARTITIONED BY (k);
+
+# ===========================================================================
+# a NULL in the partition spec registers the sentinel
+# ===========================================================================
+# ParsePartitionSpec maps a NULL struct field to __HIVE_DEFAULT_PARTITION__ rather than casting it, which is the only
+# way to name the NULL partition -- 'NULL' as a string would be a partition whose value is the three characters NULL.
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gp_nullpart', {k: NULL});
+
+# the directory is the sentinel, un-escaped: it is a reserved name, not a value that needs escaping
+query I
+SELECT location FROM glue_partitions('my_datalake.default.gp_nullpart');
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__
+
+# ===========================================================================
+# ...and it reads back as NULL, not as the sentinel string
+# ===========================================================================
+# The assertion that matters. A reader that did not special-case the sentinel would either surface the literal
+# '__HIVE_DEFAULT_PARTITION__' (impossible here, the column is INTEGER) or fail to cast it and NULL it for the wrong
+# reason -- which is indistinguishable from this, and is exactly why the uncastable case has its own test.
+
+query I
+SELECT k IS NULL FROM glue_partitions('my_datalake.default.gp_nullpart');
+----
+true
+
+# typed as the column's declared type, not as VARCHAR
+query I
+SELECT typeof(k) FROM glue_partitions('my_datalake.default.gp_nullpart');
+----
+INTEGER
+
+# exactly one partition, and it is the NULL one
+query II
+SELECT count(*), count(k) FROM glue_partitions('my_datalake.default.gp_nullpart');
+----
+1	0
+
+# ===========================================================================
+# the partition is addressable by NULL, which is what makes it usable
+# ===========================================================================
+# Registering it is no good if it cannot then be named. The same NULL-to-sentinel mapping has to work on the way in
+# to a drop, or the partition would be strandable -- creatable and not removable.
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gp_nullpart', {k: 5});
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.gp_nullpart');
+----
+2
+
+statement ok
+CALL glue_drop_partition('my_datalake.default.gp_nullpart', {k: NULL});
+
+# the NULL partition went, the ordinary one stayed
+query II
+SELECT k, k IS NULL FROM glue_partitions('my_datalake.default.gp_nullpart');
+----
+5	false
+
+# ===========================================================================
+# the scan agrees with glue_partitions() about the NULL partition
+# ===========================================================================
+# Two surfaces convert Glue partition values, and the point of the G25 work is that they must not disagree. The
+# sentinel is the case where they already agreed, so this locks that in rather than discovering later that one of
+# them drifted.
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gp_nullpart', {k: NULL});
+
+statement ok
+COPY (SELECT 1 AS id)
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__/d.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 2 AS id)
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=5/d.parquet' (FORMAT parquet);
+
+query II
+SELECT id, k FROM my_datalake.default.gp_nullpart ORDER BY id;
+----
+1	NULL
+2	5
+
+# IS NULL finds it through the scan, so a NULL partition is queryable and not just listable
+query I
+SELECT id FROM my_datalake.default.gp_nullpart WHERE k IS NULL;
+----
+1
+
+# and the non-NULL partition is unaffected by its presence
+query I
+SELECT id FROM my_datalake.default.gp_nullpart WHERE k = 5;
+----
+2
+
+# ===========================================================================
+# known limitation, asserted rather than left implicit
+# ===========================================================================
+# On this surface a NULL partition value is indistinguishable from a partition value the column's type cannot hold:
+# both read NULL. See glue_partitions_uncastable_value.test. Recorded here so the ambiguity is visible from the
+# NULL side too, and so that adding a raw-value column later has a test to change rather than a silence to fill.
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.gp_nullpart') WHERE k IS NULL;
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.gp_nullpart;

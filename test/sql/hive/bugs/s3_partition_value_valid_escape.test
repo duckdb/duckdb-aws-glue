@@ -1,0 +1,104 @@
+# name: test/sql/hive/bugs/s3_partition_value_valid_escape.test
+# description: G25 - a partition value that legitimately contains a VALID escape sequence must survive. The scan
+# group: [bugs]
+#              used to unescape it, so the value was corrupted and the row became unreachable by its real value.
+#
+# Glue's Partition.Values holds the RAW value; the escaping belongs to the <key>=<value> DIRECTORY name. That is the
+# distinction G23 established and fixed on the write side. The read side kept using HivePartitioning::GetValue, which
+# is the accessor for a value read out of a PATH and therefore unescapes -- correct for its own callers, wrong for a
+# value read out of Glue.
+#
+# Measured before the fix, on a catalog our own INSERT wrote (so it is not a damaged legacy catalog):
+#
+#   INSERT INTO t VALUES (1, 'a%20b')      -- the value IS the five characters a%20b
+#   glue_partitions()          -> 'a%20b'  correct, it is what Glue holds
+#   SELECT k                   -> 'a b'    CORRUPTED
+#   WHERE k = 'a%20b'          -> 0 rows   the row is unreachable by its true value
+#   WHERE k = 'a b'            -> 1 row    and reachable by a value that exists nowhere
+#
+# Why nothing caught it: insert_partition_value_fidelity.test covers 'a/b', 'c=d', 'e%f' and 'é', and asserts both
+# surfaces agree -- but 'e%f' is an INVALID escape, which URL decoding passes through unchanged, so the whole set is
+# blind to escaping. The statistics tests written alongside this work had the same gap.
+#
+# All four conversion surfaces are asserted here, because the fix has to move three call sites together and any one
+# left behind is a silent disagreement: what the scan emits, what a filter prunes on, what the optimizer's
+# partition-column statistics claim, and what the catalog reports.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.esc;
+
+statement ok
+CREATE TABLE my_datalake.default.esc (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+# three values that differ only in how they escape: the raw one, the one whose escape is valid, and a plain value
+statement ok
+INSERT INTO my_datalake.default.esc VALUES (1, 'a%20b'), (2, 'a b'), (3, 'plain');
+
+# ---- what Glue holds ---------------------------------------------------------------------------------
+# each value is registered as itself. 'a%20b' and 'a b' are two DIFFERENT values and so two partitions
+query I
+SELECT k FROM glue_partitions('my_datalake.default.esc') ORDER BY k;
+----
+a b
+a%20b
+plain
+
+# ---- what the scan emits ----------------------------------------------------------------------------
+# the value must round-trip. Before the fix row 1 came back as 'a b', colliding with row 2
+query II
+SELECT id, k FROM my_datalake.default.esc ORDER BY id;
+----
+1	a%20b
+2	a b
+3	plain
+
+# ---- what a filter prunes on -----------------------------------------------------------------------
+# the row must be findable by its real value. Before the fix this was 0
+query I
+SELECT id FROM my_datalake.default.esc WHERE k = 'a%20b';
+----
+1
+
+# and the space-separated value finds its own row, not both
+query I
+SELECT id FROM my_datalake.default.esc WHERE k = 'a b';
+----
+2
+
+# a value that exists nowhere finds nothing
+query I
+SELECT count(*) FROM my_datalake.default.esc WHERE k = 'a%2520b';
+----
+0
+
+# ---- what the statistics claim ----------------------------------------------------------------------
+# three distinct partition values, so at most three groups. This is the Mod 1 path: it builds min/max and the
+# distinct count from the same conversion, so a disagreement here would prune a partition that holds rows
+query II
+EXPLAIN SELECT k, count(*) FROM my_datalake.default.esc GROUP BY k;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~[0-9] rows.*
+
+# and every row is still returned when grouping -- the assertion that catches statistics deleting rows
+query II
+SELECT k, count(*) FROM my_datalake.default.esc GROUP BY k ORDER BY k;
+----
+a b	1
+a%20b	1
+plain	1
+
+statement ok
+DROP TABLE my_datalake.default.esc;

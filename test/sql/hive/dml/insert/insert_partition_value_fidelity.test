@@ -1,0 +1,153 @@
+# name: test/sql/hive/dml/insert/insert_partition_value_fidelity.test
+# description: What INSERT registers in Glue must be the partition's real value, and two values that differ only in
+# group: [insert]
+#              case must be two partitions. Both used to go wrong because Finalize rebuilt catalog state out of the
+#              written S3 path rather than out of the values it already had:
+#                - the directory dedup compared paths case-INsensitively, so country=US and country=us (two real
+#                  directories, S3 being case-sensitive) collapsed to one and only the first was registered;
+#                - values came from HivePartitioning::Parse, which is a path parser and deliberately does not
+#                  unescape, so Glue received 'a%20b' instead of 'a b'.
+#
+# The escaping half is invisible to our own reads -- the write escapes and the read unescapes, so they cancel and
+# SELECT looks right while the catalog is wrong. These assertions therefore go through glue_partitions(), which
+# reads the values straight out of Glue.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_external_file_cache=false;
+
+# ---------------------------------------------------------------------------
+# two values differing only in case are two partitions, not one
+# ---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_case;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_case (id INTEGER, country VARCHAR) PARTITIONED BY (country);
+
+statement ok
+INSERT INTO my_datalake.default.ins_case VALUES (1, 'US'), (2, 'us');
+
+# both rows read back. Before the fix this returned 1 row: the 'us' file was written and never registered
+query II
+SELECT id, country FROM my_datalake.default.ins_case ORDER BY id;
+----
+1	US
+2	us
+
+# ...and the cause: two registered partitions, not one. This is the assertion that pins it
+query II
+SELECT country, location FROM glue_partitions('my_datalake.default.ins_case') ORDER BY country;
+----
+US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_case/country=US
+us	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_case/country=us
+
+# appending to each of them separately keeps them apart
+statement ok
+INSERT INTO my_datalake.default.ins_case VALUES (3, 'us'), (4, 'US');
+
+query II
+SELECT country, count(*) FROM my_datalake.default.ins_case GROUP BY country ORDER BY country;
+----
+US	2
+us	2
+
+# ---------------------------------------------------------------------------
+# the value registered in Glue is the real value, not its percent-encoded path form
+# ---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_escape;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_escape (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement ok
+INSERT INTO my_datalake.default.ins_escape VALUES (1, 'a b');
+
+# Glue holds 'a b'. Before the fix it held 'a%20b'
+query I
+SELECT k FROM glue_partitions('my_datalake.default.ins_escape');
+----
+a b
+
+# the directory is still the escaped form -- that is the path, and it is correct there
+query I
+SELECT location FROM glue_partitions('my_datalake.default.ins_escape') WHERE k = 'a b';
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_escape/k=a%20b
+
+# the row reads back either way, which is exactly why this was invisible
+query II
+SELECT id, k FROM my_datalake.default.ins_escape;
+----
+1	a b
+
+# the partition is now addressable by its real value, which it was not before
+statement ok
+CALL glue_drop_partition('my_datalake.default.ins_escape', {k: 'a b'});
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.ins_escape');
+----
+0
+
+# ---------------------------------------------------------------------------
+# the rest of the escaping-relevant value set. NULL partition values are deliberately not covered here:
+# they are a separate untested area (__HIVE_DEFAULT_PARTITION__ handling) and would confound this file.
+# ---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_escape_all;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_escape_all (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement ok
+INSERT INTO my_datalake.default.ins_escape_all VALUES (1, 'a/b'), (2, 'c=d'), (3, 'e%f'), (4, 'é');
+
+# every value is registered as itself
+query I
+SELECT k FROM glue_partitions('my_datalake.default.ins_escape_all') ORDER BY k;
+----
+a/b
+c=d
+e%f
+é
+
+# four distinct partitions, and every row readable
+query II
+SELECT id, k FROM my_datalake.default.ins_escape_all ORDER BY id;
+----
+1	a/b
+2	c=d
+3	e%f
+4	é
+
+# each is addressable by its real value
+statement ok
+CALL glue_drop_partition('my_datalake.default.ins_escape_all', {k: 'a/b'});
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.ins_escape_all');
+----
+3
+
+statement ok
+DROP TABLE my_datalake.default.ins_case;
+
+statement ok
+DROP TABLE my_datalake.default.ins_escape;
+
+statement ok
+DROP TABLE my_datalake.default.ins_escape_all;

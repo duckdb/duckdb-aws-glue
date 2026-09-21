@@ -1,0 +1,95 @@
+# name: test/sql/hive/bugs/s3_cardinality_empty_and_custom_partitions.test
+# description: S3 - registering a partition that holds NO data raises the table's estimated cardinality by
+# group: [bugs]
+#              2,000 rows, and a partition at a custom location counts the same as any other.
+#
+# Follows from the law being a function of the partition COUNT: every registered partition contributes
+# 1000 x 2 whether it holds a billion rows, one row, or nothing at all. So MSCK-REPAIR-style registration,
+# or pre-registering tomorrow's partitions (routine for a date-partitioned table fed by a scheduled job),
+# inflates the estimate with no data behind it.
+#
+# Measured: three partitions -- one ordinary, one moved to a custom location, one registered and empty --
+# holding ONE row between them, estimated at ~6,000.
+#
+# The custom-location half is also a guard on the partition-statistics work. Statistics come from partition
+# VALUES, so a partition's location should be irrelevant to them; this asserts a table mixing default and
+# custom locations still reads correctly and still plans, since that mix is what the INSERT redirect work
+# (PR #8) made writable and it is the least-travelled shape in the suite.
+#
+# Correct behaviour: an empty partition contributes no rows to the estimate, and a custom location changes
+# nothing about the values.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mixloc;
+
+statement ok
+CREATE TABLE my_datalake.default.mixloc (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.mixloc SELECT i, 'd1' FROM generate_series(1,300) t(i);
+
+# one ordinary partition, 300 rows
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.mixloc')), (SELECT count(*) FROM my_datalake.default.mixloc);
+----
+1	300
+
+# register a second partition that has no data at all
+statement ok
+CALL glue_add_partition('my_datalake.default.mixloc', {dt:'d_empty'});
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.mixloc')), (SELECT count(*) FROM my_datalake.default.mixloc);
+----
+2	300
+
+# THE DEFECT: the table still holds 300 rows, so the estimate must not have grown for an empty partition.
+# Today it is ~4,000 (two partitions), where before the empty one it was ~2,000.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.mixloc;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9][0-9]{0,2} rows.*
+
+# ---- a custom location must not change the values or the read ---------------------------------------
+statement ok
+INSERT INTO my_datalake.default.mixloc SELECT i, 'd2' FROM generate_series(1,50) t(i);
+
+statement ok
+CALL glue_set_partition_location('my_datalake.default.mixloc', {dt:'d2'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/mixloc/moved_d2');
+
+# the rows written before the move stay at the old path, so d2 reads empty -- that is the documented
+# behaviour of SET LOCATION, asserted here so the statistics work does not quietly change it
+query I
+SELECT count(*) FROM my_datalake.default.mixloc;
+----
+300
+
+# the partition VALUES are unchanged by the move, which is what statistics are built from
+query T
+SELECT dt FROM glue_partitions('my_datalake.default.mixloc') ORDER BY dt;
+----
+d1
+d2
+d_empty
+
+# and a filter on the moved partition's value still resolves, returning nothing rather than erroring
+query I
+SELECT count(*) FROM my_datalake.default.mixloc WHERE dt = 'd2';
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.mixloc;
