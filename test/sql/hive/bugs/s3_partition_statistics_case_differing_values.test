@@ -1,0 +1,103 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_case_differing_values.test
+# description: S3 guard - partition-column statistics must not fold case. Two values differing only in
+# group: [bugs]
+#              case are two distinct values of a case-sensitive VARCHAR column.
+#
+# REQUIRES PR #8. Before it this fixture could not even be built: Finalize's directory dedup compared
+# the written S3 path case-INsensitively, so country=US and country=us collapsed to one registered
+# partition and the second insert's rows were written to S3 and then orphaned. The row counts below
+# would have been 1, not 2. See insert_partition_value_fidelity.test for that half.
+#
+# Why this file sits with the statistics work rather than with #8: #8's bug was a case-INsensitive map
+# keyed on a case-SENSITIVE S3 path. Building min/max over partition values is the next place to make
+# exactly that mistake one layer up -- fold case when comparing, or dedupe for a distinct count the way
+# the old map did, and the computed bounds exclude one of two real values. The optimizer then prunes a
+# partition that holds matching rows, and the query returns fewer rows than it should. Same error, and
+# this time it deletes rows at QUERY time rather than at write time, which is worse: no write to
+# inspect, no catalog state to notice, just a wrong answer.
+#
+# GREEN today (no statistics exist, so nothing can be folded). The correctness assertions are the point
+# of the file -- they must STAY green through Mod 1. Only the group-count assertion is red.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.stat_case;
+
+statement ok
+CREATE TABLE my_datalake.default.stat_case (id INTEGER, country VARCHAR) PARTITIONED BY (country);
+
+statement ok
+INSERT INTO my_datalake.default.stat_case VALUES (1, 'US'), (2, 'us');
+
+# two partitions, two rows -- the fixture itself, which only holds on #8
+query II
+SELECT id, country FROM my_datalake.default.stat_case ORDER BY id;
+----
+1	US
+2	us
+
+query I
+SELECT country FROM glue_partitions('my_datalake.default.stat_case') ORDER BY country;
+----
+US
+us
+
+# ---- the assertions that must survive Mod 1 ---------------------------------------------------------
+# an equality filter on either value finds its own row and only its own row. Case-folded bounds, or a
+# case-folded distinct set, prune one of these to empty
+query I
+SELECT id FROM my_datalake.default.stat_case WHERE country = 'US';
+----
+1
+
+query I
+SELECT id FROM my_datalake.default.stat_case WHERE country = 'us';
+----
+2
+
+# a range spanning both keeps both. VARCHAR compares by bytes, so 'US' < 'us'
+query I
+SELECT count(*) FROM my_datalake.default.stat_case WHERE country BETWEEN 'US' AND 'us';
+----
+2
+
+# each bound probed on its own: these are the two filters that break first if min/max folds case,
+# because a folded min and max are the SAME value and the range collapses
+query I
+SELECT id FROM my_datalake.default.stat_case WHERE country > 'US';
+----
+2
+
+query I
+SELECT id FROM my_datalake.default.stat_case WHERE country < 'us';
+----
+1
+
+# and a value that really is outside the set is still allowed to prune to nothing
+query I
+SELECT count(*) FROM my_datalake.default.stat_case WHERE country = 'Us';
+----
+0
+
+# ---- the estimate ----------------------------------------------------------------------------------
+# RED: two partitions, so at most two groups. Today the estimate is derived from the fabricated scan
+# cardinality with no distinct count to go on.
+query II
+EXPLAIN SELECT country, count(*) FROM my_datalake.default.stat_case GROUP BY country;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~[0-9] rows.*
+
+statement ok
+DROP TABLE my_datalake.default.stat_case;

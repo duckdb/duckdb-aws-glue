@@ -1,0 +1,91 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_value_typing.test
+# description: S3 guard - partition-column statistics must use the column's DECLARED type, not a type
+# group: [bugs]
+#              guessed from the values. GREEN today.
+#
+# Glue stores every partition value as a string, so an implementation has to decide what type to compare
+# them as when building min/max. The tempting shortcut is to look at the values -- and for a VARCHAR
+# column holding '007', '7' and '70' that shortcut is wrong in a way that deletes rows.
+#
+# Compared as VARCHAR, which is what the column IS:   '007' < '7' < '70',  and  k < '8' matches all three.
+# Compared as numbers, which the values invite:         7  =  7  <  70,    and  k < '8' matches two.
+#
+# So statistics built on a guessed numeric type would put '70' outside the range for k < '8' and the
+# optimizer would drop that row. Wrong answers, from values that are perfectly ordinary in a date-shaped
+# or zero-padded id column.
+#
+# The same file also covers a filter on the partition column combined with one on a data column, since
+# after the statistics work both have statistics and both feed the same propagation pass.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.vtype;
+
+statement ok
+CREATE TABLE my_datalake.default.vtype (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement ok
+INSERT INTO my_datalake.default.vtype VALUES (1,'007'), (2,'7'), (3,'70');
+
+query IT
+SELECT id, k FROM my_datalake.default.vtype ORDER BY id;
+----
+1	007
+2	7
+3	70
+
+# lexicographic, because the column is VARCHAR: all three sort below '8'
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k < '8';
+----
+3
+
+# '007' and '7' are DISTINCT values of a VARCHAR column, not the same number
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k = '007';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k = '7';
+----
+1
+
+# a lexicographic range that excludes '70' must still keep '007' and '7'
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k <= '7';
+----
+2
+
+# ---- a partition-column filter together with a data-column filter -----------------------------------
+# both sides have statistics after the change and both feed the same propagation pass, so the combination
+# is worth pinning rather than assuming it composes
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k < '8' AND id >= 2;
+----
+2
+
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k = '70' AND id = 3;
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k = '70' AND id = 1;
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.vtype;
