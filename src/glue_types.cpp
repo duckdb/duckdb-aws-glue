@@ -1,6 +1,7 @@
 #include "glue_types.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/decimal.hpp"
 
@@ -263,6 +264,28 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	default:
 		throw NotImplementedException("DuckDB type '%s' can not be converted to a Glue type", type.ToString());
 	}
+}
+
+Value GlueTypes::PartitionValue(ClientContext &context, const string &key, const string &str_value,
+                                const LogicalType &type) {
+	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+		return Value(type);
+	}
+	if (type.id() == LogicalTypeId::VARCHAR) {
+		// verbatim: what Glue holds IS the value
+		return Value(str_value);
+	}
+	// for a non-string column these are the spellings a NULL arrives as
+	if (StringUtil::CIEquals(str_value, "NULL") || str_value.empty()) {
+		return Value(type);
+	}
+	Value value(str_value);
+	auto cast = value.TryCastAs(context, type);
+	if (!cast) {
+		throw InvalidInputException("Unable to cast '%s' (from Glue partition column '%s') to: '%s'", str_value,
+		                            StringUtil::Upper(key), type.ToString());
+	}
+	return std::move(*cast);
 }
 
 } // namespace duckdb

@@ -187,19 +187,22 @@ string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<
 	return location;
 }
 
-Value PartitionValueToValue(ClientContext &context, const string &str_value, const LogicalType &type) {
-	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+//! The typed value of a partition key for the glue_partitions() listing. The conversion is shared with the scan, the
+//! partition pruning and the partition-column statistics (GlueTypes::PartitionValue) so that all four surfaces agree on
+//! every value they can both represent -- a second, nearly-identical converter living here is what let them drift
+//! apart.
+//!
+//! They differ in exactly one place, and the difference is the point. The shared conversion THROWS on a value the
+//! declared type cannot hold, which is right for the scan: it cannot produce a correct row. This function exists to
+//! report what Glue holds, and a table with one bad partition among thousands is when it is most needed, so the typed
+//! column reads NULL rather than the whole listing becoming unusable.
+static Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
+                                   const LogicalType &type) {
+	try {
+		return GlueTypes::PartitionValue(context, key, str_value, type);
+	} catch (std::exception &) {
 		return Value(type);
 	}
-	Value value(str_value);
-	if (type.id() == LogicalTypeId::VARCHAR) {
-		return value;
-	}
-	auto cast = value.TryCastAs(context, type);
-	if (!cast) {
-		return Value(type);
-	}
-	return value;
 }
 
 //! Bind data for the functions that change one partition and report one row when executed
@@ -262,9 +265,10 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 	while (state.offset < bind_data.partitions.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &partition = bind_data.partitions[state.offset++];
 		for (idx_t k = 0; k < keys.size(); k++) {
-			Value value = k < partition.values.size()
-			                  ? PartitionValueToValue(context, partition.values[k], bind_data.key_types[k])
-			                  : Value(bind_data.key_types[k]);
+			Value value =
+			    k < partition.values.size()
+			        ? PartitionListingValue(context, keys[k].name, partition.values[k], bind_data.key_types[k])
+			        : Value(bind_data.key_types[k]);
 			output.SetValue(k, count, value);
 		}
 		output.SetValue(keys.size(), count, Value(partition.location));
