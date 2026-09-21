@@ -1,0 +1,184 @@
+# name: test/sql/hive/catalog/transaction_cache.test
+# description: A table referenced more than once in a transaction is resolved from Glue once; the transaction sees its own mutations; the partition list is fixed for the transaction, files are not
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.tc_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.tc_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.tc_orders VALUES (1, 10.0, '2026-01-01'), (2, 20.0, '2026-01-02'), (3, 30.0, '2026-01-03');
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# one reference
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+3
+
+statement ok
+CREATE TEMP TABLE one_reference AS SELECT glue_calls('GetPartitions') AS get_partitions, glue_calls('GetTable') AS get_table;
+
+# one fetch of the table for the catalog entry and the scan together (the partitions come in parallel segments)
+query I
+SELECT get_partitions >= 1 AND get_table = 1 FROM one_reference;
+----
+true
+
+# two references in one statement: the same cost as one
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (SELECT id FROM my_datalake.default.tc_orders UNION ALL SELECT id FROM my_datalake.default.TC_ORDERS);
+----
+6
+
+query II
+SELECT glue_calls('GetPartitions') = (SELECT get_partitions FROM one_reference), glue_calls('GetTable') = (SELECT get_table FROM one_reference) FROM one_reference;
+----
+true	true
+
+# the next statement (its own transaction) resolves again
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+3
+
+query I
+SELECT glue_calls('GetPartitions') >= 1;
+----
+true
+
+# inside BEGIN ... COMMIT the second statement is served from the first
+statement ok
+BEGIN;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+3
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+3
+
+query II
+SELECT glue_calls('GetPartitions'), glue_calls('GetTable');
+----
+0	0
+
+# a partition added in the transaction is seen by the next statement of the transaction
+statement ok
+CALL glue_add_partition('my_datalake.default.tc_orders', {dt: '2026-01-04'});
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+3
+
+query I
+SELECT glue_calls('GetPartitions') >= 1;
+----
+true
+
+statement ok
+COMMIT;
+
+# inside a transaction the partition list is fixed but files are listed per scan: a row inserted through a second attach
+# into a new partition is not seen until COMMIT, a row inserted into an existing partition is seen at once
+# (metadata functions such as glue_partitions() read Glue directly and are not part of this)
+statement ok
+attach '{GLUE_CATALOG_ID}' as other_session (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+3
+
+# existing partition: seen, the directory is listed by the scan
+statement ok
+INSERT INTO other_session.default.tc_orders VALUES (5, 50.0, '2026-01-01');
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+4
+
+# new partition: not seen, the partition list is the transaction's
+statement ok
+INSERT INTO other_session.default.tc_orders VALUES (4, 40.0, '2026-01-05');
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+4
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM my_datalake.default.tc_orders;
+----
+5
+
+statement ok
+DETACH other_session;
+
+# the cache does not change what is read
+query III
+SELECT id, amount, dt FROM my_datalake.default.tc_orders ORDER BY id;
+----
+1	10.0	2026-01-01
+2	20.0	2026-01-02
+3	30.0	2026-01-03
+4	40.0	2026-01-05
+5	50.0	2026-01-01
+
+statement ok
+DROP TABLE my_datalake.default.tc_orders;

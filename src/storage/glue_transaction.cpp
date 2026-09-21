@@ -34,4 +34,19 @@ GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) 
 	return Transaction::Get(context, catalog).Cast<GlueTransaction>();
 }
 
+optional_ptr<GlueTransactionCache> GlueTransactionCache::Of(ClientContext &context, Catalog &catalog) {
+	auto transaction = Transaction::TryGet(context, catalog.GetAttached());
+	if (!transaction) {
+		return nullptr;
+	}
+	return &transaction->Cast<GlueTransaction>().cache;
+}
+
+void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) {
+	auto cache = Of(context, catalog);
+	if (cache) {
+		cache->Clear();
+	}
+}
+
 } // namespace duckdb

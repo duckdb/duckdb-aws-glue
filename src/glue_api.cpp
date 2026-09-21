@@ -14,6 +14,7 @@
 
 #include "glue_http_client.hpp"
 #include "storage/glue_catalog.hpp"
+#include "storage/glue_transaction.hpp"
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentials.h>
@@ -529,6 +530,7 @@ Aws::Vector<Aws::Glue::Model::Column> ToAwsColumns(const vector<GlueColumn> &inp
 } // namespace
 
 void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::DatabaseInput input;
@@ -555,6 +557,7 @@ void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const
 }
 
 void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::DeleteDatabaseRequest request;
@@ -570,6 +573,7 @@ void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const
 }
 
 void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	if (table.location.empty()) {
 		throw InvalidInputException("Can not create Hive table '%s.%s' without a location", table.database_name,
 		                            table.name);
@@ -726,6 +730,7 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 
 void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                  const string &table_name, const vector<GlueColumn> &columns) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
@@ -737,6 +742,7 @@ void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, c
 
 void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                const string &table_name, const string &location) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
@@ -748,6 +754,7 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 
 void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                    const string &table_name, const vector<string> &values, const string &location) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetPartitionRequest get_request;
@@ -812,6 +819,7 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 
 bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                               const string &table_name, const GluePartitionInput &partition, bool if_not_exists) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 
@@ -852,6 +860,7 @@ bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, cons
 
 bool GlueAPI::DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                               const string &table_name, const vector<string> &values) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::DeletePartitionRequest request;
@@ -873,6 +882,7 @@ bool GlueAPI::DeletePartition(ClientContext &context, GlueCatalog &catalog, cons
 void GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                               const string &table_name, const vector<string> &values,
                               const vector<string> &new_values) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 
@@ -1051,6 +1061,7 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 
 void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                     const string &table_name, const vector<GluePartitionInput> &partitions) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	if (partitions.empty()) {
 		return;
 	}
@@ -1110,6 +1121,7 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 
 void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                           const string &table_name) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::DeleteTableRequest request;

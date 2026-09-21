@@ -72,7 +72,10 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   a database when the database is dropped.
 
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
-is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported.
+is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. Within a DuckDB transaction
+(`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
+inside those partitions are listed at each scan. So a partition added outside the transaction is seen at its end, while
+a file added to an existing partition is seen at once.
 
 ## Reading without a catalog: hive_scan
 

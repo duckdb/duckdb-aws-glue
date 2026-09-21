@@ -9,6 +9,7 @@
 #include "glue_types.hpp"
 #include "storage/glue_catalog.hpp"
 #include "storage/glue_schema_entry.hpp"
+#include "storage/glue_transaction.hpp"
 
 namespace duckdb {
 
@@ -68,12 +69,20 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	if (entry != entries.end()) {
 		return entry->second.get();
 	}
-	// not cached, ask Glue for this table directly
-	GlueTableInfo table;
-	if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
+	// load via cache
+	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		GlueTableInfo table;
+		if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
+			return nullptr;
+		}
+		return make_shared_ptr<const GlueTableInfo>(std::move(table));
+	};
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	auto table = cache ? cache->GetTable(schema.database_info.name, name, load) : load();
+	if (!table) {
 		return nullptr;
 	}
-	auto result = entries.emplace(table.name, CreateTableEntry(table));
+	auto result = entries.emplace(table->name, CreateTableEntry(*table));
 	return result.first->second.get();
 }
 
