@@ -1,21 +1,21 @@
 # name: test/sql/hive/bugs/s3_plan_time_cost_invariants.test
-# description: S3 guard - planning a Glue table must stay cheap: no S3 listing at all, and exactly one
+# description: S3 guard - planning a Glue table samples ONE partition and no more, however many it has,
 # group: [bugs]
-#              GetTable + one GetPartitions. This is GREEN today and exists to stay green.
+#              and still asks Glue exactly once for the table and once for the partitions.
 #
-# Unlike its siblings this file asserts no defect. It pins the budget any cardinality fix has to live
-# inside, because the obvious way to get a real row count -- list the files and read a footer -- breaks
-# exactly this, and it would break it silently: the plan would improve while every query paid an extra
-# round trip per partition at bind time. That is the cost model S1/S2 exist to protect.
+# Unlike its siblings this file asserts no defect. It pins the plan-time budget, and the number it pins
+# changed once: it used to require ZERO listings, which is what made the estimate a constant. Glue carries
+# no statistics of any kind, so a cost that reflects the data has to come from the data, and the cheapest
+# honest source is one partition. read_parquet already pays more than this -- it globs and opens the first
+# file at bind time -- so the budget here is still below core's for the equivalent scan.
 #
-# It also records WHY today's estimate is a constant. No listing at plan time means no file is opened at
-# plan time (Glue supplies the schema, so HiveMultiFileReader::Bind never needs to look at a file), so
-# parquet's initial_file_cardinality is never populated and its min_per_file_cardinality floor of 1000
-# binds unconditionally. The zero below is the cause of the 1000 in the other tests, not a separate fact.
+# What matters is that it is ONE, not one per partition. A per-partition sample would improve the plan
+# while making bind time grow with the table, which is the failure this file exists to catch, and it would
+# do it silently. The second table below is the real guard: many more partitions, still one listing.
 #
-# Consequence worth stating for whoever implements the fix: there is no "partition already listed" to
-# extrapolate from at plan time. An earlier version of the plan assumed binding had opened a file and
-# proposed estimating files-per-partition from it. That premise is false, and this test is what shows it.
+# The old zero is also why the estimate used to be a constant, which is worth keeping on the record: with
+# no file opened at plan time, parquet's initial_file_cardinality was never populated and its
+# min_per_file_cardinality floor of 1000 bound unconditionally.
 
 require httpfs
 
@@ -48,11 +48,11 @@ CALL truncate_duckdb_logs();
 statement ok
 EXPLAIN SELECT * FROM my_datalake.default.plancost;
 
-# planning lists NOTHING in S3 -- a fix that reaches for a real file count must not change this
+# planning lists exactly one partition -- four partitions, one listing
 query I
 SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
 ----
-0
+1
 
 # and asks Glue exactly twice: the table definition, and the partition list
 query II
@@ -64,3 +64,44 @@ AWSGlue.GetTable	1
 
 statement ok
 DROP TABLE my_datalake.default.plancost;
+
+# ----------------------------------------------------------------------------------------------------
+# THE GUARD: the sample must not grow with the table. Twenty partitions is also above
+# hive_partition_listing_threshold, so the root-listing path is exercised too -- that path lists
+# recursively and would be the expensive way to get here.
+# ----------------------------------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.plancost_wide;
+
+statement ok
+CREATE TABLE my_datalake.default.plancost_wide (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.plancost_wide SELECT i, 'd' || (i % 20) FROM generate_series(1,4000) t(i);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.plancost_wide');
+----
+20
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+EXPLAIN SELECT * FROM my_datalake.default.plancost_wide;
+
+# still ONE listing, for five times the partitions
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
+----
+1
+
+query II
+SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] IS NOT NULL GROUP BY 1 ORDER BY 1;
+----
+AWSGlue.GetPartitions	1
+AWSGlue.GetTable	1
+
+statement ok
+DROP TABLE my_datalake.default.plancost_wide;

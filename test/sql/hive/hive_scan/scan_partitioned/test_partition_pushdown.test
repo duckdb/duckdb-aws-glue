@@ -223,7 +223,13 @@ statement ok
 RESET hive_partition_listing_threshold;
 
 #---------------------------------------------------------------------------
-# planning does not list anything: EXPLAIN makes no S3 list call
+# planning lists ONE partition, and only one: the sample the row-count estimate is measured from.
+# This used to be zero, which is what made the estimate a constant -- Glue carries no statistics, so a
+# cost that reflects the data has to be measured from the data. The partition sampled is one this query
+# reads, and the listing is the scan's own first listing job pulled forward, not an extra request: the
+# files stay in the list and the scan does not list them again.
+# The budget itself is pinned in bugs/s3_plan_time_cost_invariants.test, including that it stays at one
+# as the partition count grows.
 #---------------------------------------------------------------------------
 statement ok
 CALL truncate_duckdb_logs();
@@ -234,7 +240,14 @@ EXPLAIN SELECT id FROM my_datalake.default.pp_orders WHERE dt = '2016-05-15';
 query I
 SELECT count(*) FROM listed_dirs();
 ----
-0
+1
+
+# and it is one of the two partitions this query reads, not an arbitrary one. Which of the two gets listed
+# is a job-ordering detail and deliberately not pinned
+query I
+SELECT count(*) FROM listed_dirs() WHERE dir LIKE 'default/pp_orders/dt=2016-05-15/%';
+----
+1
 
 #---------------------------------------------------------------------------
 # hive_scan() prunes the same way, without the catalog

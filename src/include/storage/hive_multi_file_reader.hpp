@@ -43,6 +43,15 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
+	//! The cardinality function of the bound file format reader, wrapped the same way, and the fallback whenever no
+	//! sample could be taken
+	table_function_cardinality_t format_cardinality = nullptr;
+	//! Rows in one data file, measured once from a file the scan is going to read anyway. Glue carries no statistics of
+	//! any kind, so this is the only thing that makes the cost reflect the data. Guarded because the cardinality is
+	//! asked for more than once per plan, and the answer costs a request.
+	mutable mutex sample_lock;
+	mutable optional_idx sampled_rows_per_file;
+	mutable bool rows_sample_attempted = false;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
@@ -72,6 +81,9 @@ public:
 	FileExpandResult GetExpandResult() const override;
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
+	//! The total number of files this scan will read, extrapolating the files-per-partition of the partitions listed so
+	//! far over the partitions still to list. Exact once everything is listed, and invalid before anything is.
+	optional_idx EstimateTotalFileCount() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
 

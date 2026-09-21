@@ -3,6 +3,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
+#include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
@@ -348,6 +349,34 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 	return MultiFileCount(expanded_files.size() + remaining, FileExpansionType::NOT_ALL_FILES_KNOWN);
 }
 
+optional_idx HiveMultiFileList::EstimateTotalFileCount() const {
+	lock_guard<mutex> lck(lock);
+	if (all_files_expanded) {
+		return expanded_files.size();
+	}
+	PlanListings();
+	// how many partitions the jobs already run covered, and how many are still to come. A root job covers every
+	// partition below the table root, a partition job covers one.
+	idx_t covered = 0;
+	idx_t remaining = 0;
+	for (idx_t i = 0; i < jobs.size(); i++) {
+		auto partitions = jobs[i].root ? MaxValue<idx_t>(jobs[i].partitions.size(), 1) : 1;
+		if (i < next_job) {
+			covered += partitions;
+		} else {
+			remaining += partitions;
+		}
+	}
+	if (covered == 0) {
+		// nothing listed yet: there is no observed rate to extrapolate
+		return optional_idx();
+	}
+	// the partitions already listed set the rate for the ones that have not been
+	auto files_per_partition = static_cast<double>(expanded_files.size()) / static_cast<double>(covered);
+	auto estimate = static_cast<double>(expanded_files.size()) + files_per_partition * static_cast<double>(remaining);
+	return MaxValue<idx_t>(static_cast<idx_t>(estimate), 1);
+}
+
 vector<OpenFileInfo> HiveMultiFileList::GetDisplayFileList(optional_idx max_files) const {
 	bool expanded;
 	{
@@ -393,6 +422,136 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 	}
 	auto &function_set = catalog_entry->Cast<TableFunctionCatalogEntry>();
 	return *function_set.functions.GetFunctionByArguments(context, {LogicalType::LIST(LogicalType::VARCHAR)});
+}
+
+//===--------------------------------------------------------------------===//
+// Cardinality sample
+//===--------------------------------------------------------------------===//
+//! List ONE partition and open ONE of its files, so the scan's cost reflects its data. Glue carries no statistics of
+//! any kind (no numRows, no totalSize, and Partition.Parameters is null), so without this the estimate is a constant:
+//! a 40-row dimension table and a 200,000-row fact table cost the same, and csv/json/avro are estimated at one row.
+//!
+//! This is the trick read_parquet already plays -- it globs and binds on the first file, which is what fills in
+//! ParquetReadBindData::initial_file_cardinality. We skip that path because Glue gives us the schema, so we take the
+//! row count from a file WITHOUT letting the file define the schema: the columns, their order and their types stay
+//! Glue's. The reader is asked for one file's worth of rows through the interface, which is the only thing that can
+//! read a parquet footer.
+//! Rows in one file of a line-oriented format, measured rather than assumed: read a bounded prefix, count its lines,
+//! and scale the average line length over the file. csv and newline-delimited json are one row per line. There is no
+//! footer to ask, so this is the only way to get a number that responds to the data at all -- and a measured average
+//! beats a constant bytes-per-row, which cannot hold across two tables with different columns.
+static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const OpenFileInfo &file, bool header) {
+	static constexpr idx_t SAMPLE_BYTES = 65536;
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto handle = fs.OpenFile(file.path, FileFlags::FILE_FLAGS_READ);
+	if (!handle) {
+		return optional_idx();
+	}
+	auto file_size = static_cast<idx_t>(handle->GetFileSize());
+	if (file_size == 0) {
+		return optional_idx();
+	}
+	auto sample_size = MinValue<idx_t>(file_size, SAMPLE_BYTES);
+	string buffer(sample_size, '\0');
+	handle->Read(reinterpret_cast<void *>(&buffer[0]), sample_size, 0);
+	idx_t lines = 0;
+	for (idx_t i = 0; i < sample_size; i++) {
+		if (buffer[i] == '\n') {
+			lines++;
+		}
+	}
+	if (lines == 0) {
+		return optional_idx();
+	}
+	auto bytes_per_line = static_cast<double>(sample_size) / static_cast<double>(lines);
+	auto rows = static_cast<idx_t>(static_cast<double>(file_size) / bytes_per_line);
+	if (header && rows > 1) {
+		rows--;
+	}
+	return MaxValue<idx_t>(rows, 1);
+}
+
+//! Rows in one data file of the scan, measured once and remembered. The file is taken from the scan's own file list,
+//! which means the listing it costs is the listing the scan was going to do anyway -- only earlier.
+static optional_idx SampleRowsPerFile(ClientContext &context, const MultiFileBindData &bind_data,
+                                      const HiveMultiFileList &files, const HiveScanInfo &scan_info) {
+	lock_guard<mutex> lck(scan_info.sample_lock);
+	if (scan_info.rows_sample_attempted) {
+		return scan_info.sampled_rows_per_file;
+	}
+	scan_info.rows_sample_attempted = true;
+	// expands the first listing job only, and the files stay in the list for the scan to read
+	auto file = files.GetFirstFile();
+	if (file.path.empty()) {
+		return optional_idx();
+	}
+	switch (scan_info.file_format) {
+	case HiveFileFormat::PARQUET: {
+		// the row count is in the footer, and the format's own reader is the only thing that can read it. Parquet is
+		// bound with no named parameters, so a reader built from default options reads the file as the scan will
+		auto options = bind_data.interface->InitializeOptions(context, nullptr);
+		// a throwaway copy of the bind data: Initialize and FinalizeBindData write the opened file's numbers into it,
+		// and the real bind data must not be rewritten behind the running scan
+		auto probe = bind_data.Copy();
+		auto &probe_data = probe->Cast<MultiFileBindData>();
+		auto reader = bind_data.multi_file_reader->CreateReader(context, file, *options, bind_data.file_options,
+		                                                        *probe_data.interface);
+		if (!reader) {
+			return optional_idx();
+		}
+		probe_data.Initialize(std::move(reader));
+		probe_data.interface->FinalizeBindData(probe_data);
+		// file_count 1 makes the format report that one file's rows rather than an extrapolation over the list
+		auto sampled = probe_data.interface->GetCardinality(context, probe_data, 1);
+		if (sampled && sampled->has_estimated_cardinality) {
+			scan_info.sampled_rows_per_file = sampled->estimated_cardinality;
+		}
+		break;
+	}
+	case HiveFileFormat::CSV:
+	case HiveFileFormat::JSON:
+		// no reader is built for these: they are bound with a dialect and an explicit column list that fresh options
+		// would not reproduce. Counting lines needs none of it
+		scan_info.sampled_rows_per_file = SampleLineOrientedRowsPerFile(context, file, scan_info.header);
+		break;
+	case HiveFileFormat::AVRO:
+		// binary, with its own block structure: no bounded way to count rows without an avro reader
+		break;
+	}
+	return scan_info.sampled_rows_per_file;
+}
+
+//! Cardinality of a Hive scan, from one sampled file and the files the scan will read. Replaces a constant: without it
+//! a 40-row dimension table and a 200,000-row fact table cost the same, and csv/json/avro are estimated at one row.
+static unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
+	auto hive_list = dynamic_cast<const HiveMultiFileList *>(bind_data.file_list.get());
+	if (!hive_list) {
+		return nullptr;
+	}
+	auto &scan_info = hive_list->ScanInfo();
+	auto fallback = [&]() -> unique_ptr<NodeStatistics> {
+		return scan_info.format_cardinality ? scan_info.format_cardinality(context, bind_data_p) : nullptr;
+	};
+	optional_idx rows_per_file;
+	try {
+		rows_per_file = SampleRowsPerFile(context, bind_data, *hive_list, scan_info);
+	} catch (std::exception &) {
+		// costing must not fail a query: a file that cannot be listed or opened is the scan's problem to report
+		return fallback();
+	}
+	if (!rows_per_file.IsValid()) {
+		return fallback();
+	}
+	// the file count of the partitions this scan reads -- pruning has already happened by the time the cardinality is
+	// asked for, so a filtered scan is costed on what it actually reads
+	auto file_count = hive_list->EstimateTotalFileCount();
+	if (!file_count.IsValid()) {
+		return fallback();
+	}
+	// An estimate, never a max: max_cardinality is a bound the optimizer may rely on, and one file says nothing about
+	// the size of the rest.
+	return make_uniq<NodeStatistics>(rows_per_file.GetIndex() * file_count.GetIndex());
 }
 
 //===--------------------------------------------------------------------===//
@@ -509,6 +668,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	// partition columns are answered from the partition values; the format keeps every other column
 	scan_info->format_statistics = scan_function.statistics_extended;
 	scan_function.statistics_extended = HivePartitionStatistics;
+	// and the row count comes from a sampled file rather than the format's constant
+	scan_info->format_cardinality = scan_function.cardinality;
+	scan_function.cardinality = HiveScanCardinality;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
