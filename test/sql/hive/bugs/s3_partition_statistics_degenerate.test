@@ -1,0 +1,92 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_degenerate.test
+# description: S3 guard - the degenerate partition sets that partition-column statistics have to survive:
+# group: [bugs]
+#              no partitions at all, exactly one, and a filter that prunes every one of them.
+#
+# GREEN today, because with no statistics there is nothing to compute. Each of these is a plausible way to
+# crash or mis-answer an implementation that computes min/max and a distinct count over the pruned
+# partition list:
+#   - zero partitions: min/max over an empty set has no answer; the code must decline rather than read
+#     partitions[0] or divide by the count. A partitioned table with no partitions is ordinary -- it is
+#     every table between CREATE and the first INSERT, and it is what an unrepaired table looks like.
+#   - one partition: min == max and distinct count 1. Correct but degenerate, and the case where an
+#     off-by-one in a range or a loop bound shows up.
+#   - everything pruned: the pruned set is empty even though the table has partitions, so the empty-set
+#     path is reachable on a populated table too, via a filter rather than via an empty catalog.
+#
+# Correct behaviour: no crash, no wrong answer, and an estimate that is not absurd.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# ---- zero partitions -------------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.deg_none;
+
+statement ok
+CREATE TABLE my_datalake.default.deg_none (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.deg_none');
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.deg_none;
+----
+0
+
+statement ok
+EXPLAIN SELECT * FROM my_datalake.default.deg_none;
+
+statement ok
+EXPLAIN SELECT dt, count(*) FROM my_datalake.default.deg_none GROUP BY dt;
+
+# ---- exactly one partition -------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.deg_one;
+
+statement ok
+CREATE TABLE my_datalake.default.deg_one (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.deg_one SELECT i, 'only' FROM generate_series(1,500) t(i);
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.deg_one')), (SELECT count(*) FROM my_datalake.default.deg_one);
+----
+1	500
+
+# min == max on the partition column: the value is still findable
+query I
+SELECT count(*) FROM my_datalake.default.deg_one WHERE dt = 'only';
+----
+500
+
+statement ok
+EXPLAIN SELECT dt, count(*) FROM my_datalake.default.deg_one GROUP BY dt;
+
+# ---- every partition pruned away -------------------------------------------------------------------
+query I
+SELECT count(*) FROM my_datalake.default.deg_one WHERE dt = 'no-such-partition';
+----
+0
+
+statement ok
+EXPLAIN SELECT * FROM my_datalake.default.deg_one WHERE dt = 'no-such-partition';
+
+statement ok
+DROP TABLE my_datalake.default.deg_none;
+
+statement ok
+DROP TABLE my_datalake.default.deg_one;

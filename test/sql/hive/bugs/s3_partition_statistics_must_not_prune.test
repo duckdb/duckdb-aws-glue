@@ -1,0 +1,87 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_must_not_prune.test
+# description: S3 guard - partition-column statistics must never prune a row that exists. GREEN today,
+# group: [bugs]
+#              and the most important file in this set to keep green.
+#
+# Today there are no partition-column statistics, so nothing prunes on them: queries are slower than they
+# need to be but they are CORRECT. Supplying min/max changes that. StatisticsPropagator uses column
+# statistics to decide FILTER_ALWAYS_FALSE and then calls ReplaceWithEmptyResult
+# (propagate_get.cpp), so a filter the statistics say cannot match is answered with an empty
+# result WITHOUT reading anything. If our min/max disagrees with the values the scan actually emits, the
+# query returns ZERO ROWS instead of data.
+#
+# So "exact statistics" is only exact if the values we read equal the values the scan produces, and there
+# are at least two places where they do not:
+#
+#   - Percent-encoded catalog values. Glue may hold 'a%20b' where the data column reads 'a b' -- that is
+#     how every catalog written before the encoding fix looks, and nothing repairs them. Statistics built
+#     from the Glue value would put 'a b' outside the range, so WHERE k = 'a b' would be pruned to nothing.
+#   - The NULL sentinel. A NULL partition is stored with the DIRECTORY dt=__HIVE_DEFAULT_PARTITION__ while
+#     the scan emits NULL. Treating the sentinel as an ordinary string leaves has_null false, and the
+#     optimizer can then prove WHERE dt IS NULL impossible and answer it with an empty result.
+#
+# Both turn an optimisation into a wrong-results bug, which is a strictly worse failure than the bad plans
+# these statistics are meant to fix. This file asserts the rows come back. It must pass before and after.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.noprune;
+
+statement ok
+CREATE TABLE my_datalake.default.noprune (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+# a value needing escaping in the path, a plain one, and a NULL
+statement ok
+INSERT INTO my_datalake.default.noprune VALUES (1, 'a b'), (2, 'plain'), (3, NULL);
+
+query IT
+SELECT id, k FROM my_datalake.default.noprune ORDER BY id;
+----
+1	a b
+2	plain
+3	NULL
+
+# equality on the escaping-relevant value must find its row, however the catalog spells it
+query I
+SELECT id FROM my_datalake.default.noprune WHERE k = 'a b';
+----
+1
+
+# IS NULL must find the __HIVE_DEFAULT_PARTITION__ row
+query I
+SELECT id FROM my_datalake.default.noprune WHERE k IS NULL;
+----
+3
+
+# IS NOT NULL must not lose the others
+query I
+SELECT count(*) FROM my_datalake.default.noprune WHERE k IS NOT NULL;
+----
+2
+
+# a range that spans the real values must keep them all
+query I
+SELECT count(*) FROM my_datalake.default.noprune WHERE k >= 'a' AND k <= 'z';
+----
+2
+
+# and a filter that genuinely matches nothing is still allowed to return nothing
+query I
+SELECT count(*) FROM my_datalake.default.noprune WHERE k = 'definitely-not-there';
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.noprune;
