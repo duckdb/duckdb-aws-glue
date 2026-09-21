@@ -83,5 +83,32 @@ SELECT count(*) FROM my_datalake.default.noprune WHERE k = 'definitely-not-there
 ----
 0
 
+# more operator shapes, because min/max reasoning is where each of these is decided differently and a
+# wrong range silently turns any of them into an empty result
+query I
+SELECT count(*) FROM my_datalake.default.noprune WHERE k IN ('a b', 'plain');
+----
+2
+
+query I
+SELECT count(*) FROM my_datalake.default.noprune WHERE k NOT IN ('plain');
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.noprune WHERE k <> 'plain';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.noprune WHERE k LIKE 'a%';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.noprune WHERE k BETWEEN 'a' AND 'b';
+----
+1
+
 statement ok
 DROP TABLE my_datalake.default.noprune;
