@@ -1,0 +1,66 @@
+# name: test/sql/hive/bugs/s3_cardinality_unpartitioned.test
+# description: S3 - an UNPARTITIONED Glue table is estimated at a constant 2,000 rows whatever it holds.
+# group: [bugs]
+#
+# The sibling tests cover partitioned tables. This one exists because the defect is not specific to
+# partitioning, which an earlier framing of it assumed. One unpartitioned table is one root listing job,
+# so the same law gives 1000 x 1 x 2 = 2,000 for every unpartitioned table in existence:
+#
+#     estimate = 1000 x listing_jobs x 2
+#
+# Measured: 4,000 rows in one file estimates 2,000; 100,000 rows in one file also estimates 2,000.
+#
+# Note both cases have a SINGLE file, so parquet's "if (file_count == 1) use the file's own cardinality"
+# shortcut would give the exact answer -- but it never fires, because the file count reaching it is 2
+# (one unlisted job, doubled) rather than 1. The estimate is wrong by a factor that grows without bound
+# as the table grows, on the simplest possible table.
+#
+# Correct behaviour: the estimate responds to the size of the table.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.up_small;
+
+statement ok
+CREATE TABLE my_datalake.default.up_small (id INTEGER, v VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.up_small SELECT i, 'x' FROM generate_series(1,4000) t(i);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.up_big;
+
+statement ok
+CREATE TABLE my_datalake.default.up_big (id INTEGER, v VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.up_big SELECT i, 'x' FROM generate_series(1,100000) t(i);
+
+query II
+SELECT (SELECT count(*) FROM my_datalake.default.up_small), (SELECT count(*) FROM my_datalake.default.up_big);
+----
+4000	100000
+
+# a 100,000-row table must not be estimated in the thousands. Today: ~2,000.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.up_big;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~[0-9]{2,3},[0-9]{3} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.up_small;
+
+statement ok
+DROP TABLE my_datalake.default.up_big;

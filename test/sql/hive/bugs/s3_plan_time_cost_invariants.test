@@ -1,0 +1,66 @@
+# name: test/sql/hive/bugs/s3_plan_time_cost_invariants.test
+# description: S3 guard - planning a Glue table must stay cheap: no S3 listing at all, and exactly one
+# group: [bugs]
+#              GetTable + one GetPartitions. This is GREEN today and exists to stay green.
+#
+# Unlike its siblings this file asserts no defect. It pins the budget any cardinality fix has to live
+# inside, because the obvious way to get a real row count -- list the files and read a footer -- breaks
+# exactly this, and it would break it silently: the plan would improve while every query paid an extra
+# round trip per partition at bind time. That is the cost model S1/S2 exist to protect.
+#
+# It also records WHY today's estimate is a constant. No listing at plan time means no file is opened at
+# plan time (Glue supplies the schema, so HiveMultiFileReader::Bind never needs to look at a file), so
+# parquet's initial_file_cardinality is never populated and its min_per_file_cardinality floor of 1000
+# binds unconditionally. The zero below is the cause of the 1000 in the other tests, not a separate fact.
+#
+# Consequence worth stating for whoever implements the fix: there is no "partition already listed" to
+# extrapolate from at plan time. An earlier version of the plan assumed binding had opened a file and
+# proposed estimating files-per-partition from it. That premise is false, and this test is what shows it.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.plancost;
+
+statement ok
+CREATE TABLE my_datalake.default.plancost (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.plancost SELECT i, 'd' || (i % 4) FROM generate_series(1,4000) t(i);
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+EXPLAIN SELECT * FROM my_datalake.default.plancost;
+
+# planning lists NOTHING in S3 -- a fix that reaches for a real file count must not change this
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
+----
+0
+
+# and asks Glue exactly twice: the table definition, and the partition list
+query II
+SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] IS NOT NULL GROUP BY 1 ORDER BY 1;
+----
+AWSGlue.GetPartitions	1
+AWSGlue.GetTable	1
+
+statement ok
+DROP TABLE my_datalake.default.plancost;

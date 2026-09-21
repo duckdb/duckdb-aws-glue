@@ -87,14 +87,14 @@ SELECT
 query II
 EXPLAIN SELECT * FROM my_datalake.default.card_large;
 ----
-physical_plan	<REGEX>:.*~[0-9]{6,} rows.*
+physical_plan	<REGEX>:.*Read Parquet.*~[0-9]{6,} rows.*
 
 # And the estimate must distinguish a 200,000-row table from a 4,000-row one with the same partition
 # count. Today both are ~8,000, so this fails for the small table too once the large one is right.
 query II
 EXPLAIN SELECT * FROM my_datalake.default.card_small;
 ----
-physical_plan	<REGEX>:.*~[1-9],?[0-9]{0,3} rows.*
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9],?[0-9]{0,3} rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # The same insensitivity from the other direction: partition count drives the estimate even when the
@@ -120,7 +120,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.card_wide')), 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.card_wide;
 ----
-physical_plan	<REGEX>:.*~[1-9],?[0-9]{0,3} rows.*
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9],?[0-9]{0,3} rows.*
 
 statement ok
 DROP TABLE my_datalake.default.card_small;
