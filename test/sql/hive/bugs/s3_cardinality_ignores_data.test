@@ -1,0 +1,132 @@
+# name: test/sql/hive/bugs/s3_cardinality_ignores_data.test
+# description: S3 - the cardinality estimate for a partitioned Glue table is a function of the PARTITION COUNT
+# group: [bugs]
+#              alone. It ignores the row count, the number of files per partition, and the rows per file.
+#
+# Measured law (2026-09-21), confirmed over actual row counts from 100 to 200,000:
+#
+#     estimate = 1000 x partition_count x 2
+#
+# Both factors are fabricated:
+#   - 1000 is DuckDB's min_per_file_cardinality floor (parquet_multi_file_info.cpp:773-777), applied
+#     because our path never supplies a real per-file cardinality;
+#   - partition_count x 2 is OUR guess: HiveMultiFileList::GetFileCount counts one file per not-yet-listed
+#     partition (hive_multi_file_reader.cpp:333-347) and core then doubles it for NOT_ALL_FILES_KNOWN
+#     (multi_file_function.hpp:1205-1211).
+#   The two are multiplied in ParquetMultiFileInfo::GetCardinality (:778).
+#
+# So the estimate can be wrong in EITHER direction by ANY factor, because it never looks at the data.
+# That is worse than having no estimate: LogicalGet::EstimateCardinality would fall back to something
+# obviously useless, whereas this is a confident number that drives join order and build-side choice.
+#
+# Why no existing test sees it: every partitioned table in the suite has ONE file per partition and few
+# rows, where 1000 x parts x 2 happens to land near the truth. The defect needs many files per partition.
+#
+# Correct behaviour: the estimate responds to the data. These assertions are written to be robust --
+# they compare estimates against each other rather than pinning exact numbers, so they express the
+# defect (insensitivity) rather than today's arithmetic.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# ----------------------------------------------------------------------------------------------------
+# Two tables, SAME partition count (4), row counts differing by 50x.
+# small: 4 partitions x 1 file  x 1,000 rows/file  =   4,000 rows
+# large: 4 partitions x 10 files x 5,000 rows/file = 200,000 rows
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.card_small;
+
+statement ok
+CREATE TABLE my_datalake.default.card_small (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.card_small SELECT i, 'd' || (i % 4) FROM generate_series(1,4000) t(i);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.card_large;
+
+statement ok
+CREATE TABLE my_datalake.default.card_large (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+# ten inserts -> ten files per partition, 5,000 rows each
+loop i 0 10
+
+statement ok
+INSERT INTO my_datalake.default.card_large SELECT i, 'd' || (i % 4) FROM generate_series(1,20000) t(i);
+
+endloop
+
+# the fixture is the shape the defect needs: same partitions, 50x the rows, 10x the files per partition
+query IIII
+SELECT
+    (SELECT count(*) FROM glue_partitions('my_datalake.default.card_small')),
+    (SELECT count(*) FROM glue_partitions('my_datalake.default.card_large')),
+    (SELECT count(*) FROM my_datalake.default.card_small),
+    (SELECT count(*) FROM my_datalake.default.card_large);
+----
+4	4	4000	200000
+
+# ----------------------------------------------------------------------------------------------------
+# THE DEFECT: 50x the data, identical estimate.
+# Today both plans say ~8,000 rows (= 1000 x 4 x 2). The large table is under-estimated 25x.
+# ----------------------------------------------------------------------------------------------------
+
+# A 200,000-row table must not be estimated at five thousand-ish rows. Today it is.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.card_large;
+----
+physical_plan	<REGEX>:.*~[0-9]{6,} rows.*
+
+# And the estimate must distinguish a 200,000-row table from a 4,000-row one with the same partition
+# count. Today both are ~8,000, so this fails for the small table too once the large one is right.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.card_small;
+----
+physical_plan	<REGEX>:.*~[1-9],?[0-9]{0,3} rows.*
+
+# ----------------------------------------------------------------------------------------------------
+# The same insensitivity from the other direction: partition count drives the estimate even when the
+# data does not change. 20 partitions over the SAME 4,000 rows is estimated 5x higher than 4 partitions
+# over those rows (40,000 vs 8,000) -- a table whose true cardinality did not move at all.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.card_wide;
+
+statement ok
+CREATE TABLE my_datalake.default.card_wide (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.card_wide SELECT i, 'd' || (i % 20) FROM generate_series(1,4000) t(i);
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.card_wide')), (SELECT count(*) FROM my_datalake.default.card_wide);
+----
+20	4000
+
+# 4,000 rows spread over 20 partitions is still 4,000 rows. Today: ~40,000.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.card_wide;
+----
+physical_plan	<REGEX>:.*~[1-9],?[0-9]{0,3} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.card_small;
+
+statement ok
+DROP TABLE my_datalake.default.card_large;
+
+statement ok
+DROP TABLE my_datalake.default.card_wide;

@@ -1,0 +1,64 @@
+# name: test/sql/hive/bugs/s3_no_partition_column_statistics.test
+# description: S3 - a partitioned Glue table exposes NO statistics for its partition columns, so the
+# group: [bugs]
+#              optimizer cannot use values we already hold in memory.
+#
+# DuckDB declines these columns twice over, both deliberately, in MultiFileScanStatsExtended:
+#   - :1084-1090 returns nullptr for any hive-partitioning column, because the statistics stored in the
+#     data file describe the column the partition value OVERRIDES, and may even have a different type;
+#   - :1092-1099 returns nullptr for MULTIPLE_FILES without union_by_name, "we do not want to parse the
+#     file metadata for the sole purpose of getting column statistics".
+# A partitioned table is always multi-file, so in practice partition columns have no statistics at all.
+#
+# But the extension already fetched every partition's values into HiveScanInfo::partitions. From the
+# PRUNED partition set we can compute EXACT min/max, EXACT distinct count and has-null for a partition
+# column -- no file I/O, no Glue call, and exact rather than estimated, because the partition values ARE
+# the complete set of values of that column.
+#
+# Observable used here: the estimated group count of a GROUP BY on the partition column. With an exact
+# distinct count the optimizer should estimate ~4 groups for 4 partitions. Today it estimates ~5,056 --
+# derived from the (also wrong, see s3_cardinality_ignores_data.test) scan cardinality with no distinct
+# count to go on. A hash aggregate sized for 5,056 groups instead of 4 is the visible cost.
+#
+# Rejected observable, recorded so it is not tried again: a filter on a value outside the partition set
+# (WHERE dt = 'zzzz') is NOT a discriminator -- partition pruning already removes every partition, so
+# the plan reads ~0 rows today and the assertion would pass without any statistics existing.
+#
+# Correct behaviour: the group estimate reflects the real number of distinct partition values.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pcol;
+
+statement ok
+CREATE TABLE my_datalake.default.pcol (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.pcol SELECT i, 'd' || (i % 4) FROM generate_series(1,4000) t(i);
+
+# exactly four distinct partition values, and Glue knows all four
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.pcol')), (SELECT count(DISTINCT dt) FROM my_datalake.default.pcol);
+----
+4	4
+
+# THE DEFECT: four partitions, so at most four groups. Today the plan estimates ~5,056.
+query II
+EXPLAIN SELECT dt, count(*) FROM my_datalake.default.pcol GROUP BY dt;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~[0-9]{1,2} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.pcol;
