@@ -51,8 +51,12 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 	auto column_type = LogicalType::LIST(LogicalType::STRUCT(
 	    {{"name", LogicalType::VARCHAR}, {"type", LogicalType::VARCHAR}, {"comment", LogicalType::VARCHAR}}));
 	auto map_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	names = {"database_name", "table_name",     "table_type", "glue_table_type",  "location", "serde_library",
-	         "columns",       "partition_keys", "parameters", "serde_parameters", "response"};
+	// StorageDescriptor.SortColumns, with the direction resolved. Glue's SortOrder integer is in the 'response' column.
+	auto sort_column_type =
+	    LogicalType::LIST(LogicalType::STRUCT({{"column", LogicalType::VARCHAR}, {"direction", LogicalType::VARCHAR}}));
+	names = {"database_name", "table_name", "table_type",       "glue_table_type", "location",
+	         "serde_library", "columns",    "partition_keys",   "bucket_columns",  "number_of_buckets",
+	         "sort_columns",  "parameters", "serde_parameters", "response"};
 	return_types = {LogicalType::VARCHAR,
 	                LogicalType::VARCHAR,
 	                LogicalType::VARCHAR,
@@ -61,6 +65,9 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 	                LogicalType::VARCHAR,
 	                column_type,
 	                column_type,
+	                LogicalType::LIST(LogicalType::VARCHAR),
+	                LogicalType::INTEGER,
+	                sort_column_type,
 	                map_type,
 	                map_type,
 	                LogicalType::VARIANT()};
@@ -78,6 +85,23 @@ Value ColumnsToValue(const vector<GlueColumn> &columns, const LogicalType &list_
 		    Value::STRUCT({{"name", Value(column.name)},
 		                   {"type", Value(column.type)},
 		                   {"comment", column.comment.empty() ? Value(LogicalType::VARCHAR) : Value(column.comment)}}));
+	}
+	return Value::LIST(ListType::GetChildType(list_type), std::move(entries));
+}
+
+Value StringsToValue(const vector<string> &strings) {
+	vector<Value> entries;
+	for (auto &entry : strings) {
+		entries.emplace_back(entry);
+	}
+	return Value::LIST(LogicalType::VARCHAR, std::move(entries));
+}
+
+Value SortColumnsToValue(const vector<GlueColumn> &sort_columns, const LogicalType &list_type) {
+	vector<Value> entries;
+	for (auto &sort_column : sort_columns) {
+		entries.push_back(Value::STRUCT(
+		    {{"column", Value(sort_column.name)}, {"direction", Value(sort_column.DescribeSortOrder())}}));
 	}
 	return Value::LIST(ListType::GetChildType(list_type), std::move(entries));
 }
@@ -109,13 +133,16 @@ void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, 
 	output.SetValue(5, 0, Value(table.serde_library));
 	output.SetValue(6, 0, ColumnsToValue(table.columns, output.data[6].GetType()));
 	output.SetValue(7, 0, ColumnsToValue(table.partition_keys, output.data[7].GetType()));
-	output.SetValue(8, 0, MapToValue(table.parameters));
-	output.SetValue(9, 0, MapToValue(table.serde_parameters));
+	output.SetValue(8, 0, StringsToValue(table.bucket_columns));
+	output.SetValue(9, 0, Value::INTEGER(table.number_of_buckets));
+	output.SetValue(10, 0, SortColumnsToValue(table.sort_columns, output.data[10].GetType()));
+	output.SetValue(11, 0, MapToValue(table.parameters));
+	output.SetValue(12, 0, MapToValue(table.serde_parameters));
 
 	// The complete Glue Table object: JSON as serialized by the AWS SDK, cast to VARIANT
 	Vector json(LogicalType::JSON(), 1);
 	json.SetValue(0, Value(bind_data.raw_json));
-	VectorOperations::Cast(context, json, output.data[10], 1);
+	VectorOperations::Cast(context, json, output.data[13], 1);
 
 	output.SetCardinality(1);
 }

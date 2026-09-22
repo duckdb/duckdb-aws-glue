@@ -1,0 +1,211 @@
+# name: test/sql/hive/dml/select_bucketed_table.test
+# description: reading a bucketed (clustered) Glue table is unaffected by the bucketing, however it is declared
+# group: [dml]
+
+# A reader that ignores bucketing returns exactly the right rows, and this file verifies that.
+# All four tables below share one location. They come from scripts/docker-compose.yml because the
+# extension cannot create a bucketed table. Reads are not efficient.
+#
+# Scope every count by an id range: the fixture locations are fixed, not {TEST_DIR}-scoped, so what a run writes
+# there outlives it and an absolute count passes once and then fails on every re-run.
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# Plant the data. COPY TO writes S3 directly, so this is not a catalog write and the write guard is not involved.
+# One file per id%4 over ids 0-9, so the layout is genuinely consistent with 'bucketed by id into 4 buckets' -- without
+# that the assertions below would be vacuous. Fixed file names, so a re-run overwrites rather than accumulates.
+statement ok
+COPY (SELECT 0 AS id, 0.0 AS amount, 'r0' AS region UNION ALL SELECT 4, 40.0, 'r0' UNION ALL SELECT 8, 80.0, 'r0')
+TO '{DEFAULT_S3_LOCATION}/fixture/bucket_read/000000_0' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 1 AS id, 10.0 AS amount, 'r1' AS region UNION ALL SELECT 5, 50.0, 'r1' UNION ALL SELECT 9, 90.0, 'r1')
+TO '{DEFAULT_S3_LOCATION}/fixture/bucket_read/000001_0' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 2 AS id, 20.0 AS amount, 'r0' AS region UNION ALL SELECT 6, 60.0, 'r0')
+TO '{DEFAULT_S3_LOCATION}/fixture/bucket_read/000002_0' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 3 AS id, 30.0 AS amount, 'r1' AS region UNION ALL SELECT 7, 70.0, 'r1')
+TO '{DEFAULT_S3_LOCATION}/fixture/bucket_read/000003_0' (FORMAT parquet);
+
+# ===========================================================================
+# the bucketed tables read identically to the unbucketed one over the same bytes
+# ===========================================================================
+# This is the assertion that matters. EXCEPT ALL in both directions: a bucketed table must return no row the
+# unbucketed one does not, and must not be missing one either. A count alone would not catch a wrong value.
+#
+# These compare whole tables and are stable across re-runs without scoping, because both sides read the same location
+# and therefore see the same files whatever is in it.
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.fixture_bucket_hashed)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.fixture_bucket_plain)
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.fixture_bucket_plain)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.fixture_bucket_hashed)
+);
+----
+0
+
+# two bucket columns, a bucket count that does not match the file count, and both sort directions
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.fixture_bucket_sorted)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.fixture_bucket_plain)
+);
+----
+0
+
+# NumberOfBuckets 0 with bucket columns present: Hive's 'unbucketed' count on a bucketed table
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.fixture_bucket_zerocount)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.fixture_bucket_plain)
+);
+----
+0
+
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region)
+FROM my_datalake.default.fixture_bucket_hashed WHERE id < 100;
+----
+10	45	450.0	2
+
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region)
+FROM my_datalake.default.fixture_bucket_plain WHERE id < 100;
+----
+10	45	450.0	2
+
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region)
+FROM my_datalake.default.fixture_bucket_sorted WHERE id < 100;
+----
+10	45	450.0	2
+
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region)
+FROM my_datalake.default.fixture_bucket_zerocount WHERE id < 100;
+----
+10	45	450.0	2
+
+# ===========================================================================
+# a predicate on the bucket column returns the right rows
+# ===========================================================================
+# id=7 lives in 000003_0 and nowhere else, so this is the query a bucket-aware engine would answer from one file.
+# We answer it from all four, which is slower but not wrong -- and 'not wrong' is what this asserts.
+
+query II
+SELECT id, amount FROM my_datalake.default.fixture_bucket_hashed WHERE id = 7;
+----
+7	70.0
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucket_hashed WHERE id IN (0, 1, 2, 3);
+----
+4
+
+# a value in no bucket
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucket_hashed WHERE id = 999;
+----
+0
+
+# a predicate on the second bucket column of the two-column table
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucket_sorted WHERE region = 'r1' AND id < 100;
+----
+5
+
+# ===========================================================================
+# the bucketing claim being FALSE does not affect the read
+# ===========================================================================
+# fixture_bucket_hashed claims 4 buckets on id. Write a fifth file whose rows do not follow that layout at all: it
+# holds ids from every residue class. A reader that trusted the claim could mis-place or skip these rows; ours reads
+# them because it does not consult the claim.
+
+statement ok
+COPY (SELECT 100 AS id, 1000.0 AS amount, 'r0' AS region UNION ALL SELECT 101, 1010.0, 'r1'
+      UNION ALL SELECT 102, 1020.0, 'r0' UNION ALL SELECT 103, 1030.0, 'r1')
+TO '{DEFAULT_S3_LOCATION}/fixture/bucket_read/violates_the_claim.parquet' (FORMAT parquet);
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.fixture_bucket_hashed WHERE id >= 100;
+----
+4	406
+
+# every row of the offending file is reachable by an equality on the bucket column
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucket_hashed WHERE id = 102;
+----
+1
+
+# and the unbucketed control still agrees with the bucketed table
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.fixture_bucket_hashed)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.fixture_bucket_plain)
+);
+----
+0
+
+# the rows that DO follow the layout are unaffected by the file that does not
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region)
+FROM my_datalake.default.fixture_bucket_hashed WHERE id < 100;
+----
+10	45	450.0	2
+
+# ===========================================================================
+# the bucketed tables are describable and listable like any other
+# ===========================================================================
+# by name rather than by count, so adding a fixture table later does not break this
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND name IN
+  ('fixture_bucketed', 'fixture_bucket_plain', 'fixture_bucket_hashed', 'fixture_bucket_sorted',
+   'fixture_bucket_zerocount');
+----
+5
+
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'fixture_bucket_sorted' ORDER BY column_index;
+----
+id	INTEGER
+amount	DOUBLE
+region	VARCHAR
+
+# a join between two bucketed tables works -- this is the shape a bucket map join would optimise in a distributed
+# engine (bucketing-doc.md section 5). Here it is an ordinary hash join, and it is correct.
+query II
+SELECT count(*), sum(h.amount) FROM my_datalake.default.fixture_bucket_hashed h
+JOIN my_datalake.default.fixture_bucket_sorted s USING (id)
+WHERE h.id < 100;
+----
+10	450.0
