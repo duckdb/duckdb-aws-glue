@@ -9,6 +9,23 @@ namespace duckdb {
 //! the complete Glue Table object as VARIANT.
 TableFunction GetGlueGetTableResponseFunction();
 
+//! glue_get_database_response('<catalog>.<database>'): the Glue GetDatabase response for a database (a DuckDB
+//! schema) of an attached Glue catalog. One row with comment (Glue Description), location (LocationUri) and
+//! parameters (Athena's DBPROPERTIES) as columns, plus the complete Glue Database object as VARIANT. These three
+//! fields have no other SQL surface -- duckdb_schemas() carries none of them.
+TableFunction GetGlueGetDatabaseResponseFunction();
+
+//! glue_create_database('<catalog>.<database>', options := {comment: '...', location: '...', <property>: '...'},
+//! if_not_exists := false): CREATE DATABASE with the fields DuckDB's own CREATE SCHEMA cannot express. 'comment'
+//! becomes the Glue Description, 'location' the LocationUri, every other key a database parameter (DBPROPERTIES).
+//! The options may be a struct or a MAP. This is what the glue_hive_ddl grammar turns CREATE SCHEMA ... WITH (...)
+//! into.
+TableFunction GetGlueCreateDatabaseFunction();
+//! glue_set_database_properties('<catalog>.<database>', {key: 'value', ...}): ALTER DATABASE SET DBPROPERTIES. Merges,
+//! so listed keys are added or overwritten and unlisted ones are kept. 'comment' sets the Glue Description instead of
+//! a parameter.
+TableFunction GetGlueSetDatabasePropertiesFunction();
+
 //! glue_partitions('<catalog>.<schema>.<table>'): the partitions of a Hive table as registered in Glue, one row
 //! per partition with a typed column per partition key and the partition's location
 TableFunction GetGluePartitionsFunction();

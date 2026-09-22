@@ -113,9 +113,10 @@ public:
 
 	//! List all databases of the catalog
 	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog);
-	//! Fetch a single database, returns false if it does not exist
+	//! Fetch a single database, returns false if it does not exist. 'raw_json' (optional) receives the Glue Database
+	//! object of the response as JSON.
 	static bool GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                        GlueDatabaseInfo &result);
+	                        GlueDatabaseInfo &result, string *raw_json = nullptr);
 	//! List all tables of a database
 	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name);
 	//! Fetch a single table, returns false if it does not exist. 'raw_json' (optional) receives the Glue Table
@@ -127,6 +128,20 @@ public:
 	static void CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database);
 	//! Delete a database (and all of its tables), throws a CatalogException if it does not exist
 	static void DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name);
+	//! Merge 'parameters' into the Glue parameters of a database, keeping the rest of its definition as is. Follows
+	//! Hive's ALTER DATABASE SET DBPROPERTIES: the listed keys are added or overwritten, unlisted ones are kept.
+	//! Throws a CatalogException if the database does not exist.
+	static void SetDatabaseProperties(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                  const unordered_map<string, string> &parameters);
+	//! Set the description (Athena's COMMENT) of a database, keeping the rest of its definition as is. Throws a
+	//! CatalogException if the database does not exist.
+	static void SetDatabaseDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                   const string &description);
+	//! Whether the database has at least one table (or view). Cheaper than GetTables, which pages to the end and
+	//! parses every table: this stops at the first entry, which is all a RESTRICT drop needs to know.
+	//! 'first_table_name' (optional) receives the name of that entry, to name it in an error message.
+	static bool DatabaseHasTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                              string *first_table_name = nullptr);
 	//! Create a standard (Hive style) Glue table storing parquet files at 'table.location', with the columns and
 	//! partition keys in 'table'
 	static void CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);

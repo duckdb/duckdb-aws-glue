@@ -29,6 +29,7 @@
 #include <aws/glue/model/CreateTableRequest.h>
 #include <aws/glue/model/DeleteDatabaseRequest.h>
 #include <aws/glue/model/DeleteTableRequest.h>
+#include <aws/glue/model/UpdateDatabaseRequest.h>
 #include <aws/glue/model/UpdateTableRequest.h>
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
 #include <aws/glue/model/GetPartitionsRequest.h>
@@ -432,7 +433,7 @@ vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatal
 }
 
 bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                          GlueDatabaseInfo &result) {
+                          GlueDatabaseInfo &result, string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetDatabaseRequest request;
@@ -445,7 +446,11 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 		}
 		ThrowGlueError(outcome, StringUtil::Format("GetDatabase '%s'", database_name));
 	}
-	result = ToDatabaseInfo(outcome.GetResult().GetDatabase());
+	auto &database = outcome.GetResult().GetDatabase();
+	result = ToDatabaseInfo(database);
+	if (raw_json) {
+		*raw_json = ToStdString(database.Jsonize().View().WriteReadable());
+	}
 	return true;
 }
 
@@ -472,6 +477,33 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 		next_token = tables.GetNextToken();
 	} while (!next_token.empty());
 	return result;
+}
+
+bool GlueAPI::DatabaseHasTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                string *first_table_name) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	Aws::Glue::Model::GetTablesRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	// one entry is enough to answer the question; GetTables would otherwise page to the end and parse every table
+	request.SetMaxResults(1);
+	auto outcome = client->GetTables(request);
+	if (!outcome.IsSuccess()) {
+		if (IsEntityNotFound(outcome)) {
+			throw CatalogException("Glue database with name \"%s\" does not exist", database_name);
+		}
+		ThrowGlueError(outcome, StringUtil::Format("GetTables (database '%s')", database_name));
+	}
+	// Glue returns views (TableType VIRTUAL_VIEW) from GetTables as well, so they count as occupants here
+	auto &tables = outcome.GetResult().GetTableList();
+	if (tables.empty()) {
+		return false;
+	}
+	if (first_table_name) {
+		*first_table_name = ToStdString(tables.front().GetName());
+	}
+	return true;
 }
 
 bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -576,6 +608,77 @@ void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeleteDatabase '%s'", database_name));
 	}
+}
+
+//! UpdateDatabase replaces the whole definition: fetch the current one, let 'modify' change the DatabaseInput built
+//! from it, and send it back. Without this round trip every field the caller does not set would be wiped.
+static void UpdateGlueDatabase(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                               const string &database_name,
+                               const std::function<void(Aws::Glue::Model::DatabaseInput &)> &modify) {
+	Aws::Glue::Model::GetDatabaseRequest get_request;
+	SetCatalogId(get_request, catalog);
+	get_request.SetName(database_name);
+	auto get_outcome = client->GetDatabase(get_request);
+	if (!get_outcome.IsSuccess()) {
+		if (IsEntityNotFound(get_outcome)) {
+			throw CatalogException("Glue database with name \"%s\" does not exist", database_name);
+		}
+		ThrowGlueError(get_outcome, StringUtil::Format("GetDatabase '%s'", database_name));
+	}
+	auto &database = get_outcome.GetResult().GetDatabase();
+
+	Aws::Glue::Model::DatabaseInput input;
+	input.SetName(database.GetName());
+	if (database.DescriptionHasBeenSet()) {
+		input.SetDescription(database.GetDescription());
+	}
+	if (database.LocationUriHasBeenSet()) {
+		input.SetLocationUri(database.GetLocationUri());
+	}
+	if (database.ParametersHasBeenSet()) {
+		input.SetParameters(database.GetParameters());
+	}
+	if (database.CreateTableDefaultPermissionsHasBeenSet()) {
+		input.SetCreateTableDefaultPermissions(database.GetCreateTableDefaultPermissions());
+	}
+	if (database.TargetDatabaseHasBeenSet()) {
+		input.SetTargetDatabase(database.GetTargetDatabase());
+	}
+	if (database.FederatedDatabaseHasBeenSet()) {
+		input.SetFederatedDatabase(database.GetFederatedDatabase());
+	}
+	modify(input);
+
+	Aws::Glue::Model::UpdateDatabaseRequest update_request;
+	SetCatalogId(update_request, catalog);
+	update_request.SetName(database_name);
+	update_request.SetDatabaseInput(input);
+	auto update_outcome = client->UpdateDatabase(update_request);
+	if (!update_outcome.IsSuccess()) {
+		ThrowGlueError(update_outcome, StringUtil::Format("UpdateDatabase '%s'", database_name));
+	}
+}
+
+void GlueAPI::SetDatabaseProperties(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                    const unordered_map<string, string> &parameters) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdateGlueDatabase(client, catalog, database_name, [&](Aws::Glue::Model::DatabaseInput &input) {
+		// Hive / Athena SET DBPROPERTIES merges: the listed keys are added or overwritten, the rest are kept
+		auto merged = input.GetParameters();
+		for (auto &parameter : ToAwsMap(parameters)) {
+			merged[parameter.first] = parameter.second;
+		}
+		input.SetParameters(merged);
+	});
+}
+
+void GlueAPI::SetDatabaseDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                     const string &description) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdateGlueDatabase(client, catalog, database_name,
+	                   [&](Aws::Glue::Model::DatabaseInput &input) { input.SetDescription(description); });
 }
 
 void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table) {

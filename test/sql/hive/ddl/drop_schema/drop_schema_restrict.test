@@ -1,0 +1,115 @@
+# name: test/sql/hive/ddl/drop_schema/drop_schema_restrict.test
+# description: DROP SCHEMA without CASCADE must refuse a Glue database that still has tables
+# group: [drop_schema]
+
+# Glue's DeleteDatabase always deletes every table of the database, so the extension has to enforce RESTRICT itself,
+# before the call. This is what DuckDB's own catalog does (duck_catalog.cpp: "the dependency manager blocks the drop
+# (RESTRICT) or cascades"), and what Athena / Hive do.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# Glue database names may not contain the path characters of {TEST_DIR}, so the names here are fixed and cleaned up
+# up front instead of being made unique per run
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.drop_restrict CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.drop_restrict;
+
+statement ok
+CREATE TABLE my_datalake.drop_restrict.orders (id INTEGER, amount DOUBLE);
+
+statement ok
+INSERT INTO my_datalake.drop_restrict.orders VALUES (1, 10.0);
+
+# ---------------------------------------------------------------------------
+# claim: the default (RESTRICT) refuses to drop a database that has tables
+# ---------------------------------------------------------------------------
+statement error
+DROP SCHEMA my_datalake.drop_restrict;
+----
+because it still contains tables
+
+# ---------------------------------------------------------------------------
+# claim: nothing was deleted. This is the half that matters -- before the fix the statement above
+# succeeded and took the table with it.
+# ---------------------------------------------------------------------------
+query II
+SELECT id, amount FROM my_datalake.drop_restrict.orders;
+----
+1	10.0
+
+# the database is still there
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE schema = 'drop_restrict' AND name = 'orders';
+----
+1
+
+# an explicit RESTRICT behaves the same as the default
+statement error
+DROP SCHEMA my_datalake.drop_restrict RESTRICT;
+----
+because it still contains tables
+
+query I
+SELECT count(*) FROM my_datalake.drop_restrict.orders;
+----
+1
+
+# ---------------------------------------------------------------------------
+# claim: the error names a table, so the user knows what is in the way
+# ---------------------------------------------------------------------------
+statement error
+DROP SCHEMA my_datalake.drop_restrict;
+----
+orders
+
+# ---------------------------------------------------------------------------
+# claim: CASCADE drops the database together with its tables
+# ---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA my_datalake.drop_restrict CASCADE;
+
+statement error
+SELECT * FROM my_datalake.drop_restrict.orders;
+----
+
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE schema = 'drop_restrict';
+----
+0
+
+# ---------------------------------------------------------------------------
+# claim: an empty database drops without CASCADE
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SCHEMA my_datalake.drop_empty;
+
+statement ok
+DROP SCHEMA my_datalake.drop_empty;
+
+# ---------------------------------------------------------------------------
+# claim: IF EXISTS on an absent database is a no-op, with and without CASCADE
+# ---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.drop_never_existed;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.drop_never_existed CASCADE;
+
+# ...and without IF EXISTS it still errors
+statement error
+DROP SCHEMA my_datalake.drop_never_existed;
+----
+does not exist

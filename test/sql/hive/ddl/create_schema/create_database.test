@@ -1,0 +1,241 @@
+# name: test/sql/hive/ddl/create_schema/create_database.test
+# description: glue_create_database() called directly as a table function
+# group: [create_schema]
+
+# Rather than through the CREATE SCHEMA ... WITH (...) sugar of the glue_hive_ddl grammar extension. Covers the option
+# form the grammar never builds (a STRUCT, the grammar always builds a MAP), the 'created' return value, the 'type'
+# option check, the schema cache refresh that keeps a new database visible to an attachment that has already listed,
+# and the error surface of the name and the option list.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# Glue database names may not contain the path characters of {TEST_DIR}, so the names here are fixed and cleaned up
+# up front instead of being made unique per run
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fn_struct CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fn_map CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fn_created CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fn_type CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fn_cache CASCADE;
+
+# ---------------------------------------------------------------------------
+# claim: the option list is accepted as a STRUCT. The grammar only ever builds a MAP, so this is the form that no
+#        CREATE SCHEMA statement can reach. A value that is not a string is rendered as one, the way every Glue
+#        database parameter is a string.
+# ---------------------------------------------------------------------------
+statement ok
+CALL glue_create_database('my_datalake.fn_struct', options := {
+    comment: 'curated sales facts',
+    location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/fn_struct_elsewhere',
+    owner_team: 'analytics',
+    retention_days: 30
+});
+
+query I
+SELECT comment FROM glue_get_database_response('my_datalake.fn_struct');
+----
+curated sales facts
+
+query I
+SELECT location FROM glue_get_database_response('my_datalake.fn_struct');
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/fn_struct_elsewhere
+
+# retention_days was given as an INTEGER and comes back as a string
+query II
+SELECT unnest(map_keys(parameters)) AS k, unnest(map_values(parameters)) AS v
+FROM glue_get_database_response('my_datalake.fn_struct')
+ORDER BY k;
+----
+owner_team	analytics
+retention_days	30
+
+# ---------------------------------------------------------------------------
+# claim: a MAP option list works through the function too, not only as the grammar's desugaring
+# ---------------------------------------------------------------------------
+statement ok
+CALL glue_create_database('my_datalake.fn_map', options := MAP {'comment': 'from a map', 'tier': 'gold'});
+
+query I
+SELECT comment FROM glue_get_database_response('my_datalake.fn_map');
+----
+from a map
+
+query II
+SELECT unnest(map_keys(parameters)) AS k, unnest(map_values(parameters)) AS v
+FROM glue_get_database_response('my_datalake.fn_map')
+ORDER BY k;
+----
+tier	gold
+
+# ---------------------------------------------------------------------------
+# claim: 'created' reports whether this call created the database, and if_not_exists turns a second call into a
+#        no-op that leaves the existing database alone
+# ---------------------------------------------------------------------------
+query II
+SELECT database_name, created FROM glue_create_database('my_datalake.fn_created', options := {comment: 'first'});
+----
+fn_created	true
+
+statement error
+CALL glue_create_database('my_datalake.fn_created', options := {comment: 'second'});
+----
+already exists
+
+query II
+SELECT database_name, created
+FROM glue_create_database('my_datalake.fn_created', options := {comment: 'second'}, if_not_exists := true);
+----
+fn_created	false
+
+# the no-op did not overwrite the description
+query I
+SELECT comment FROM glue_get_database_response('my_datalake.fn_created');
+----
+first
+
+# ---------------------------------------------------------------------------
+# claim: 'type' accepts only Hive, case-insensitively, and is consumed rather than stored as a database property
+# ---------------------------------------------------------------------------
+statement error
+CALL glue_create_database('my_datalake.fn_type', options := {type: 'ICEBERG'});
+----
+only 'HIVE' is supported
+
+statement ok
+CALL glue_create_database('my_datalake.fn_type', options := {type: 'hive', owner_team: 'analytics'});
+
+query II
+SELECT unnest(map_keys(parameters)) AS k, unnest(map_values(parameters)) AS v
+FROM glue_get_database_response('my_datalake.fn_type')
+ORDER BY k;
+----
+owner_team	analytics
+
+# ---------------------------------------------------------------------------
+# claim: a database created through the function is visible to an attachment that has already listed its schemas.
+#        GlueCreateDatabaseScan refreshes the schema cache for exactly this reason: without it a listing that
+#        already ran would hide the new database for the life of the attachment.
+# ---------------------------------------------------------------------------
+# materialize the schema set before the database exists
+statement ok
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'my_datalake';
+
+statement ok
+CALL glue_create_database('my_datalake.fn_cache', options := {comment: 'created after the listing'});
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name = 'fn_cache';
+----
+1
+
+# and it is usable straight away, without re-attaching
+statement ok
+CREATE TABLE my_datalake.fn_cache.t (id INTEGER);
+
+# ---------------------------------------------------------------------------
+# claim: the name must resolve to a database of an attached Glue catalog
+# ---------------------------------------------------------------------------
+statement error
+CALL glue_create_database('fn_unqualified');
+----
+expects a qualified database name
+
+statement error
+CALL glue_create_database('my_datalake.default.too_deep');
+----
+expects a qualified database name
+
+statement error
+CALL glue_create_database('no_such_catalog.some_db');
+----
+does not exist
+
+statement error
+CALL glue_create_database('memory.main');
+----
+only works on databases of a Glue catalog
+
+# ---------------------------------------------------------------------------
+# claim: the option list is validated, and a rejected list is refused during bind, before Glue is touched
+# ---------------------------------------------------------------------------
+statement error
+CALL glue_create_database('my_datalake.fn_rejected', options := 'not a list');
+----
+expects the options as a struct
+
+statement error
+CALL glue_create_database('my_datalake.fn_rejected', options := {owner_team: NULL});
+----
+NULL is not a valid value for option
+
+# a MAP may carry two keys that differ only in case. Option names are matched case-insensitively, so that is a
+# duplicate. A STRUCT cannot reach this check: DuckDB rejects duplicate field names first, case-insensitively too.
+statement error
+CALL glue_create_database('my_datalake.fn_rejected', options := MAP {'Comment': 'a', 'comment': 'b'});
+----
+given twice
+
+# none of the three rejected calls created anything
+statement error
+SELECT comment FROM glue_get_database_response('my_datalake.fn_rejected');
+----
+does not exist
+
+# ---------------------------------------------------------------------------
+# claim: a read-only attachment refuses the call
+# ---------------------------------------------------------------------------
+statement ok
+attach '{GLUE_CATALOG_ID}' as ro_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    READ_ONLY
+);
+
+statement error
+CALL glue_create_database('ro_datalake.fn_read_only');
+----
+read-only mode
+
+statement error
+SELECT comment FROM glue_get_database_response('my_datalake.fn_read_only');
+----
+does not exist
+
+# ---------------------------------------------------------------------------
+# cleanup
+# ---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA my_datalake.fn_struct CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.fn_map CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.fn_created CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.fn_type CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.fn_cache CASCADE;

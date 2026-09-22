@@ -1,0 +1,200 @@
+# name: test/sql/hive/ddl/alter_schema/set_database_properties.test
+# description: glue_set_database_properties(), the counterpart of Hive / Athena's ALTER DATABASE ... SET DBPROPERTIES
+# group: [alter_schema]
+
+# It merges: the listed keys are added or overwritten, every unlisted key is kept, and the rest of the Glue database
+# survives the UpdateDatabase round trip, the description and the location included -- UpdateDatabase replaces the
+# whole definition, so anything the caller does not resend would be wiped. 'comment' is routed to the Glue Description
+# instead of being stored as a property.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# Glue database names may not contain the path characters of {TEST_DIR}, so the names here are fixed and cleaned up
+# up front instead of being made unique per run
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.sp_merge CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.sp_comment CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.sp_both CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.sp_count CASCADE;
+
+# ---------------------------------------------------------------------------
+# claim: the call merges. A listed key is overwritten, a new key is added, an unlisted key is kept, and the
+#        description and location given at creation both survive.
+# ---------------------------------------------------------------------------
+statement ok
+CALL glue_create_database('my_datalake.sp_merge', options := {
+    comment: 'before',
+    location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sp_merge_elsewhere',
+    owner_team: 'analytics',
+    retention_days: '30'
+});
+
+statement ok
+CALL glue_set_database_properties('my_datalake.sp_merge', {retention_days: '60', tier: 'gold'});
+
+query II
+SELECT unnest(map_keys(parameters)) AS k, unnest(map_values(parameters)) AS v
+FROM glue_get_database_response('my_datalake.sp_merge')
+ORDER BY k;
+----
+owner_team	analytics
+retention_days	60
+tier	gold
+
+# these two are what the read-modify-write round trip in UpdateGlueDatabase protects
+query I
+SELECT comment FROM glue_get_database_response('my_datalake.sp_merge');
+----
+before
+
+query I
+SELECT location FROM glue_get_database_response('my_datalake.sp_merge');
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/sp_merge_elsewhere
+
+# ---------------------------------------------------------------------------
+# claim: 'comment' updates the Glue Description and is not stored as a database property
+# ---------------------------------------------------------------------------
+statement ok
+CALL glue_create_database('my_datalake.sp_comment', options := {comment: 'before', owner_team: 'analytics'});
+
+statement ok
+CALL glue_set_database_properties('my_datalake.sp_comment', {comment: 'after'});
+
+query I
+SELECT comment FROM glue_get_database_response('my_datalake.sp_comment');
+----
+after
+
+# 'comment' did not leak into the parameters, and the property already there is untouched
+query II
+SELECT unnest(map_keys(parameters)) AS k, unnest(map_values(parameters)) AS v
+FROM glue_get_database_response('my_datalake.sp_comment')
+ORDER BY k;
+----
+owner_team	analytics
+
+# ---------------------------------------------------------------------------
+# claim: a comment and a property in one call both land, though they are two Glue round trips
+# ---------------------------------------------------------------------------
+statement ok
+CALL glue_create_database('my_datalake.sp_both', options := {comment: 'before'});
+
+statement ok
+CALL glue_set_database_properties('my_datalake.sp_both', {comment: 'after', tier: 'silver'});
+
+query I
+SELECT comment FROM glue_get_database_response('my_datalake.sp_both');
+----
+after
+
+query II
+SELECT unnest(map_keys(parameters)) AS k, unnest(map_values(parameters)) AS v
+FROM glue_get_database_response('my_datalake.sp_both')
+ORDER BY k;
+----
+tier	silver
+
+# ---------------------------------------------------------------------------
+# claim: 'properties_set' counts the option list as it was given, 'comment' included, even though a comment is not
+#        stored as a property
+# ---------------------------------------------------------------------------
+statement ok
+CALL glue_create_database('my_datalake.sp_count', options := {comment: 'before'});
+
+query II
+SELECT database_name, properties_set
+FROM glue_set_database_properties('my_datalake.sp_count', {comment: 'after', tier: 'bronze'});
+----
+sp_count	2
+
+# ---------------------------------------------------------------------------
+# claim: an empty option list is refused rather than sent as a no-op UpdateDatabase
+# ---------------------------------------------------------------------------
+statement error
+CALL glue_set_database_properties('my_datalake.sp_count', {});
+----
+at least one property is required
+
+statement error
+CALL glue_set_database_properties('my_datalake.sp_count', NULL);
+----
+at least one property is required
+
+# ---------------------------------------------------------------------------
+# claim: the database has to exist
+# ---------------------------------------------------------------------------
+statement error
+CALL glue_set_database_properties('my_datalake.sp_never_existed', {tier: 'gold'});
+----
+does not exist
+
+# ---------------------------------------------------------------------------
+# claim: the name must resolve to a database of an attached Glue catalog
+# ---------------------------------------------------------------------------
+statement error
+CALL glue_set_database_properties('sp_unqualified', {tier: 'gold'});
+----
+expects a qualified database name
+
+statement error
+CALL glue_set_database_properties('memory.main', {tier: 'gold'});
+----
+only works on databases of a Glue catalog
+
+# ---------------------------------------------------------------------------
+# claim: a read-only attachment refuses the call, and nothing is written
+# ---------------------------------------------------------------------------
+statement ok
+attach '{GLUE_CATALOG_ID}' as ro_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    READ_ONLY
+);
+
+statement error
+CALL glue_set_database_properties('ro_datalake.sp_merge', {tier: 'platinum'});
+----
+read-only mode
+
+query II
+SELECT unnest(map_keys(parameters)) AS k, unnest(map_values(parameters)) AS v
+FROM glue_get_database_response('my_datalake.sp_merge')
+ORDER BY k;
+----
+owner_team	analytics
+retention_days	60
+tier	gold
+
+# ---------------------------------------------------------------------------
+# cleanup
+# ---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA my_datalake.sp_merge CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.sp_comment CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.sp_both CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.sp_count CASCADE;

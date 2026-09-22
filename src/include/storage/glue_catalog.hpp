@@ -60,6 +60,12 @@ public:
 	GlueSchemaSet &GetSchemas();
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
+	//! Build the Glue definition of a new database from an option list, on top of the catalog's defaults. 'comment'
+	//! becomes the Glue Description, 'location' overrides GetDatabaseLocation, and every other key becomes a Glue
+	//! database parameter (Athena's DBPROPERTIES) -- the same rule CREATE TABLE's options follow. Shared by
+	//! CREATE SCHEMA (which has no option list of its own) and glue_create_database().
+	GlueDatabaseInfo BuildDatabaseInfo(const string &database_name, const case_insensitive_map_t<string> &options,
+	                                   const string &context_name) const;
 	//! The S3 location a new table gets when none is given: <default_location>/<database>/<table> when the catalog
 	//! was attached with DEFAULT_LOCATION, else <database LocationUri>/<table>; throws when neither is available
 	string GetTableLocation(const GlueDatabaseInfo &database, const string &table_name) const;
