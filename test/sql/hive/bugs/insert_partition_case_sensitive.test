@@ -1,0 +1,51 @@
+# name: test/sql/hive/bugs/insert_partition_case_sensitive.test
+# description: partition values differing only in case are written to different S3 directories, and each must be registered as its own partition
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.case_sensitive_partitions;
+
+statement ok
+CREATE TABLE my_datalake.default.case_sensitive_partitions (id INTEGER, country VARCHAR) PARTITIONED BY (country);
+
+statement ok
+INSERT INTO my_datalake.default.case_sensitive_partitions VALUES (1, 'us'), (2, 'US'), (3, 'Us');
+
+query II
+SELECT regexp_extract(file, 'case_sensitive_partitions/(.*)/[^/]*$', 1) AS dir, count(*)
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/case_sensitive_partitions/**')
+GROUP BY dir ORDER BY dir;
+----
+country=US	1
+country=Us	1
+country=us	1
+
+query II
+SELECT country, location FROM glue_partitions('my_datalake.default.case_sensitive_partitions') ORDER BY country;
+----
+US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/case_sensitive_partitions/country=US
+Us	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/case_sensitive_partitions/country=Us
+us	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/case_sensitive_partitions/country=us
+
+query II
+SELECT id, country FROM my_datalake.default.case_sensitive_partitions ORDER BY id;
+----
+1	us
+2	US
+3	Us
+
+statement ok
+DROP TABLE my_datalake.default.case_sensitive_partitions;

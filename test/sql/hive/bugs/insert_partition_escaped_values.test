@@ -1,0 +1,106 @@
+# name: test/sql/hive/bugs/insert_partition_escaped_values.test
+# description: partition values that need escaping in the directory name are registered in Glue unescaped
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.escaped_partitions;
+
+statement ok
+CREATE TABLE my_datalake.default.escaped_partitions (id INTEGER, city VARCHAR) PARTITIONED BY (city);
+
+statement ok
+INSERT INTO my_datalake.default.escaped_partitions VALUES (1, 'new york'), (2, 'a/b'), (3, '100%'), (4, 'plain');
+
+query II
+SELECT regexp_extract(file, 'escaped_partitions/(.*)/[^/]*$', 1) AS dir, count(*)
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/**')
+GROUP BY dir ORDER BY dir;
+----
+city=100%25	1
+city=a%2Fb	1
+city=new%20york	1
+city=plain	1
+
+# Glue holds the values themselves, like glue_add_partition registers them
+query II
+SELECT city, location FROM glue_partitions('my_datalake.default.escaped_partitions') ORDER BY city;
+----
+100%	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/city=100%25
+a/b	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/city=a%2Fb
+new york	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/city=new%20york
+plain	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/city=plain
+
+query II
+SELECT id, city FROM my_datalake.default.escaped_partitions ORDER BY id;
+----
+1	new york
+2	a/b
+3	100%
+4	plain
+
+query I
+SELECT id FROM my_datalake.default.escaped_partitions WHERE city = 'new york';
+----
+1
+
+# a second INSERT appends to the existing partitions instead of registering the escaped value as a new one
+statement ok
+INSERT INTO my_datalake.default.escaped_partitions VALUES (5, 'new york'), (6, 'a/b');
+
+query II
+SELECT regexp_extract(file, 'escaped_partitions/(.*)/[^/]*$', 1) AS dir, count(*)
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/**')
+GROUP BY dir ORDER BY dir;
+----
+city=100%25	1
+city=a%2Fb	2
+city=new%20york	2
+city=plain	1
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.escaped_partitions');
+----
+4
+
+query II
+SELECT id, city FROM my_datalake.default.escaped_partitions ORDER BY id;
+----
+1	new york
+2	a/b
+3	100%
+4	plain
+5	new york
+6	a/b
+
+# a partition added with glue_add_partition gets the same directory an INSERT uses
+statement ok
+CALL glue_add_partition('my_datalake.default.escaped_partitions', {city: 'san jose'});
+
+statement ok
+INSERT INTO my_datalake.default.escaped_partitions VALUES (7, 'san jose');
+
+query II
+SELECT city, location FROM glue_partitions('my_datalake.default.escaped_partitions') WHERE city = 'san jose';
+----
+san jose	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/city=san%20jose
+
+query II
+SELECT id, city FROM my_datalake.default.escaped_partitions WHERE city = 'san jose';
+----
+7	san jose
+
+statement ok
+DROP TABLE my_datalake.default.escaped_partitions;

@@ -376,6 +376,9 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
+//! Case sensitive, like S3 paths
+using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
+
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
@@ -386,7 +389,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 
 	// Register the partition directories the files were written to: the locations of existing partitions, or
 	// <key>=<value> directories in partition key order below the table location
-	case_insensitive_map_t<GluePartitionInput> partitions;
+	FilePathToGluePartition partitions;
 	for (auto &file : state.written_files) {
 		auto directory = file.substr(0, file.find_last_of('/'));
 		if (partitions.find(directory) != partitions.end()) {
@@ -406,7 +409,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 			if (value == parsed.end()) {
 				throw InternalException("Written file '%s' has no value for partition key '%s'", file, key.name);
 			}
-			partition.values.push_back(value->second);
+			partition.values.push_back(HivePartitioning::Unescape(value->second));
 		}
 		partitions.emplace(directory, std::move(partition));
 	}
