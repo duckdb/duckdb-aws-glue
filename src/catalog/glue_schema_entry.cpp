@@ -187,6 +187,12 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction trans
 	if (table.columns.empty()) {
 		throw BinderException("Table '%s' needs at least one column that is not a partition column", table_name);
 	}
+	if (table.file_format == HiveFileFormat::PARQUET && table.partition_keys.empty() && options.location.empty()) {
+		// an explicit LOCATION may already hold files; partitioned tables keep statistics per partition
+		table.parameters.emplace("numRows", "0");
+		table.parameters.emplace("numFiles", "0");
+		table.parameters.emplace("totalSize", "0");
+	}
 	GlueAPI::CreateHiveTable(context, glue_catalog, table);
 
 	// re-fetch so the entry reflects what Glue stored

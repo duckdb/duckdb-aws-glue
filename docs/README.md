@@ -70,6 +70,13 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
   fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read.
+- Parquet writes keep Hive's basic statistics, the `numRows`, `numFiles` and `totalSize` parameters Athena, Trino
+  and Spark plan with, current: a new partition gets the statistics of its files, an existing partition with
+  statistics (at the directory written to) gets them added with BatchUpdatePartition. For unpartitioned tables they
+  are table parameters, which `CREATE TABLE` without `location` sets to `0` and every insert adds to. Tables and
+  partitions without valid statistics (e.g. created elsewhere, added with `glue_add_partition`, or `-1`) are left
+  alone, and moving a table or partition removes them. Two concurrent writers can lose an update, and files left
+  behind by a dropped table at the same location are not counted. csv, json and avro writes record no statistics.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable. Existing parquet files
   keep their types, so only widening type changes are allowed: integer widening (TINYINT to BIGINT), FLOAT to
@@ -112,7 +119,7 @@ order.
 
 | function | Hive statement |
 |----------|------------------|
-| `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` |
+| `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` and `parameters` (e.g. `numRows`) |
 | `CALL glue_add_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, location := 's3://...', if_not_exists := false)` | `ALTER TABLE ADD [IF NOT EXISTS] PARTITION (...) [LOCATION ...]`; without `location` the partition lives at `<table location>/dt=2016-05-14/country=IN` |
 | `CALL glue_drop_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, if_exists := false)` | `ALTER TABLE DROP [IF EXISTS] PARTITION (...)`; the data files stay in S3 |
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |

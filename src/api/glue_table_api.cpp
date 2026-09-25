@@ -152,10 +152,10 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 }
 
 //! UpdateTable replaces the whole definition: fetch the current one, let 'modify' change the TableInput built from
-//! it, and send it back
+//! it, and send it back unless 'modify' returns false
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
                             const string &database_name, const string &table_name,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
+                            const std::function<bool(Aws::Glue::Model::TableInput &)> &modify) {
 	// UpdateTable replaces the whole definition, so start from the current one and change only the columns
 	Aws::Glue::Model::GetTableRequest get_request;
 	SetCatalogId(get_request, catalog);
@@ -207,7 +207,9 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 		table_input.SetTargetTable(table.GetTargetTable());
 	}
 	table_input.SetStorageDescriptor(table.GetStorageDescriptor());
-	modify(table_input);
+	if (!modify(table_input)) {
+		return;
+	}
 
 	Aws::Glue::Model::UpdateTableRequest update_request;
 	SetCatalogId(update_request, catalog);
@@ -228,6 +230,7 @@ void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, c
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetColumns(ToAwsColumns(columns));
 		table_input.SetStorageDescriptor(storage_descriptor);
+		return true;
 	});
 }
 
@@ -240,6 +243,32 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetLocation(location);
 		table_input.SetStorageDescriptor(storage_descriptor);
+		// the statistics describe the files at the old location
+		auto parameters = ToStdMap(table_input.GetParameters());
+		RemoveBasicStatistics(parameters);
+		table_input.SetParameters(ToAwsMap(parameters));
+		return true;
+	});
+}
+
+void GlueAPI::AddTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                 const string &table_name, const GlueBasicStatistics &statistics) {
+	CheckWritable(catalog, "UpdateTable");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+		auto parameters = ToStdMap(table_input.GetParameters());
+		GlueBasicStatistics current;
+		if (!TryGetBasicStatistics(parameters, current)) {
+			// unknown statistics stay unknown
+			return false;
+		}
+		current.num_rows += statistics.num_rows;
+		current.num_files += statistics.num_files;
+		current.total_size += statistics.total_size;
+		SetBasicStatistics(parameters, current);
+		table_input.SetParameters(ToAwsMap(parameters));
+		return true;
 	});
 }
 

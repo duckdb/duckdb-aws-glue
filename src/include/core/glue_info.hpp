@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/optional.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -99,10 +100,22 @@ public:
 	string GetEscapeCharacter() const;
 };
 
+//! The key/value parameters of a Glue table or partition
+using GlueParameters = unordered_map<string, string>;
+
+//! Hive's basic statistics of a table or partition, stored as its numRows, numFiles and totalSize parameters
+struct GlueBasicStatistics {
+	idx_t num_rows = 0;
+	idx_t num_files = 0;
+	idx_t total_size = 0;
+};
+
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location
 struct GluePartitionInput {
 	vector<string> values;
 	string location;
+	//! The files written to the partition: its statistics when it is new, added to them when it exists
+	optional<GlueBasicStatistics> statistics;
 };
 
 //! A partition of a Hive table as registered in Glue: the partition values (in partition key order, as strings)
@@ -110,6 +123,7 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
+	GlueParameters parameters;
 };
 
 } // namespace duckdb

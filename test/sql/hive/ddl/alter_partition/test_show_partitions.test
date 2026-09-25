@@ -57,6 +57,7 @@ SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM glue_partitions('my
 ----
 year	INTEGER
 location	VARCHAR
+parameters	MAP(VARCHAR, VARCHAR)
 
 query I
 SELECT location FROM glue_partitions('my_datalake.default.flight_delays') WHERE year = 2007;

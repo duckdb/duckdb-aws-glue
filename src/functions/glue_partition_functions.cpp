@@ -246,6 +246,8 @@ unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctio
 	}
 	names.emplace_back("location");
 	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("parameters");
+	return_types.emplace_back(LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
 	result->partitions = GlueAPI::GetPartitions(context, *result->target.catalog, table.database_name, table.name);
 	return std::move(result);
 }
@@ -268,6 +270,14 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 			output.data[k].Append(value);
 		}
 		output.data[keys.size()].Append(Value(partition.location));
+		vector<Value> parameter_keys;
+		vector<Value> parameter_values;
+		for (auto &parameter : partition.parameters) {
+			parameter_keys.emplace_back(parameter.first);
+			parameter_values.emplace_back(parameter.second);
+		}
+		output.data[keys.size() + 1].Append(Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR,
+		                                               std::move(parameter_keys), std::move(parameter_values)));
 		count++;
 	}
 }
