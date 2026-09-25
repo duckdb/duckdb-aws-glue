@@ -115,6 +115,7 @@ order.
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
+| `glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: scans the table location for Hive `<key>=<value>` partition directories not yet in Glue and registers them; one row per added partition (typed column per partition key plus `location`), never removes partitions |
 
 The Hive SQL forms are available as well, through the `glue_hive_ddl` grammar extension the extension registers.
 Grammar extensions are switched on per connection:
@@ -128,12 +129,18 @@ ALTER TABLE my_datalake.default.orders DROP IF EXISTS PARTITION (dt = '2016-05-1
 ALTER TABLE my_datalake.default.orders PARTITION (dt = '2016-05-15', country = 'IN') RENAME TO PARTITION (dt = '2016-05-16', country = 'IN');
 ALTER TABLE my_datalake.default.orders PARTITION (dt = '2016-05-16', country = 'IN') SET LOCATION 's3://bucket/other/';
 ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
+MSCK REPAIR TABLE my_datalake.default.orders;
 ```
 
 Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
 statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
 may be partially qualified; it is resolved like in a query.
+
+`MSCK REPAIR TABLE t` becomes `CALL glue_repair_table(t)`: it lists the table location once (a recursive S3 listing),
+matches the `<key>=<value>` directories against the table's partition keys, and registers the ones not already in
+Glue with a single `BatchCreatePartition`. It only adds partitions - it never removes stale ones - and re-running it
+adds nothing new. Directories that do not follow the partition scheme (and `_`/`.` prefixed ones) are ignored.
 
 Listing the partitions of a table - `glue_partitions`, and the binding of every scan of a partitioned table - pages
 through Glue's `GetPartitions`. The pages are asked for in parallel with Glue's Segment API:

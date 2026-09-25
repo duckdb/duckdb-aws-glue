@@ -30,6 +30,11 @@ TableFunction GetGlueSetTableLocationFunction();
 //! 'partition' and 'new_partition' are lists of {key, value}; the actions are validated against Glue before any
 //! of them is applied, consecutive adds go out as one BatchCreatePartition call.
 TableFunction GetGlueAlterTableFunction();
+//! glue_repair_table(table): MSCK REPAIR TABLE. Lists the table location for Hive style <key>=<value> partition
+//! directories not yet registered in Glue and adds them (BatchCreatePartition); never removes any. One row per
+//! added partition with a typed column per partition key and its location (like glue_partitions), no rows when
+//! nothing is added.
+TableFunction GetGlueRepairTableFunction();
 
 //! hive_scan('s3://root', schema := {col: 'TYPE', ...}, partitions := [{key: value, ..., location: '...'}, ...],
 //! partition_keys := [...]): read a parquet Hive table without a catalog. The same scan as for a Glue Hive table,
