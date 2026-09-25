@@ -27,13 +27,5 @@
       "env_value": "s3://glue-test/warehouse"
     }
   ],
-  "skip_tests": [
-    {
-      "reason": "table function not implemented yet",
-      "paths": [
-        "test/sql/hive/ddl/alter_partition/glue_repair_table.test",
-        "test/sql/hive/ddl/alter_partition/test_show_partitions.test"
-      ]
-    }
-  ]
+  "skip_tests": []
 }
