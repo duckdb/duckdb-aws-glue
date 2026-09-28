@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/optional.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -113,6 +114,16 @@ public:
 	string GetEscapeCharacter() const;
 };
 
+//! The key/value parameters of a Glue table or partition
+using GlueParameters = unordered_map<string, string>;
+
+//! Hive's basic statistics of a table or partition, stored as its numRows, numFiles and totalSize parameters
+struct GlueBasicStatistics {
+	idx_t num_rows = 0;
+	idx_t num_files = 0;
+	idx_t total_size = 0;
+};
+
 //! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB
 struct GlueViewInfo {
 	string database_name;
@@ -124,17 +135,15 @@ struct GlueViewInfo {
 	bool secure = false;
 };
 
-//! A partition of a Hive table to register: the partition values (in partition key order) and its location
-struct GluePartitionInput {
-	vector<string> values;
-	string location;
-};
-
-//! A partition of a Hive table as registered in Glue: the partition values (in partition key order, as strings)
-//! and the location of its data files, which need not follow the <key>=<value> layout
+//! A partition of a Hive table: the partition values (in partition key order, as strings) and the location of its
+//! data files, which need not follow the <key>=<value> layout
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
+	//! The parameters as registered in Glue
+	GlueParameters parameters;
+	//! When registering: the statistics of the files written to it, set when it is new, added when it exists
+	optional<GlueBasicStatistics> statistics;
 };
 
 } // namespace duckdb

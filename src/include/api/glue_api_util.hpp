@@ -20,7 +20,12 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table);
 Aws::Map<Aws::String, Aws::String> ToAwsMap(const unordered_map<string, string> &input);
 Aws::Vector<Aws::Glue::Model::Column> ToAwsColumns(const vector<GlueColumn> &input);
 Aws::Vector<Aws::String> ToAwsValues(const vector<string> &values);
+vector<string> ToStdValues(const Aws::Vector<Aws::String> &values);
 string PartitionValuesToString(const vector<string> &values);
+//! The numRows, numFiles and totalSize parameters; false unless all three are set to a valid count
+bool TryGetBasicStatistics(const GlueParameters &parameters, GlueBasicStatistics &result);
+void SetBasicStatistics(GlueParameters &parameters, const GlueBasicStatistics &statistics);
+void RemoveBasicStatistics(GlueParameters &parameters);
 void CheckWritable(const GlueCatalog &catalog, const string &operation);
 
 template <class OUTCOME>
