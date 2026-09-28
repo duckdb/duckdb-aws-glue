@@ -151,11 +151,28 @@ unique_ptr<TransformProcess> StartGlueAlterTableTransform(PEGTransformer &transf
 	return make_uniq<FinalizeTransformProcess>(transformer, parse_result, FinalizeGlueAlterTable);
 }
 
+//! MsckRepairTableStatement <- 'MSCK' 'REPAIR' 'TABLE' BaseTableName
+//! -> CALL glue_repair_table('<table>')
+unique_ptr<TransformResultValue> FinalizeMsckRepairTable(PEGTransformer &transformer, ParseResult &parse_result) {
+	auto &list = parse_result.Cast<ListParseResult>();
+	auto table = transformer.Transform<unique_ptr<BaseTableRef>>(list.GetChild(3));
+	vector<FunctionArgument> arguments;
+	arguments.emplace_back(Constant(Value(table->GetQualifiedName().ToString())));
+	auto statement = make_uniq<CallStatement>();
+	statement->function = Call("glue_repair_table", std::move(arguments));
+	unique_ptr<SQLStatement> result = std::move(statement);
+	return make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(std::move(result));
+}
+
+unique_ptr<TransformProcess> StartMsckRepairTableTransform(PEGTransformer &transformer, ParseResult &parse_result) {
+	return make_uniq<FinalizeTransformProcess>(transformer, parse_result, FinalizeMsckRepairTable);
+}
+
 class GlueHiveDDLGrammar final : public GrammarExtension {
 public:
 	GlueHiveDDLGrammar()
 	    : GrammarExtension("glue_hive_ddl", "Hive partition DDL for Hive tables in Glue: ALTER TABLE ... "
-	                                        "ADD / DROP PARTITION, RENAME PARTITION, SET LOCATION") {
+	                                        "ADD / DROP PARTITION, RENAME PARTITION, SET LOCATION; MSCK REPAIR TABLE") {
 	}
 
 	vector<GrammarChange> GetChanges() const override {
@@ -176,9 +193,12 @@ public:
 		changes.push_back(GrammarChange::AddRule("GluePartitionSpec <- 'PARTITION' Parens(List(GluePartitionValue))"));
 		changes.push_back(GrammarChange::AddRule("GluePartitionValue <- ColumnName '=' Expression"));
 		changes.push_back(GrammarChange::AddRule("GlueLocation <- 'LOCATION' StringLiteral"));
+		changes.push_back(GrammarChange::AddRule("MsckRepairTableStatement <- 'MSCK' 'REPAIR' 'TABLE' BaseTableName",
+		                                         StartMsckRepairTableTransform));
 		// tried before the built-in ALTER statement; it fails on anything that is not a partition action, so the
 		// built-in ALTER TABLE forms are unaffected
 		changes.push_back(GrammarChange::PrependChoice("Statement", "GlueAlterTableStatement"));
+		changes.push_back(GrammarChange::PrependChoice("Statement", "MsckRepairTableStatement"));
 		return changes;
 	}
 };

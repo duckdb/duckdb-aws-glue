@@ -2,7 +2,11 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/optional.hpp"
+#include "duckdb/common/set.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -717,6 +721,170 @@ void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataCh
 	}
 }
 
+//===--------------------------------------------------------------------===//
+// glue_repair_table: MSCK REPAIR TABLE, discover Hive partition directories in S3 and register the new ones
+//===--------------------------------------------------------------------===//
+
+//! Whether a path below the table location is hidden: Hive skips _* and .* files and directories
+bool RepairIsHiddenPath(const string &relative_path) {
+	for (auto &component : StringUtil::Split(relative_path, '/')) {
+		if (component.empty() || component[0] == '_' || component[0] == '.') {
+			return true;
+		}
+	}
+	return false;
+}
+
+struct GlueRepairTableBindData : public TableFunctionData {
+	GluePartitionTarget target;
+	vector<LogicalType> key_types;
+	//! the table location with the trailing slash removed, the root the discovery lists below
+	string root;
+};
+
+//! One added partition, reported as a row: the values in partition key order and the location
+struct GlueRepairTableState : public GlobalTableFunctionState {
+	vector<GluePartitionInput> added;
+	idx_t offset = 0;
+	bool applied = false;
+};
+
+unique_ptr<FunctionData> GlueRepairTableBind(ClientContext &context, TableFunctionBindInput &input,
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<GlueRepairTableBindData>();
+	result->target = ResolveGlueTable(context, "glue_repair_table", input.inputs[0]);
+	result->root = result->target.table.location;
+	StringUtil::RTrim(result->root, "/");
+	if (result->root.empty()) {
+		throw InvalidInputException("Table '%s' has no location in Glue", result->target.TableName());
+	}
+	for (auto &key : result->target.table.partition_keys) {
+		auto type = GlueTypes::ToLogicalType(key.type);
+		result->key_types.push_back(type);
+		names.emplace_back(key.name);
+		return_types.push_back(type);
+	}
+	names.emplace_back("location");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	return std::move(result);
+}
+
+unique_ptr<GlobalTableFunctionState> GlueRepairTableInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<GlueRepairTableState>();
+}
+
+//! Read the values of a discovered partition directory (relative to the table root) in partition key order.
+//! Returns false when the directory does not follow the table's partition scheme (every partition key present
+//! as <key>=<value>, and nothing else): those directories are skipped.
+bool ReadDiscoveredPartition(const GlueTableInfo &table, const string &relative_directory, vector<string> &values) {
+	// HivePartitioning::Parse only records a key=value segment when it is followed by a separator, so the trailing
+	// directory component needs a separator after it to be seen
+	auto to_parse = relative_directory;
+	if (to_parse.empty() || to_parse.back() != '/') {
+		to_parse += "/";
+	}
+	auto parsed = HivePartitioning::Parse(to_parse);
+	values.assign(table.partition_keys.size(), string());
+	for (idx_t k = 0; k < table.partition_keys.size(); k++) {
+		auto entry = parsed.find(table.partition_keys[k].name);
+		if (entry == parsed.end()) {
+			return false;
+		}
+		values[k] = entry->second;
+	}
+	// a directory with more <key>=<value> pairs than the table has partition keys is not this table's
+	return parsed.size() == table.partition_keys.size();
+}
+
+//! The location a discovered partition gets: <table location>/<key>=<value>/... in partition key order
+string RepairPartitionLocation(const string &root, const GlueTableInfo &table, const vector<string> &values) {
+	auto location = root;
+	for (idx_t k = 0; k < table.partition_keys.size(); k++) {
+		location += "/" + HivePartitioning::Escape(table.partition_keys[k].name) + "=";
+		location += values[k] == HivePartitioning::DEFAULT_PARTITION_NAME ? values[k]
+		                                                                  : HivePartitioning::EscapeValue(values[k]);
+	}
+	return location;
+}
+
+void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, GlueRepairTableState &state) {
+	auto &bind_data = data.bind_data->Cast<GlueRepairTableBindData>();
+	auto &catalog = *bind_data.target.catalog;
+	auto &table = bind_data.target.table;
+	auto &root = bind_data.root;
+
+	// one recursive listing of the table location: on S3 a flat ListObjectsV2 over the prefix
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto files = fs.GlobFiles(root + "/**", FileGlobOptions::ALLOW_EMPTY);
+
+	// the distinct data directories below the root that follow the partition scheme, keyed by their values so
+	// the result is deduplicated and sorted
+	auto root_prefix = root + "/";
+	unordered_set<string> seen_directories;
+	map<vector<string>, string> discovered; // values -> location, first location for a set of values wins
+	for (auto &file : files) {
+		if (!StringUtil::StartsWith(file.path, root_prefix)) {
+			continue;
+		}
+		auto separator = file.path.find_last_of('/');
+		if (separator == string::npos || separator < root_prefix.size()) {
+			continue;
+		}
+		auto directory = file.path.substr(0, separator);
+		if (!seen_directories.insert(directory).second) {
+			continue;
+		}
+		auto relative = directory.substr(root_prefix.size());
+		if (RepairIsHiddenPath(relative)) {
+			continue;
+		}
+		vector<string> values;
+		if (!ReadDiscoveredPartition(table, relative, values)) {
+			continue;
+		}
+		discovered.emplace(std::move(values), directory);
+	}
+
+	// only add the partitions that are not registered yet
+	auto existing = GlueAPI::GetPartitions(context, catalog, table.database_name, table.name);
+	set<vector<string>> existing_values;
+	for (auto &partition : existing) {
+		existing_values.insert(partition.values);
+	}
+	for (auto &entry : discovered) {
+		if (existing_values.count(entry.first)) {
+			continue;
+		}
+		GluePartitionInput partition;
+		partition.values = entry.first;
+		partition.location = RepairPartitionLocation(root, table, entry.first);
+		state.added.push_back(std::move(partition));
+	}
+	if (state.added.empty()) {
+		return;
+	}
+	GlueAPI::BatchCreatePartitions(context, catalog, table.database_name, table.name, state.added);
+}
+
+void GlueRepairTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &bind_data = data.bind_data->Cast<GlueRepairTableBindData>();
+	auto &state = data.global_state->Cast<GlueRepairTableState>();
+	if (!state.applied) {
+		state.applied = true;
+		GlueRepairTableApply(context, data, state);
+	}
+	auto &keys = bind_data.target.table.partition_keys;
+	idx_t count = 0;
+	while (state.offset < state.added.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &partition = state.added[state.offset++];
+		for (idx_t k = 0; k < keys.size(); k++) {
+			output.data[k].Append(PartitionValueToValue(context, partition.values[k], bind_data.key_types[k]));
+		}
+		output.data[keys.size()].Append(Value(partition.location));
+		count++;
+	}
+}
+
 } // namespace
 
 TableFunction GetGluePartitionsFunction() {
@@ -762,6 +930,12 @@ TableFunction GetGlueSetTableLocationFunction() {
 TableFunction GetGlueAlterTableFunction() {
 	TableFunction function("glue_alter_table", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAlterTableScan,
 	                       GlueAlterTableBind, GlueAlterTableInit);
+	return function;
+}
+
+TableFunction GetGlueRepairTableFunction() {
+	TableFunction function("glue_repair_table", {LogicalType::VARCHAR}, GlueRepairTableScan, GlueRepairTableBind,
+	                       GlueRepairTableInit);
 	return function;
 }
 

@@ -84,7 +84,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetGlueSetPartitionLocationFunction());
 	loader.RegisterFunction(GetGlueSetTableLocationFunction());
 	loader.RegisterFunction(GetGlueAlterTableFunction());
-	// ALTER TABLE ... ADD / DROP PARTITION etc., switched on with SET active_grammar_extensions = ['glue_hive_ddl']
+	loader.RegisterFunction(GetGlueRepairTableFunction());
+	// ALTER TABLE ... ADD / DROP PARTITION and MSCK REPAIR TABLE, switched on with
+	// SET active_grammar_extensions = ['glue_hive_ddl']
 	RegisterGlueGrammarExtension(instance);
 	loader.RegisterFunction(GetHiveScanFunction(instance));
 }
