@@ -1,0 +1,132 @@
+# name: test/sql/hive/ddl/create_table/create_typed_table_sql.test
+# description: CREATE HIVE | ICEBERG TABLE through the glue_hive_ddl grammar extension
+# group: [create_table]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.typed_hive;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.typed_hive_ctas;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.typed_iceberg;
+
+# without the grammar extension the table type is a syntax error
+statement error
+CREATE HIVE TABLE my_datalake.default.typed_hive (a INTEGER, b VARCHAR);
+----
+syntax error
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+#---------------------------------------------------------------------------
+# CREATE HIVE TABLE
+#---------------------------------------------------------------------------
+statement ok
+CREATE HIVE TABLE my_datalake.default.typed_hive (a INTEGER, b VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/typed_hive_data/');
+
+query II
+SELECT glue_table_type, location FROM glue_get_table_response('my_datalake.default.typed_hive');
+----
+EXTERNAL_TABLE	{DEFAULT_S3_LOCATION}/{TEST_DIR}/typed_hive_data
+
+query T
+SELECT tags['table_type'] FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'typed_hive';
+----
+HIVE
+
+statement ok
+INSERT INTO my_datalake.default.typed_hive VALUES (1, 'x');
+
+query IT
+SELECT * FROM my_datalake.default.typed_hive;
+----
+1	x
+
+# case insensitive, and IF NOT EXISTS / other options still apply
+statement ok
+create hive table if not exists my_datalake.default.typed_hive (other INTEGER);
+
+statement error
+CREATE HIVE TABLE my_datalake.default.typed_hive (a INTEGER);
+----
+already exists
+
+# CTAS
+statement ok
+CREATE OR REPLACE HIVE TABLE my_datalake.default.typed_hive_ctas WITH (format = 'csv') AS SELECT 2 AS c;
+
+query I
+SELECT * FROM my_datalake.default.typed_hive_ctas;
+----
+2
+
+# the keyword and the type option can not both be given
+statement error
+CREATE HIVE TABLE my_datalake.default.typed_hive_both (a INTEGER) WITH (type = 'HIVE');
+----
+can not also set the 'type' option
+
+#---------------------------------------------------------------------------
+# CREATE ICEBERG TABLE: parses, but is not implemented
+#---------------------------------------------------------------------------
+statement error
+CREATE ICEBERG TABLE my_datalake.default.typed_iceberg (c INTEGER, d VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/typed_iceberg_data/');
+----
+Not implemented Error: Creating Iceberg tables in Glue is not supported yet
+
+statement error
+CREATE TABLE my_datalake.default.typed_iceberg (c INTEGER) WITH (type = 'iceberg');
+----
+Not implemented Error: Creating Iceberg tables in Glue is not supported yet
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'typed_iceberg';
+----
+0
+
+#---------------------------------------------------------------------------
+# any other table type: rejected by the catalog, like WITH (type = ...) is
+#---------------------------------------------------------------------------
+statement error
+CREATE BLAH TABLE my_datalake.default.typed_blah (e INTEGER, f VARCHAR);
+----
+Unknown Glue table type 'BLAH', only 'HIVE' is supported
+
+statement error
+CREATE TABLE my_datalake.default.typed_blah (e INTEGER) WITH (type = 'BLAH');
+----
+Unknown Glue table type 'BLAH', only 'HIVE' is supported
+
+# a table type outside a Glue catalog: DuckDB's own catalog takes no table options
+statement error
+CREATE HIVE TABLE memory.main.typed_duckdb (a INTEGER);
+----
+WITH clause is not supported for tables in a duckdb catalog
+
+# the other CREATE statements are unaffected
+statement ok
+CREATE TEMP TABLE typed_local (a INTEGER);
+
+statement ok
+CREATE MACRO typed_macro(x) AS x + 1;
+
+statement ok
+DROP TABLE my_datalake.default.typed_hive;
+
+statement ok
+DROP TABLE my_datalake.default.typed_hive_ctas;

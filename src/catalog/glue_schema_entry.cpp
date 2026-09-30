@@ -69,9 +69,11 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 
 		if (StringUtil::CIEquals(key, "type")) {
 			// only Hive (Glue native) tables can be created
+			if (StringUtil::Upper(string_value) == "ICEBERG") {
+				throw NotImplementedException("Creating Iceberg tables in Glue is not supported yet");
+			}
 			if (StringUtil::Upper(string_value) != "HIVE") {
-				throw BinderException("Unknown Glue table type '%s' for option 'type', only 'HIVE' is supported",
-				                      string_value);
+				throw BinderException("Unknown Glue table type '%s', only 'HIVE' is supported", string_value);
 			}
 		} else if (StringUtil::CIEquals(key, "format")) {
 			result.format = HiveFileFormatFromString(string_value);
