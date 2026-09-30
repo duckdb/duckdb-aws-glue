@@ -61,6 +61,9 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
   `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
+  `type = 'HIVE'` is accepted; `type = 'ICEBERG'` fails with a Not implemented error, any other type with a binder
+  error. With the `glue_hive_ddl` grammar extension (see below) the type can be written in front of the table:
+  `CREATE HIVE TABLE ...` is `CREATE TABLE ... WITH (type = 'HIVE')`, and the same errors apply.
 - `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per partition
   touched, partition columns are not stored in the files) and register new partition directories in Glue with
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
@@ -129,8 +132,8 @@ order.
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
 
-The Hive SQL forms are available as well, through the `glue_hive_ddl` grammar extension the extension registers.
-Grammar extensions are switched on per connection:
+The Hive SQL forms (and `CREATE HIVE TABLE`) are available as well, through the `glue_hive_ddl` grammar extension the
+extension registers. Grammar extensions are switched on per connection:
 
 ```sql
 SET active_grammar_extensions = ['glue_hive_ddl'];

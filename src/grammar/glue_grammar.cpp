@@ -7,10 +7,12 @@
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/grammar_change.hpp"
+#include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/peg/parsed_grammar.hpp"
 #include "duckdb/parser/peg/transformer/parse_result.hpp"
 #include "duckdb/parser/peg/transformer/peg_transformer.hpp"
 #include "duckdb/parser/statement/call_statement.hpp"
+#include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 
 namespace duckdb {
@@ -151,11 +153,31 @@ unique_ptr<TransformProcess> StartGlueAlterTableTransform(PEGTransformer &transf
 	return make_uniq<FinalizeTransformProcess>(transformer, parse_result, FinalizeGlueAlterTable);
 }
 
+//! GlueTypedCreateTableStmt <- Identifier CreateTableStmt
+//! -> CREATE TABLE ... WITH (type = '<identifier>', ...); which types exist is up to the catalog
+unique_ptr<TransformResultValue> FinalizeGlueTypedCreateTable(PEGTransformer &transformer, ParseResult &parse_result) {
+	auto &list = parse_result.Cast<ListParseResult>();
+	auto table_type = StringUtil::Upper(transformer.Transform<string>(list.GetChild(0)));
+	auto statement = transformer.Transform<unique_ptr<CreateStatement>>(list.GetChild(1));
+	auto &options = statement->info->Cast<CreateTableInfo>().options;
+	if (options.find("type") != options.end()) {
+		throw ParserException("CREATE %s TABLE can not also set the 'type' option", table_type);
+	}
+	options["type"] = Constant(Value(table_type));
+	return make_uniq<TypedTransformResult<unique_ptr<CreateStatement>>>(std::move(statement));
+}
+
+unique_ptr<TransformProcess> StartGlueTypedCreateTableTransform(PEGTransformer &transformer,
+                                                                ParseResult &parse_result) {
+	return make_uniq<FinalizeTransformProcess>(transformer, parse_result, FinalizeGlueTypedCreateTable);
+}
+
 class GlueHiveDDLGrammar final : public GrammarExtension {
 public:
 	GlueHiveDDLGrammar()
 	    : GrammarExtension("glue_hive_ddl", "Hive partition DDL for Hive tables in Glue: ALTER TABLE ... "
-	                                        "ADD / DROP PARTITION, RENAME PARTITION, SET LOCATION") {
+	                                        "ADD / DROP PARTITION, RENAME PARTITION, SET LOCATION, "
+	                                        "CREATE <type> TABLE") {
 	}
 
 	vector<GrammarChange> GetChanges() const override {
@@ -179,6 +201,10 @@ public:
 		// tried before the built-in ALTER statement; it fails on anything that is not a partition action, so the
 		// built-in ALTER TABLE forms are unaffected
 		changes.push_back(GrammarChange::PrependChoice("Statement", "GlueAlterTableStatement"));
+		changes.push_back(GrammarChange::AddRule("GlueTypedCreateTableStmt <- Identifier CreateTableStmt",
+		                                         StartGlueTypedCreateTableTransform));
+		// backtracks unless the identifier is followed by TABLE, so the other CREATE statements are unaffected
+		changes.push_back(GrammarChange::PrependChoice("CreateStatementVariation", "GlueTypedCreateTableStmt"));
 		return changes;
 	}
 };
