@@ -1,0 +1,61 @@
+# name: test/sql/hive/hive_scan/bind_info.test
+# description: Hive scan get_bind_info: a filtered catalog scan plans without crashing; hive_scan() selects external
+# group: [hive_scan]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bi_orders;
+
+# a partitioned Glue table: planning a scan over it drives the get_bind_info callback
+statement ok
+CREATE TABLE my_datalake.default.bi_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.bi_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15');
+
+# the bound schema is the one Glue defines (data columns first, partition key last)
+query II
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.bi_orders);
+----
+id	INTEGER
+amount	DOUBLE
+dt	VARCHAR
+
+# registering get_bind_info must not change what the catalog scan reads
+query III
+SELECT id, amount, dt FROM my_datalake.default.bi_orders ORDER BY id;
+----
+1	10.0	2016-05-14
+2	20.0	2016-05-15
+
+# a filtered scan forces LogicalGet::GetTable() during optimization, invoking get_bind_info
+# partition pruning to the matching partition is also unchanged; a callback fault would fail here.
+query I
+SELECT id FROM my_datalake.default.bi_orders WHERE dt = '2016-05-15';
+----
+2
+
+# hive_scan() has no catalog entry: get_bind_info selects the external (null-table) branch; reads unchanged
+query III
+SELECT id, amount, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bi_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
+ORDER BY id;
+----
+1	10.0	2016-05-14
+2	20.0	2016-05-15
+
+statement ok
+DROP TABLE my_datalake.default.bi_orders;

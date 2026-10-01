@@ -375,6 +375,16 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	throw NotImplementedException("HiveScan deserialization not implemented");
 }
 
+static BindInfo GlueHiveBindInfo(const optional_ptr<FunctionData> bind_data) {
+	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
+	auto &reader = multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>();
+	auto table = reader.GetTable();
+	if (!table) {
+		return BindInfo(ScanType::EXTERNAL);
+	}
+	return BindInfo(*table);
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -424,6 +434,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.SetSerializeCallback(HiveScanSerialize);
 	scan_function.SetDeserializeCallback(HiveScanDeserialize);
 	scan_function.cardinality = HiveScanCardinality;
+	scan_function.get_bind_info = GlueHiveBindInfo;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
@@ -466,6 +477,10 @@ const HiveScanInfo &HiveMultiFileReader::ScanInfo() const {
 		                        "from a serialized plan)");
 	}
 	return *scan_info;
+}
+
+optional_ptr<TableCatalogEntry> HiveMultiFileReader::GetTable() const {
+	return ScanInfo().table;
 }
 
 shared_ptr<MultiFileList> HiveMultiFileReader::CreateFileList(ClientContext &context, const vector<string> &paths,

@@ -71,6 +71,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	auto scan_info = make_shared_ptr<HiveScanInfo>();
 	scan_info->database_name = latest_info.database_name;
 	scan_info->table_name = latest_info.name;
+	scan_info->table = this;
 	scan_info->root_location = latest_info.location;
 	scan_info->file_format = latest_info.GetFileFormat();
 	scan_info->delimiter = latest_info.GetFieldDelimiter();
