@@ -205,4 +205,91 @@ TableFunction GetGlueGetTableResponseFunction() {
 	return function;
 }
 
+//===--------------------------------------------------------------------===//
+// glue_alter_schema('<catalog>.<schema>', MAP {'k': 'v', ...})
+// Called by the glue_hive_ddl grammar for:
+//   ALTER (DATABASE|SCHEMA) <name> SET DBPROPERTIES ('k'='v', ...)
+//===--------------------------------------------------------------------===//
+
+namespace {
+
+struct GlueAlterSchemaBindData : public TableFunctionData {
+	GlueCatalog *catalog = nullptr;
+	string database_name;
+	unordered_map<string, string> new_parameters;
+};
+
+struct GlueAlterSchemaState : public GlobalTableFunctionState {
+	bool done = false;
+};
+
+unique_ptr<FunctionData> GlueAlterSchemaBind(ClientContext &context, TableFunctionBindInput &input,
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
+	// arg 0: '<catalog>.<schema>'
+	auto schema_arg = input.inputs[0].GetValue<string>();
+	auto qualified = QualifiedName::Parse(schema_arg);
+
+	auto result = make_uniq<GlueAlterSchemaBindData>();
+
+	auto &path = qualified.Path();
+	if (path.size() != 2) {
+		throw BinderException(
+		    "glue_alter_schema expects a catalog-qualified schema name '<catalog>.<schema>', got '%s'", schema_arg);
+	}
+	auto &catalog_name = path[0];
+	auto catalog_entry = Catalog::GetCatalogEntry(context, catalog_name);
+	if (!catalog_entry) {
+		throw BinderException("Catalog '%s' does not exist", catalog_name.GetIdentifierName());
+	}
+	if (catalog_entry->GetCatalogType() != "glue") {
+		throw BinderException("glue_alter_schema only works on Glue catalogs, '%s' is a %s catalog",
+		                      catalog_name.GetIdentifierName(), catalog_entry->GetCatalogType());
+	}
+	result->catalog = &catalog_entry->Cast<GlueCatalog>();
+	result->database_name = path[1].GetIdentifierName();
+
+	// arg 1: MAP(VARCHAR, VARCHAR) of properties to set
+	auto &props_val = input.inputs[1];
+	if (props_val.IsNull() || props_val.type().id() != LogicalTypeId::MAP) {
+		throw BinderException("glue_alter_schema expects the properties as a MAP(VARCHAR, VARCHAR)");
+	}
+	for (auto &entry : MapValue::GetChildren(props_val)) {
+		auto &kv = StructValue::GetChildren(entry);
+		if (kv[0].IsNull() || kv[1].IsNull()) {
+			throw BinderException("glue_alter_schema: a property key and value must not be NULL");
+		}
+		result->new_parameters[StringValue::Get(kv[0])] = StringValue::Get(kv[1]);
+	}
+
+	names = {"parameters"};
+	return_types = {LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)};
+	return std::move(result);
+}
+
+unique_ptr<GlobalTableFunctionState> GlueAlterSchemaInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<GlueAlterSchemaState>();
+}
+
+void GlueAlterSchemaScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GlueAlterSchemaState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	auto &bind_data = data.bind_data->Cast<GlueAlterSchemaBindData>();
+	auto parameters =
+	    GlueAPI::UpdateDatabase(context, *bind_data.catalog, bind_data.database_name, bind_data.new_parameters);
+	output.SetValue(0, 0, MapToValue(parameters));
+	output.SetCardinality(1);
+}
+
+} // namespace
+
+TableFunction GetGlueAlterSchemaFunction() {
+	auto map_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
+	TableFunction function("glue_alter_schema", {LogicalType::VARCHAR, map_type}, GlueAlterSchemaScan,
+	                       GlueAlterSchemaBind, GlueAlterSchemaInit);
+	return function;
+}
+
 } // namespace duckdb

@@ -44,6 +44,11 @@ public:
 	static void UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database);
 	//! Delete a database (and all of its tables), throws a CatalogException if it does not exist
 	static void DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name);
+	//! Merge new key/value pairs into the parameters of an existing database (UpdateDatabase), returns the parameters
+	//! as written. Throws a CatalogException if the database does not exist.
+	static unordered_map<string, string> UpdateDatabase(ClientContext &context, GlueCatalog &catalog,
+	                                                    const string &database_name,
+	                                                    const unordered_map<string, string> &new_parameters);
 	//! Create a standard (Hive style) Glue table storing parquet files at 'table.location', with the columns and
 	//! partition keys in 'table'
 	static void CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);

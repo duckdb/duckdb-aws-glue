@@ -40,6 +40,11 @@ TableFunction GetGlueSetTableLocationFunction();
 //! of them is applied, consecutive adds go out as one BatchCreatePartition call.
 TableFunction GetGlueAlterTableFunction();
 
+//! glue_alter_schema('<catalog>.<schema>', MAP {'k':'v', ...}): merges the given key/value pairs into the
+//! parameters of an existing Glue database and returns the parameters as written (what the glue_hive_ddl grammar
+//! extension turns ALTER (DATABASE|SCHEMA) <name> SET DBPROPERTIES (...) into).
+TableFunction GetGlueAlterSchemaFunction();
+
 //! hive_scan('s3://root', schema := {col: 'TYPE', ...}, partitions := [{key: value, ..., location: '...'}, ...],
 //! partition_keys := [...]): read a parquet Hive table without a catalog. The same scan as for a Glue Hive table,
 //! with the schema and the partitions (values and locations) given as arguments.

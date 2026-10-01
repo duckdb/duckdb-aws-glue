@@ -140,4 +140,51 @@ void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const
 	}
 }
 
+unordered_map<string, string> GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog,
+                                                      const string &database_name,
+                                                      const unordered_map<string, string> &new_parameters) {
+	CheckWritable(catalog, "UpdateDatabase");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+
+	// Fetch the current database to preserve existing fields (description, location_uri, existing parameters)
+	GlueDatabaseInfo current;
+	if (!GlueAPI::GetDatabase(context, catalog, database_name, current)) {
+		throw CatalogException("Glue database with name \"%s\" does not exist", database_name);
+	}
+
+	// Merge: new_parameters wins on key conflicts
+	for (auto &kv : new_parameters) {
+		current.parameters[kv.first] = kv.second;
+	}
+
+	Aws::Glue::Model::DatabaseInput input;
+	input.SetName(current.name);
+	if (!current.description.empty()) {
+		input.SetDescription(current.description);
+	}
+	if (!current.location_uri.empty()) {
+		input.SetLocationUri(current.location_uri);
+	}
+	if (!current.parameters.empty()) {
+		input.SetParameters(ToAwsMap(current.parameters));
+	}
+
+	Aws::Glue::Model::UpdateDatabaseRequest request;
+	SetCatalogId(request, catalog);
+	request.SetName(database_name);
+	request.SetDatabaseInput(input);
+	auto outcome = client->UpdateDatabase(request);
+	if (!outcome.IsSuccess()) {
+		if (IsEntityNotFound(outcome)) {
+			throw CatalogException("Glue database with name \"%s\" does not exist", database_name);
+		}
+		ThrowGlueError(outcome, StringUtil::Format("UpdateDatabase '%s'", database_name));
+	}
+
+	// Invalidate the cached schema entry so the next lookup re-fetches from Glue
+	catalog.GetSchemas().RemoveEntry(database_name);
+	return current.parameters;
+}
+
 } // namespace duckdb

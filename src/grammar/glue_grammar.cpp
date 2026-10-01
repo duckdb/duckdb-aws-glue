@@ -151,11 +151,54 @@ unique_ptr<TransformProcess> StartGlueAlterTableTransform(PEGTransformer &transf
 	return make_uniq<FinalizeTransformProcess>(transformer, parse_result, FinalizeGlueAlterTable);
 }
 
+//! GlueAlterSchemaStatement <- ('ALTER') ('DATABASE' / 'SCHEMA') QualifiedName 'SET' 'DBPROPERTIES'
+//! Parens(List(GlueDbProperty)) GlueDbProperty <- StringLiteral '=' StringLiteral
+//! -> CALL glue_alter_schema('<catalog>.<schema>', map {key: value, ...})
+unique_ptr<TransformResultValue> FinalizeGlueAlterSchema(PEGTransformer &transformer, ParseResult &parse_result) {
+	auto &list = parse_result.Cast<ListParseResult>();
+	// children: 0='ALTER', 1=('DATABASE'/'SCHEMA' choice), 2=QualifiedName, 3='SET', 4='DBPROPERTIES',
+	// 5=Parens(List(...))
+	auto schema_name = transformer.Transform<QualifiedName>(list.GetChild(2));
+
+	// Extract key/value pairs from the property list inside the parens
+	auto &props_list = PEGTransformerFactory::ExtractResultFromParens(list.GetChild(5));
+	auto entries = PEGTransformerFactory::ExtractParseResultsFromList(props_list);
+
+	// Build map_value({key: value, ...})
+	vector<FunctionArgument> map_keys;
+	vector<FunctionArgument> map_values;
+	for (auto &entry : entries) {
+		auto &kv = entry.get().Cast<ListParseResult>();
+		auto key = transformer.Transform<string>(kv.GetChild(0));
+		auto value = transformer.Transform<string>(kv.GetChild(2));
+		map_keys.emplace_back(Constant(Value(key)));
+		map_values.emplace_back(Constant(Value(value)));
+	}
+
+	vector<FunctionArgument> map_args;
+	map_args.emplace_back(Call("list_value", std::move(map_keys)));
+	map_args.emplace_back(Call("list_value", std::move(map_values)));
+	auto map_expr = Call("map", std::move(map_args));
+
+	vector<FunctionArgument> arguments;
+	arguments.emplace_back(Constant(Value(schema_name.ToString())));
+	arguments.emplace_back(std::move(map_expr));
+	auto statement = make_uniq<CallStatement>();
+	statement->function = Call("glue_alter_schema", std::move(arguments));
+	unique_ptr<SQLStatement> result = std::move(statement);
+	return make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(std::move(result));
+}
+
+unique_ptr<TransformProcess> StartGlueAlterSchemaTransform(PEGTransformer &transformer, ParseResult &parse_result) {
+	return make_uniq<FinalizeTransformProcess>(transformer, parse_result, FinalizeGlueAlterSchema);
+}
+
 class GlueHiveDDLGrammar final : public GrammarExtension {
 public:
 	GlueHiveDDLGrammar()
 	    : GrammarExtension("glue_hive_ddl", "Hive partition DDL for Hive tables in Glue: ALTER TABLE ... "
-	                                        "ADD / DROP PARTITION, RENAME PARTITION, SET LOCATION") {
+	                                        "ADD / DROP PARTITION, RENAME PARTITION, SET LOCATION; "
+	                                        "ALTER (DATABASE|SCHEMA) ... SET DBPROPERTIES") {
 	}
 
 	vector<GrammarChange> GetChanges() const override {
@@ -179,6 +222,15 @@ public:
 		// tried before the built-in ALTER statement; it fails on anything that is not a partition action, so the
 		// built-in ALTER TABLE forms are unaffected
 		changes.push_back(GrammarChange::PrependChoice("Statement", "GlueAlterTableStatement"));
+
+		// ALTER (DATABASE|SCHEMA) <name> SET DBPROPERTIES ('k'='v', ...)
+		// Tried before built-in ALTER so DBPROPERTIES is handled before DuckDB rejects it as unknown.
+		changes.push_back(GrammarChange::AddRule(
+		    "GlueAlterSchemaStatement <- 'ALTER' ('DATABASE' / 'SCHEMA') QualifiedName 'SET' 'DBPROPERTIES' "
+		    "Parens(List(GlueDbProperty))",
+		    StartGlueAlterSchemaTransform));
+		changes.push_back(GrammarChange::AddRule("GlueDbProperty <- StringLiteral '=' StringLiteral"));
+		changes.push_back(GrammarChange::PrependChoice("Statement", "GlueAlterSchemaStatement"));
 		return changes;
 	}
 };

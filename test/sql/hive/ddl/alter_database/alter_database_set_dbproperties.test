@@ -1,0 +1,151 @@
+# name: test/sql/hive/ddl/alter_database/alter_database_set_dbproperties.test
+# description: ALTER (DATABASE|SCHEMA) <name> SET DBPROPERTIES ('k'='v', ...) merges properties into a Glue database
+# group: [alter_database]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
+    TYPE GLUE,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.alter_db_test;
+
+statement ok
+CREATE SCHEMA my_datalake.alter_db_test;
+
+#---------------------------------------------------------------------------
+# ALTER DATABASE form: sets a single property
+#---------------------------------------------------------------------------
+statement ok
+ALTER DATABASE my_datalake.alter_db_test SET DBPROPERTIES ('owner-team' = 'test-team');
+
+#---------------------------------------------------------------------------
+# ALTER SCHEMA form is a synonym; adds a second property without removing the first
+#---------------------------------------------------------------------------
+statement ok
+ALTER SCHEMA my_datalake.alter_db_test SET DBPROPERTIES ('env' = 'test');
+
+#---------------------------------------------------------------------------
+# Multiple properties in one statement
+#---------------------------------------------------------------------------
+statement ok
+ALTER DATABASE my_datalake.alter_db_test SET DBPROPERTIES ('created-by' = 'iris', 'purpose' = 'integration-test');
+
+#---------------------------------------------------------------------------
+# Overwriting an existing key does not drop other keys (merge, not replace).
+# glue_alter_schema returns the parameters as written, merged onto what Glue
+# currently holds, so this asserts the earlier keys survived.
+#---------------------------------------------------------------------------
+query IIIII
+SELECT parameters['owner-team'], parameters['env'], parameters['created-by'],
+       parameters['purpose'], parameters['direct-call']
+FROM glue_alter_schema('my_datalake.alter_db_test', MAP {'owner-team': 'new-team', 'direct-call': 'yes'});
+----
+new-team	test	iris	integration-test	yes
+
+#---------------------------------------------------------------------------
+# Persistence: a second ATTACH re-fetches from Glue; the schema must exist
+# and be alterable — proving the writes landed in Glue, not just in-process cache
+#---------------------------------------------------------------------------
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS verify (
+    TYPE GLUE,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'verify' AND schema_name = 'alter_db_test';
+----
+1
+
+# An alter through the fresh attach succeeds and sees the properties stored in Glue by the first attach
+query III
+SELECT parameters['owner-team'], parameters['env'], parameters['via-verify']
+FROM glue_alter_schema('verify.alter_db_test', MAP {'via-verify': 'true'});
+----
+new-team	test	true
+
+#---------------------------------------------------------------------------
+# Read-only catalog must refuse ALTER DATABASE / glue_alter_schema
+#---------------------------------------------------------------------------
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS ro_datalake (
+    TYPE GLUE,
+    READ_ONLY,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement error
+ALTER DATABASE ro_datalake.alter_db_test SET DBPROPERTIES ('k' = 'v');
+----
+read-only mode
+
+statement error
+CALL glue_alter_schema('ro_datalake.alter_db_test', MAP {'k': 'v'});
+----
+read-only mode
+
+#---------------------------------------------------------------------------
+# Grammar extension must be active; without it the statement is a syntax error
+#---------------------------------------------------------------------------
+statement ok
+RESET active_grammar_extensions;
+
+statement error
+ALTER DATABASE my_datalake.alter_db_test SET DBPROPERTIES ('k' = 'v');
+----
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+#---------------------------------------------------------------------------
+# Error paths
+#---------------------------------------------------------------------------
+
+# Non-existent schema throws a CatalogException
+statement error
+ALTER DATABASE my_datalake.no_such_schema SET DBPROPERTIES ('k' = 'v');
+----
+Glue database with name "no_such_schema" does not exist
+
+# Non-Glue catalog is rejected at bind time
+statement error
+ALTER DATABASE memory.main SET DBPROPERTIES ('k' = 'v');
+----
+glue_alter_schema only works on Glue catalogs
+
+# Missing catalog qualification in the direct function
+statement error
+CALL glue_alter_schema('alter_db_test', MAP {'k': 'v'});
+----
+glue_alter_schema expects a catalog-qualified schema name
+
+# Properties must be a MAP
+statement error
+CALL glue_alter_schema('my_datalake.alter_db_test', 'not-a-map');
+----
+
+# A NULL property key or value is rejected
+statement error
+CALL glue_alter_schema('my_datalake.alter_db_test', MAP {'k': NULL});
+----
+must not be NULL
+
+#---------------------------------------------------------------------------
+# Cleanup
+#---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA my_datalake.alter_db_test;
