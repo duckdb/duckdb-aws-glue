@@ -1,0 +1,63 @@
+# name: test/sql/hive/bugs/s3_cardinality_pruning.test
+# description: S3 - partition pruning must be reflected in cardinality estimate.
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.prune20;
+
+statement ok
+CREATE TABLE my_datalake.default.prune20 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+# 20 partitions x 200 rows.
+statement ok
+INSERT INTO my_datalake.default.prune20 SELECT i, 'd' || (i % 20) FROM generate_series(1,4000) t(i);
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.prune20')), (SELECT count(*) FROM my_datalake.default.prune20);
+----
+20	4000
+
+# one partition of twenty should be estimated as 200 rows but the estimate is 40 today because
+# the predicate on partition column goes into scan and is assessed as having a default
+# selectivity of 0.2
+query II
+EXPLAIN SELECT * FROM my_datalake.default.prune20 WHERE dt = 'd7';
+----
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9][0-9]{0,2} rows.*
+
+# ten partitions of twenty hold ~2,000 rows and the scan estimates that correctly: the IN is pushed
+# into the scan as an OPTIONAL filter, and the 0.2 default selectivity is only applied when a
+# non-optional filter is present. The 0.2 lands on the Filter above instead, which reads ~400.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.prune20 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+physical_plan	<REGEX>:.*Read Parquet.*~[1-9],[0-9]{3} rows.*
+
+# a value with no partition prunes everything, the ~0 estimate comes out whether or not a column
+# carries statistics.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.prune20 WHERE dt = 'nosuchpartition';
+----
+physical_plan	<REGEX>:.*Read Parquet.*~0 rows.*
+
+# and it really is zero rows, not merely estimated so
+query I
+SELECT count(*) FROM my_datalake.default.prune20 WHERE dt = 'nosuchpartition';
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.prune20;

@@ -1,0 +1,146 @@
+# name: test/sql/hive/bugs/s3_cardinality_unpartitioned.test
+# description: S3 - UNPARTITIONED Glue table estimates must respond to table size
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.up_small;
+
+statement ok
+CREATE TABLE my_datalake.default.up_small (id INTEGER, v VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.up_small SELECT i, 'x' FROM generate_series(1,4000) t(i);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.up_big;
+
+statement ok
+CREATE TABLE my_datalake.default.up_big (id INTEGER, v VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.up_big SELECT i, 'x' FROM generate_series(1,100000) t(i);
+
+query II
+SELECT (SELECT count(*) FROM my_datalake.default.up_small), (SELECT count(*) FROM my_datalake.default.up_big);
+----
+4000	100000
+
+# one file, and its row count comes from the parquet footer, so the estimate is exact rather than a
+# range. It was a constant ~2,000 whatever the table held before the scan was costed from a sampled file.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.up_big;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~100,000 rows.*
+
+# the other half of the pair: the small table must not get the big one's estimate, so a fix that
+# returns any constant fails here.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.up_small;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+
+# ----------------------------------------------------------------------------------------------------
+# Many files of equal size: the measured file holds a tenth of the table's bytes, so the estimate has to
+# scale it up by the rest.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.up_many;
+
+statement ok
+CREATE TABLE my_datalake.default.up_many (id INTEGER, v VARCHAR);
+
+# ten inserts -> ten files of 5,000 rows in the table root
+loop i 0 10
+
+statement ok
+INSERT INTO my_datalake.default.up_many SELECT i, 'x' FROM generate_series(1,5000) t(i);
+
+endloop
+
+query I
+SELECT count(*) FROM my_datalake.default.up_many;
+----
+50000
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.up_many;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~50,000 rows.*
+
+# ----------------------------------------------------------------------------------------------------
+# No files at all: nothing to sample, and the estimate must not fall back to a fabricated constant.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.up_empty;
+
+statement ok
+CREATE TABLE my_datalake.default.up_empty (id INTEGER, v VARCHAR);
+
+query I
+SELECT count(*) FROM my_datalake.default.up_empty;
+----
+0
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.up_empty;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~0 rows.*
+
+# ----------------------------------------------------------------------------------------------------
+# Files of UNEQUAL size: 10 rows in one file and 90,000 in another, so the table holds 90,010. Bytes
+# carry that difference where a file count cannot, and the file measured is the largest one, so the
+# answer does not depend on which of the two random duckdb_<uuid>.parquet names sorts first.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.up_skew;
+
+statement ok
+CREATE TABLE my_datalake.default.up_skew (id INTEGER, v VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.up_skew SELECT i, 'x' FROM generate_series(1,10) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.up_skew SELECT i, 'x' FROM generate_series(1,90000) t(i);
+
+query I
+SELECT count(*) FROM my_datalake.default.up_skew;
+----
+90010
+
+# the 90,000-row file's rows, plus a correction for the 10-row one: just above 90,000, never 20 or 180,000
+query II
+EXPLAIN SELECT * FROM my_datalake.default.up_skew;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~90,[0-9]{3} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.up_small;
+
+statement ok
+DROP TABLE my_datalake.default.up_big;
+
+statement ok
+DROP TABLE my_datalake.default.up_many;
+
+statement ok
+DROP TABLE my_datalake.default.up_empty;
+
+statement ok
+DROP TABLE my_datalake.default.up_skew;

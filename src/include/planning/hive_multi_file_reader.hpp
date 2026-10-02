@@ -41,6 +41,9 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
+	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
+	table_statistics_extended_t format_statistics = nullptr;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
@@ -72,6 +75,10 @@ public:
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
+	//! The data files of one directory the scan reads, for measuring the table: the first partition's, or the location
+	//! of an unpartitioned table. Never the table root of a partitioned table, which is listed recursively. The listing
+	//! is kept until the query ends, and any scan listing the same directory in the query takes it from there.
+	vector<OpenFileInfo> ListSampleDirectory() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
 

@@ -1,8 +1,10 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "planning/hive_stats.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
+#include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
@@ -23,6 +25,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "core/glue_types.hpp"
 
 namespace duckdb {
 
@@ -191,7 +194,9 @@ void HiveMultiFileList::ListPartition(FileSystem &fs, idx_t partition_index) con
 	auto location = partition.location;
 	StringUtil::RTrim(location, "/");
 	vector<OpenFileInfo> partition_files;
-	ListDataFiles(fs, partition.location, partition_files);
+	if (!FindSampledListing(client_context, location, partition_files)) {
+		ListDataFiles(fs, partition.location, partition_files);
+	}
 	BuildPartitionLocations();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : partition_files) {
@@ -260,7 +265,9 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		if (scan_info->root_location.empty()) {
 			throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 		}
-		ListDataFiles(fs, scan_info->root_location, expanded_files);
+		if (!FindSampledListing(client_context, scan_info->root_location, expanded_files)) {
+			ListDataFiles(fs, scan_info->root_location, expanded_files);
+		}
 		return true;
 	}
 	if (job.root) {
@@ -310,6 +317,40 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 	return MultiFileCount(expanded_files.size() + remaining, FileExpansionType::NOT_ALL_FILES_KNOWN);
 }
 
+vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
+	lock_guard<mutex> lck(lock);
+	PlanListings();
+	auto &fs = FileSystem::GetFileSystem(client_context);
+	vector<OpenFileInfo> files;
+	if (scan_info->partition_keys.empty()) {
+		ListDataFiles(fs, scan_info->root_location, files);
+		AddSampledListing(client_context, scan_info->root_location, files);
+		return files;
+	}
+	if (jobs.empty()) {
+		return files;
+	}
+	// the partition the scan lists first, or the first of those a root listing would cover
+	auto partition_index = jobs[0].partitions[0];
+	auto location = scan_info->partitions[partition_index].location;
+	StringUtil::RTrim(location, "/");
+	vector<OpenFileInfo> listed;
+	ListDataFiles(fs, location, listed);
+	AddSampledListing(client_context, location, listed);
+	// as ListPartition keeps them: not the files of a partition registered at a location nested inside this one
+	BuildPartitionLocations();
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto &file : listed) {
+		auto owner = OwningPartition(file.path, location.size());
+		if (owner.IsValid() && owner.GetIndex() != partition_index) {
+			continue;
+		}
+		scan_info->file_partitions[file.path] = partition_index;
+		files.push_back(std::move(file));
+	}
+	return files;
+}
+
 vector<OpenFileInfo> HiveMultiFileList::GetDisplayFileList(optional_idx max_files) const {
 	bool expanded;
 	{
@@ -355,17 +396,6 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 	}
 	auto &function_set = catalog_entry->Cast<TableFunctionCatalogEntry>();
 	return *function_set.functions.GetFunctionByArguments(context, {LogicalType::LIST(LogicalType::VARCHAR)});
-}
-
-//! The file count the base cardinality asks for would list S3 while planning: estimate from the partitions instead
-static unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
-	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
-	auto count_info = bind_data.file_list->GetFileCount();
-	auto estimated_file_count = count_info.count;
-	if (count_info.type != FileExpansionType::ALL_FILES_EXPANDED) {
-		estimated_file_count *= 2;
-	}
-	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
 //! Serialize the fields that identify a scan; CommonSubplanOptimizer uses them to decide whether sub-plans are equal
@@ -443,6 +473,10 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	// common-subplan optimizer computes plan signatures
 	scan_function.SetSerializeCallback(HiveScanSerialize);
 	scan_function.SetDeserializeCallback(HiveScanDeserialize);
+	// partition columns are answered from the partition values; the format keeps every other column
+	scan_info->format_statistics = scan_function.statistics_extended;
+	scan_function.statistics_extended = HivePartitionStatistics;
+	// and the row count comes from a sampled file rather than the format's constant
 	scan_function.cardinality = HiveScanCardinality;
 
 	vector<LogicalType> return_types;
@@ -550,7 +584,7 @@ static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expres
 			}
 			auto &key = info.partition_keys[projection.partition_key_index];
 			auto &partition_value = partition.values[projection.partition_key_index];
-			auto value = HivePartitioning::GetValue(context, key, partition_value, colref.GetReturnType());
+			auto value = GlueTypes::PartitionValue(context, key, partition_value, colref.GetReturnType());
 			expr = make_uniq<BoundConstantExpression>(std::move(value));
 			return;
 		}
@@ -717,7 +751,7 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 		if (key_index != DConstants::INVALID_INDEX) {
 			// a partition column is a constant: the value Glue stores for the file's partition
 			auto &key = info.partition_keys[key_index];
-			auto value = HivePartitioning::GetValue(context, key, partition->values[key_index], global_column.type);
+			auto value = GlueTypes::PartitionValue(context, key, partition->values[key_index], global_column.type);
 			reader_data.constant_map.Add(MultiFileGlobalIndex(i), std::move(value));
 			continue;
 		}

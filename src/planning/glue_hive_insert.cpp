@@ -23,6 +23,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "core/glue_types.hpp"
 
 namespace duckdb {
 
@@ -95,8 +96,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, GlueTa
 		vector<unique_ptr<Expression>> conditions;
 		for (idx_t i = 0; i < partition_columns.size(); i++) {
 			auto column_index = partition_columns[i];
-			auto value = HivePartitioning::GetValue(context, table_info.partition_keys[i].name, partition.values[i],
-			                                        types[column_index]);
+			auto value = GlueTypes::PartitionValue(context, table_info.partition_keys[i].name, partition.values[i],
+			                                       types[column_index]);
 			hive_directory += i > 0 ? "/" : "";
 			hive_directory += HivePartitioning::Escape(names[column_index].GetIdentifierName()) + "=";
 			hive_directory += value.IsNull() ? HivePartitioning::DEFAULT_PARTITION_NAME

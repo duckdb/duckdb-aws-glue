@@ -1,0 +1,164 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_date_key.test
+# description: partition-column statistics on a DATE key.
+# group: [bugs]
+
+# Range filters must return every matching row.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.dkey;
+
+statement ok
+CREATE TABLE my_datalake.default.dkey (id INTEGER, d DATE) PARTITIONED BY (d);
+
+statement ok
+INSERT INTO my_datalake.default.dkey VALUES (1, DATE '2026-01-01'), (2, DATE '2026-06-15'), (3, DATE '2026-12-31');
+
+# the DATE key round-trips through Glue's string storage
+query IT
+SELECT id, d FROM my_datalake.default.dkey ORDER BY id;
+----
+1	2026-01-01
+2	2026-06-15
+3	2026-12-31
+
+query T
+SELECT d FROM glue_partitions('my_datalake.default.dkey') ORDER BY d;
+----
+2026-01-01
+2026-06-15
+2026-12-31
+
+# GREEN and the important half: range filters must keep every matching row
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d >= DATE '2026-06-01';
+----
+2
+
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d < DATE '2026-06-01';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d BETWEEN DATE '2026-01-01' AND DATE '2026-12-31';
+----
+3
+
+# the exact bounds must be inclusive at both ends -- an off-by-one in min/max shows up here first
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d = DATE '2026-01-01';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d = DATE '2026-12-31';
+----
+1
+
+# a range entirely outside the data is allowed to return nothing
+query I
+SELECT count(*) FROM my_datalake.default.dkey WHERE d > DATE '2027-01-01';
+----
+0
+
+# RED: three partitions, so at most three groups
+query II
+EXPLAIN SELECT d, count(*) FROM my_datalake.default.dkey GROUP BY d;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~[0-9]{1,2} rows.*
+
+# ----------------------------------------------------------------------------------------------------
+# The same filters as estimates. One row per partition above cannot show a row count, so this is a
+# second table with 100 rows in each of 4 date partitions.
+#
+# A DATE key prunes exactly like a VARCHAR one -- the round trip through Glue's string storage costs
+# nothing -- and the estimate is wrong the same way: a range or an equality is pushed into the scan and
+# picks up a flat DEFAULT_SELECTIVITY of 0.2, so it lands 5x low over the partitions it kept.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.dkey_card;
+
+statement ok
+CREATE TABLE my_datalake.default.dkey_card (id INTEGER, d DATE) PARTITIONED BY (d);
+
+# 4 partitions 100 days apart, 100 rows each
+statement ok
+INSERT INTO my_datalake.default.dkey_card
+    SELECT i, DATE '2026-01-01' + INTERVAL (i % 4 * 100) DAY FROM generate_series(1,400) t(i);
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.dkey_card')),
+       (SELECT count(*) FROM my_datalake.default.dkey_card);
+----
+4	400
+
+query T
+SELECT d FROM glue_partitions('my_datalake.default.dkey_card') ORDER BY d;
+----
+2026-01-01
+2026-04-11
+2026-07-20
+2026-10-28
+
+# no predicate: nothing to apply a selectivity to, so the table's own count comes through
+query II
+EXPLAIN SELECT * FROM my_datalake.default.dkey_card;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~400 rows.*
+
+# a half-open range each way: 2 partitions of 4, holding 200 rows
+query II
+EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d >= DATE '2026-07-01';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/4.*~40 rows.*
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d < DATE '2026-07-01';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/4.*~40 rows.*
+
+# an exact date: the one partition, holding 100
+query II
+EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d = DATE '2026-01-01';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/4.*~20 rows.*
+
+# past every partition: pruned to nothing, and zero needs no selectivity to be right
+query II
+EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d > DATE '2027-06-01';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 0/4.*~0 rows.*
+
+# the control: an IN over two dates is not pushed into the scan, so the scan's own count over the two
+# partitions it kept is visible and exact. Same prune, 5x apart from the equality above
+query II
+EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d IN (DATE '2026-01-01', DATE '2026-07-20');
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/4.*~200 rows.*
+
+# a BETWEEN spanning every partition prunes NOTHING and is still charged the 0.2: 400 rows estimated at
+# 80. Pruning is not what triggers it -- being a filter the optimizer cannot see through is
+query II
+EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d BETWEEN DATE '2026-01-01' AND DATE '2026-10-28';
+----
+physical_plan	<REGEX>:.*Read Parquet.*~80 rows.*
+
+statement ok
+DROP TABLE my_datalake.default.dkey;
+
+statement ok
+DROP TABLE my_datalake.default.dkey_card;

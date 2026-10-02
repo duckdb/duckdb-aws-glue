@@ -1,0 +1,162 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_case_differing_values.test
+# description: partition-column statistics must not fold case.
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.stat_case;
+
+statement ok
+CREATE TABLE my_datalake.default.stat_case (id INTEGER, country VARCHAR) PARTITIONED BY (country);
+
+statement ok
+INSERT INTO my_datalake.default.stat_case VALUES (1, 'US'), (2, 'us');
+
+# two partitions, two rows -- the fixture itself, which only holds on #8
+query II
+SELECT id, country FROM my_datalake.default.stat_case ORDER BY id;
+----
+1	US
+2	us
+
+query I
+SELECT country FROM glue_partitions('my_datalake.default.stat_case') ORDER BY country;
+----
+US
+us
+
+# an equality filter on either value finds its own row and only its own row.
+query I
+SELECT id FROM my_datalake.default.stat_case WHERE country = 'US';
+----
+1
+
+query I
+SELECT id FROM my_datalake.default.stat_case WHERE country = 'us';
+----
+2
+
+# a range spanning both keeps both. VARCHAR compares by bytes, so 'US' < 'us'
+query I
+SELECT count(*) FROM my_datalake.default.stat_case WHERE country BETWEEN 'US' AND 'us';
+----
+2
+
+# each bound probed on its own
+query I
+SELECT id FROM my_datalake.default.stat_case WHERE country > 'US';
+----
+2
+
+query I
+SELECT id FROM my_datalake.default.stat_case WHERE country < 'us';
+----
+1
+
+# and a value that really is outside the set is still allowed to prune to nothing
+query I
+SELECT count(*) FROM my_datalake.default.stat_case WHERE country = 'Us';
+----
+0
+
+# ----------------------------------------------------------------------------------------------------
+# The same question as estimates, which needs a bigger fixture than the two rows above.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.vol_case;
+
+statement ok
+CREATE TABLE my_datalake.default.vol_case (id INTEGER, country VARCHAR) PARTITIONED BY (country);
+
+statement ok
+INSERT INTO my_datalake.default.vol_case SELECT i, CASE WHEN i % 2 = 0 THEN 'US' ELSE 'us' END FROM generate_series(1,600) t(i);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.vol_ctrl;
+
+statement ok
+CREATE TABLE my_datalake.default.vol_ctrl (id INTEGER, country VARCHAR) PARTITIONED BY (country);
+
+statement ok
+INSERT INTO my_datalake.default.vol_ctrl SELECT i, CASE WHEN i % 2 = 0 THEN 'US' ELSE 'CA' END FROM generate_series(1,600) t(i);
+
+query III
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.vol_case')),
+       (SELECT count(*) FROM my_datalake.default.vol_case WHERE country = 'US'),
+       (SELECT count(*) FROM my_datalake.default.vol_case WHERE country = 'us');
+----
+2	300	300
+
+query II
+EXPLAIN SELECT country, count(*) FROM my_datalake.default.vol_case GROUP BY country;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~2 rows.*
+
+query II
+EXPLAIN SELECT country, count(*) FROM my_datalake.default.vol_ctrl GROUP BY country;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~2 rows.*
+
+# Each predicate on the plan, where "Scanning Files: 1/2" is the direct evidence that pruning kept the
+# one partition the filter names. Pushed-down equality and range both take the flat 0.2, so 300 rows
+# estimate at ~60
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'US';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2.*~60 rows.*
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'us';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2.*~60 rows.*
+
+# the two range bounds: a folded bound
+# would keep both partitions or neither
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country > 'US';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2.*~60 rows.*
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country < 'us';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2.*~60 rows.*
+
+# spanning both: nothing is pruned, 600 rows through the same 0.2
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country BETWEEN 'US' AND 'us';
+----
+physical_plan	<REGEX>:.*Read Parquet.*~120 rows.*
+
+# 'Us' sorts strictly BETWEEN 'US' and 'us', so pruning to 0/2
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'Us';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 0/2.*~0 rows.*
+
+query I
+SELECT count(*) FROM my_datalake.default.vol_case WHERE country = 'Us';
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.stat_case;
+
+statement ok
+DROP TABLE my_datalake.default.vol_case;
+
+statement ok
+DROP TABLE my_datalake.default.vol_ctrl;

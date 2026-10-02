@@ -248,10 +248,14 @@ EXPLAIN SELECT sum(c) FROM (
 ----
 physical_plan	<REGEX>:.*CTE Name: __common_subplan.*
 
+# only the costing lists, one partition directory of each table: the common subplan optimizer lists nothing
 query I
 SELECT count(*) FROM listed_dirs();
 ----
-0
+2
+
+statement ok
+CALL truncate_duckdb_logs();
 
 # different partition filters/table are considered different scans by CommonSubplanOptimizer based using serialized version
 # produced by HiveScanSerialize as identity
@@ -262,6 +266,12 @@ EXPLAIN SELECT sum(c) FROM (
     SELECT count(*) FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt);
 ----
 physical_plan	<!REGEX>:.*__common_subplan.*
+
+# costing the four scans of the two tables lists one partition directory of each table
+query I
+SELECT count(*) FROM listed_dirs();
+----
+2
 
 query II
 EXPLAIN SELECT id FROM my_datalake.default.pp_orders UNION ALL SELECT id FROM my_datalake.default.pp_orders_twin;
@@ -287,10 +297,17 @@ SELECT id, dt, country FROM my_datalake.default.pp_orders WHERE dt = '2016-05-15
 3	2016-05-15	IN
 4	2016-05-15	US
 
-query I
-SELECT dir FROM listed_dirs();
+# the root once, and one of the partitions read, which the cardinality estimate lists while planning: a root
+# listing cannot take over a listing of one partition
+query II
+SELECT count(*) FILTER (WHERE dir = 'default/pp_orders/'), count(*) FILTER (WHERE dir LIKE 'default/pp_orders/dt=2016-05-15/%') FROM listed_dirs();
 ----
-default/pp_orders/
+1	1
+
+query I
+SELECT count(*) FROM listed_dirs();
+----
+2
 
 # the partition at the custom location is still listed on its own
 statement ok
@@ -302,10 +319,16 @@ SELECT count(*), sum(id) FROM my_datalake.default.pp_orders;
 7	28
 
 query I
-SELECT dir FROM listed_dirs() ORDER BY dir;
+SELECT dir FROM listed_dirs() WHERE dir NOT LIKE 'default/pp_orders/dt=%' ORDER BY dir;
 ----
 custom_in/
 default/pp_orders/
+
+# plus the partition the estimate listed
+query I
+SELECT count(*) FROM listed_dirs() WHERE dir LIKE 'default/pp_orders/dt=%';
+----
+1
 
 # only the partitions read are matched: the listing sees every directory, the rows come from two
 statement ok
@@ -316,16 +339,26 @@ SELECT count(*) FROM my_datalake.default.pp_orders WHERE country = 'US';
 ----
 3
 
-query I
-SELECT dir FROM listed_dirs();
+query II
+SELECT count(*) FILTER (WHERE dir = 'default/pp_orders/'), count(*) FILTER (WHERE dir LIKE 'default/pp_orders/dt=%/country=US/') FROM listed_dirs();
 ----
-default/pp_orders/
+1	1
+
+query I
+SELECT count(*) FROM listed_dirs();
+----
+2
 
 statement ok
 RESET hive_partition_listing_threshold;
 
 #---------------------------------------------------------------------------
-# planning does not list anything: EXPLAIN makes no S3 list call
+# planning lists ONE partition, and only one: the sample the row-count estimate is measured from.
+# This used to be zero, which is what made the estimate a constant -- Glue carries no statistics, so a
+# cost that reflects the data has to be measured from the data. The partition sampled is one this query
+# reads, and a scan that lists that partition on its own takes the listing over instead of repeating it.
+# The budget itself is pinned in bugs/s3_plan_time_cost_invariants.test, including that it stays at one
+# as the partition count grows.
 #---------------------------------------------------------------------------
 statement ok
 CALL truncate_duckdb_logs();
@@ -336,7 +369,14 @@ EXPLAIN SELECT id FROM my_datalake.default.pp_orders WHERE dt = '2016-05-15';
 query I
 SELECT count(*) FROM listed_dirs();
 ----
-0
+1
+
+# and it is one of the two partitions this query reads, not an arbitrary one. Which of the two gets listed
+# is a job-ordering detail and deliberately not pinned
+query I
+SELECT count(*) FROM listed_dirs() WHERE dir LIKE 'default/pp_orders/dt=2016-05-15/%';
+----
+1
 
 #---------------------------------------------------------------------------
 # hive_scan() prunes the same way, without the catalog

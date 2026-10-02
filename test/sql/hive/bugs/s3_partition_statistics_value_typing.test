@@ -1,0 +1,145 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_value_typing.test
+# description: partition-column statistics must use the column's DECLARED type.
+# group: [bugs]
+
+#
+# Glue stores partition values as a string. Statistics built on a guessed numeric type would lead to
+# wrong answers. This file also covers a filter on the partition column combined with one on a data column, since
+# after the statistics work both have statistics and both feed the same propagation pass.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.vtype;
+
+statement ok
+CREATE TABLE my_datalake.default.vtype (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement ok
+INSERT INTO my_datalake.default.vtype VALUES (1,'007'), (2,'7'), (3,'70');
+
+query IT
+SELECT id, k FROM my_datalake.default.vtype ORDER BY id;
+----
+1	007
+2	7
+3	70
+
+# lexicographic, because the column is VARCHAR: all three sort below '8'
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k < '8';
+----
+3
+
+# '007' and '7' are DISTINCT values of a VARCHAR column, not the same number
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k = '007';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k = '7';
+----
+1
+
+# a lexicographic range that excludes '70' must still keep '007' and '7'
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k <= '7';
+----
+2
+
+# ---- a partition-column filter together with a data-column filter -----------------------------------
+# both sides have statistics after the change and both feed the same propagation pass
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k < '8' AND id >= 2;
+----
+2
+
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k = '70' AND id = 3;
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.vtype WHERE k = '70' AND id = 1;
+----
+0
+
+# ---- the same questions on the plan ----------------------------------------------------------------
+# Needs volume: at three rows the group estimate is ~1 whatever the values are, so it cannot tell a
+# string distinct count from a numeric one. At 200 rows per value it can.
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.vtype_vol;
+
+statement ok
+CREATE TABLE my_datalake.default.vtype_vol (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement ok
+INSERT INTO my_datalake.default.vtype_vol SELECT i, CASE i % 3 WHEN 0 THEN '007' WHEN 1 THEN '7' ELSE '70' END FROM generate_series(1,600) t(i);
+
+query IIII
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.vtype_vol')),
+       (SELECT count(*) FROM my_datalake.default.vtype_vol WHERE k = '007'),
+       (SELECT count(*) FROM my_datalake.default.vtype_vol WHERE k = '7'),
+       (SELECT count(*) FROM my_datalake.default.vtype_vol WHERE k = '70');
+----
+3	200	200	200
+
+# three distinct strings, so three groups. Numeric typing would fold '007' and '7' and say two.
+query II
+EXPLAIN SELECT k, count(*) FROM my_datalake.default.vtype_vol GROUP BY k;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~3 rows.*
+
+# lexicographic: all three are below '8', so nothing is pruned and the plan carries no
+# "Scanning Files" line at all. Numeric typing would prune '70' here.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vtype_vol WHERE k < '8';
+----
+physical_plan	<REGEX>:.*Read Parquet.*~120 rows.*
+
+# '70' sorts above '7', so this keeps two of three
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vtype_vol WHERE k <= '7';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/3.*~80 rows.*
+
+# '007' and '7' prune to their own partition each, which is what says they are not one value
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vtype_vol WHERE k = '007';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/3.*~40 rows.*
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vtype_vol WHERE k = '7';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/3.*~40 rows.*
+
+# partition filter plus data filter: the partition side still prunes, the data side adds no pruning
+query II
+EXPLAIN SELECT * FROM my_datalake.default.vtype_vol WHERE k = '70' AND id = 1;
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/3.*~40 rows.*
+
+query I
+SELECT count(*) FROM my_datalake.default.vtype_vol WHERE k = '70' AND id = 1;
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.vtype;
+
+statement ok
+DROP TABLE my_datalake.default.vtype_vol;

@@ -1,0 +1,99 @@
+# name: test/sql/hive/bugs/s3_partition_statistics_degenerate.test
+# description: degenerate partition sets must still have proper partition-column statistics, namely no partitions at all, exactly one, and a filter that prunes every one of them.
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# ---- zero partitions -------------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.deg_none;
+
+statement ok
+CREATE TABLE my_datalake.default.deg_none (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.deg_none');
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.deg_none;
+----
+0
+
+# an empty set has no min/max to report, so the estimate must come out zero rather than the 1 that
+# LogicalGet::EstimateCardinality falls back to when nothing supplies a number at all
+query II
+EXPLAIN SELECT * FROM my_datalake.default.deg_none;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~0 rows.*
+
+# and no groups, which is the empty-set path through the distinct count rather than through the row count
+query II
+EXPLAIN SELECT dt, count(*) FROM my_datalake.default.deg_none GROUP BY dt;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~0 rows.*
+
+# ---- exactly one partition -------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.deg_one;
+
+statement ok
+CREATE TABLE my_datalake.default.deg_one (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.deg_one SELECT i, 'only' FROM generate_series(1,500) t(i);
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.deg_one')), (SELECT count(*) FROM my_datalake.default.deg_one);
+----
+1	500
+
+# min == max on the partition column: the value is still findable
+query I
+SELECT count(*) FROM my_datalake.default.deg_one WHERE dt = 'only';
+----
+500
+
+# one partition means exactly one distinct value, so one group -- this is the assertion the file exists
+# for, and the case an off-by-one in a range or a loop bound lands on. Note "~1 row", singular.
+query II
+EXPLAIN SELECT dt, count(*) FROM my_datalake.default.deg_one GROUP BY dt;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~1 row.*
+
+# the row count is unaffected by the degenerate partition count: 500 rows are still 500 rows
+query II
+EXPLAIN SELECT * FROM my_datalake.default.deg_one;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~500 rows.*
+
+# ---- every partition pruned away -------------------------------------------------------------------
+query I
+SELECT count(*) FROM my_datalake.default.deg_one WHERE dt = 'no-such-partition';
+----
+0
+
+# the empty-set path reached on a populated table, by a filter rather than by an empty catalog.
+# "Scanning Files: 0/1" is what separates "pruned the only partition" from "estimated zero anyway".
+query II
+EXPLAIN SELECT * FROM my_datalake.default.deg_one WHERE dt = 'no-such-partition';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 0/1.*~0 rows.*
+
+statement ok
+DROP TABLE my_datalake.default.deg_none;
+
+statement ok
+DROP TABLE my_datalake.default.deg_one;

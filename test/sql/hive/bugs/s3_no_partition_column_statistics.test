@@ -1,0 +1,42 @@
+# name: test/sql/hive/bugs/s3_no_partition_column_statistics.test
+# description: S3 - a partitioned Glue table must still have statistics for its partition columns.
+# group: [bugs]
+
+# Expected behaviour: the group estimate reflects the real number of distinct partition values.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pcol;
+
+statement ok
+CREATE TABLE my_datalake.default.pcol (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.pcol SELECT i, 'd' || (i % 4) FROM generate_series(1,4000) t(i);
+
+# exactly four distinct partition values, and Glue knows all four
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.pcol')), (SELECT count(DISTINCT dt) FROM my_datalake.default.pcol);
+----
+4	4
+
+# Four partitions, so at most four groups.
+query II
+EXPLAIN SELECT dt, count(*) FROM my_datalake.default.pcol GROUP BY dt;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~[0-9]{1,2} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.pcol;

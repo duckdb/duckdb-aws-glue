@@ -102,5 +102,32 @@ SELECT id, city FROM my_datalake.default.escaped_partitions WHERE city = 'san jo
 ----
 7	san jose
 
+# a value holding an escape sequence is its own value: a '100%' row must not land in the '100%25' partition
+statement ok
+INSERT INTO my_datalake.default.escaped_partitions VALUES (8, '100%25');
+
+statement ok
+INSERT INTO my_datalake.default.escaped_partitions VALUES (9, '100%');
+
+query II
+SELECT city, location FROM glue_partitions('my_datalake.default.escaped_partitions')
+WHERE city IN ('100%', '100%25') ORDER BY city;
+----
+100%	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/city=100%25
+100%25	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/escaped_partitions/city=100%2525
+
+query II
+SELECT id, city FROM my_datalake.default.escaped_partitions WHERE id IN (3, 8, 9) ORDER BY id;
+----
+3	100%
+8	100%25
+9	100%
+
+query I
+SELECT id FROM my_datalake.default.escaped_partitions WHERE city = '100%' ORDER BY id;
+----
+3
+9
+
 statement ok
 DROP TABLE my_datalake.default.escaped_partitions;

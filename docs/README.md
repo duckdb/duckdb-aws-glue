@@ -33,11 +33,15 @@ Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet`
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns are applied to the partition values first,
-  so only the partitions a query reads are listed (EXPLAIN shows the partitions kept as `Scanning Files`), and
-  planning a query does not touch S3. When a query reads at least `hive_partition_listing_threshold` (default
-  10) partitions below the table location, the location is listed once, recursively (one S3 request per 1000
-  keys), and the files are matched to their partitions by prefix; fewer partitions, and partitions at custom
-  locations, are listed one directory each.
+  so only the partitions a query reads are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a
+  query reads at least `hive_partition_listing_threshold` (default 10) partitions below the table location, the
+  location is listed once, recursively (one S3 request per 1000 keys), and the files are matched to their
+  partitions by prefix; fewer partitions, and partitions at custom locations, are listed one directory each.
+- To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
+  of the table reads, or the location of an unpartitioned table, never the whole table) and reads the row count
+  of its largest file: the parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the
+  table in the query scales that one measurement by the partitions it reads, and a scan that lists the same
+  directory reuses the listing. Avro tables are not measured, so planning them lists nothing.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.

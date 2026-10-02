@@ -173,19 +173,16 @@ string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<
 	return location;
 }
 
-Value PartitionValueToValue(ClientContext &context, const string &str_value, const LogicalType &type) {
-	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+//! GlueTypes::PartitionValue, but a partition value that can't be cast to the key's type is NULL instead of throwing,
+//! so one bad partition doesn't make the whole glue_partitions() listing fail (e.g. 'abc' for an INT key lists as
+//! NULL).
+static Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
+                                   const LogicalType &type) {
+	try {
+		return GlueTypes::PartitionValue(context, key, str_value, type);
+	} catch (std::exception &) {
 		return Value(type);
 	}
-	Value value(str_value);
-	if (type.id() == LogicalTypeId::VARCHAR) {
-		return value;
-	}
-	auto cast = value.TryCastAs(context, type);
-	if (!cast) {
-		return Value(type);
-	}
-	return value;
 }
 
 //! Bind data for the functions that change one partition and report one row when executed
@@ -248,9 +245,10 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 	while (state.offset < bind_data.partitions.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &partition = bind_data.partitions[state.offset++];
 		for (idx_t k = 0; k < keys.size(); k++) {
-			Value value = k < partition.values.size()
-			                  ? PartitionValueToValue(context, partition.values[k], bind_data.key_types[k])
-			                  : Value(bind_data.key_types[k]);
+			Value value =
+			    k < partition.values.size()
+			        ? PartitionListingValue(context, keys[k].name, partition.values[k], bind_data.key_types[k])
+			        : Value(bind_data.key_types[k]);
 			output.data[k].Append(value);
 		}
 		output.data[keys.size()].Append(Value(partition.location));

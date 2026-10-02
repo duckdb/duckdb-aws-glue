@@ -1,0 +1,265 @@
+# name: test/sql/hive/bugs/s3_listing_scales_with_table.test_slow
+# description: S3 - listing a query's partitions should cost what the QUERY reads, not what the TABLE holds.
+# group: [bugs]
+
+# We have partition-count based logic (e.g. hive_partition_listing_threshold) and want to sweep a range of
+# partition counts here.
+#
+# Three scales: 20, 200, 2000. The smallest cannot show the cost on its own -- below ~1000 keys a root
+# listing is a single request -- which is why the sweep exists rather than one fixture and a comment.
+#
+# Slow by construction: creating 2000 partitions takes ~9s.
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# S3 ListObjectsV2 requests since the last truncate, split by which branch issued them: a prefix naming a
+# partition directory ('/dt=') is the per-partition branch, anything else is the table root. More requests
+# than branch-jobs means the root listing paginated, which is how the table's size enters the cost.
+statement ok
+CREATE MACRO listings() AS TABLE
+    SELECT count(*) AS requests,
+           count(*) FILTER (WHERE prefix NOT LIKE '%/dt=%') AS root_scoped,
+           count(*) FILTER (WHERE prefix LIKE '%/dt=%') AS partition_scoped
+    FROM (
+        SELECT url_decode(regexp_extract(request.url, 'prefix=([^&]*)', 1)) AS prefix
+        FROM duckdb_logs_parsed('HTTP')
+        WHERE request.url LIKE '%list-type=2%'
+    );
+
+# ===========================================================================
+# 20 partitions
+# ===========================================================================
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.scale20;
+
+statement ok
+CREATE TABLE my_datalake.default.scale20 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.scale20 SELECT i, 'd' || (i % 20) FROM generate_series(1,4000) t(i);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.scale20');
+----
+20
+
+# one partition, below the threshold: the listing is scoped to that partition's own directory
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.scale20 WHERE dt = 'd7';
+----
+200
+
+query III
+SELECT requests, root_scoped, partition_scoped FROM listings();
+----
+1	0	1
+
+# ten partitions, at the threshold: the scan lists the table root instead. The estimate's listing of one
+# of the ten partitions comes on top, since a root listing cannot take it over
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.scale20 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+2000
+
+query III
+SELECT requests, root_scoped, partition_scoped FROM listings();
+----
+2	1	1
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale20;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+
+# ten partitions: pruning narrows the files and the scan estimate is EXACTLY the 2,000 rows they hold
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale20 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/20.*~2,000 rows.*
+
+# one partition: the files are narrowed correctly (1/20) but the estimate is 40 where the truth is 200.
+# An equality filter is pushed INTO the scan, so DEFAULT_SELECTIVITY (0.2) is applied to the scan's own
+# estimate -- unlike the IN form above, where the scan is exact and the 0.2 lands on a node above it.
+# Both are the same defect arriving by two routes; see session1-backlog.md 3.4.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale20 WHERE dt = 'd7';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/20.*~40 rows.*
+
+statement ok
+DROP TABLE my_datalake.default.scale20;
+
+# ===========================================================================
+# 200 partitions
+# ===========================================================================
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.scale200;
+
+statement ok
+CREATE TABLE my_datalake.default.scale200 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.scale200 SELECT i, 'd' || (i % 200) FROM generate_series(1,4000) t(i);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.scale200');
+----
+200
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.scale200 WHERE dt = 'd7';
+----
+20
+
+query III
+SELECT requests, root_scoped, partition_scoped FROM listings();
+----
+1	0	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.scale200 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+200
+
+query III
+SELECT requests, root_scoped, partition_scoped FROM listings();
+----
+2	1	1
+
+# unchanged by the tenfold rise in partition count
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale200;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale200 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/200.*~200 rows.*
+
+# 20 rows estimated at 4: the same 0.2, so the error is a constant factor rather than something that
+# grows with the table
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale200 WHERE dt = 'd7';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/200.*~4 rows.*
+
+statement ok
+DROP TABLE my_datalake.default.scale200;
+
+# ===========================================================================
+# 2000 partitions
+# ===========================================================================
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.scale2000;
+
+statement ok
+CREATE TABLE my_datalake.default.scale2000 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.scale2000 SELECT i, 'd' || (i % 2000) FROM generate_series(1,4000) t(i);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.scale2000');
+----
+2000
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.scale2000 WHERE dt = 'd7';
+----
+2
+
+query III
+SELECT requests, root_scoped, partition_scoped FROM listings();
+----
+1	0	1
+
+# Reading ten partitions of two thousand takes TWO root requests, not one: the root listing has passed S3's
+# 1000-key page size, so the request count has started tracking the table's size. Ten narrow listings
+# would have been ten requests over ten keys; this is two requests over two thousand, plus the estimate's
+# one partition listing. Extrapolating, 20k partitions is ~20 requests to read the same twenty rows.
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+20
+
+query III
+SELECT requests, root_scoped, partition_scoped FROM listings();
+----
+3	2	1
+
+# still exact at a hundredfold the partition count of the first block
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale2000;
+----
+physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/2000.*~20 rows.*
+
+# Two rows estimated as one. 2 x 0.2 is 0.4, and the 0.2 path floors at 1, so here the error is the
+# floor rather than the factor.
+query II
+EXPLAIN SELECT * FROM my_datalake.default.scale2000 WHERE dt = 'd7';
+----
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2000.*~1 row.*
+
+# and raising the threshold above the partitions read takes the narrow branch again, at any table size --
+# which is what makes this a threshold problem rather than a listing problem
+statement ok
+SET hive_partition_listing_threshold = 1000;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
+----
+20
+
+query III
+SELECT requests, root_scoped, partition_scoped FROM listings();
+----
+10	0	10
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.scale2000;
