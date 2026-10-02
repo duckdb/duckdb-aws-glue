@@ -1,0 +1,65 @@
+# name: test/sql/hive/bugs/insert_unpartitioned_no_file_at_location.test
+# description: an INSERT into an unpartitioned table writes its files below the table location, never an object at the location itself (which on S3 backends with real directories can replace the directory and lose the written files)
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.unpartitioned_location;
+
+statement ok
+CREATE TABLE my_datalake.default.unpartitioned_location (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.unpartitioned_location VALUES (1);
+
+# '*' does not cross '/': this matches an object at the table location, not the files below it
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/unpartitioned_locatio*');
+----
+0
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/unpartitioned_location/*');
+----
+1
+
+loop i 2 21
+
+statement ok
+INSERT INTO my_datalake.default.unpartitioned_location VALUES ({i});
+
+endloop
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.unpartitioned_location;
+----
+20	210
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/unpartitioned_locatio*');
+----
+0
+
+# an INSERT of no rows adds no rows
+statement ok
+INSERT INTO my_datalake.default.unpartitioned_location SELECT 1 WHERE false;
+
+query I
+SELECT count(*) FROM my_datalake.default.unpartitioned_location;
+----
+20
+
+statement ok
+DROP TABLE my_datalake.default.unpartitioned_location;

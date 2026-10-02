@@ -578,6 +578,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	if (info.type != AlterType::ALTER_TABLE) {
 		throw NotImplementedException("Only ALTER TABLE is supported for Glue tables");
 	}
+	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &alter_table = info.Cast<AlterTableInfo>();
 
 	// Work on the current Glue definition, not the cached one

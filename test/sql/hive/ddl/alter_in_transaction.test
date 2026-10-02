@@ -1,0 +1,284 @@
+# name: test/sql/hive/ddl/alter_in_transaction.test
+# description: Altering or inserting into a Hive table in Glue inside an explicit transaction is an error, Glue has no transactions
+# group: [ddl]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.txn_alter;
+
+statement ok
+CREATE TABLE my_datalake.default.txn_alter (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.txn_alter', {'dt': '2024-01-01'});
+
+# ALTER TABLE on columns
+statement ok
+BEGIN;
+
+statement error
+ALTER TABLE my_datalake.default.txn_alter ADD COLUMN score DOUBLE;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction. Transaction support is not provided for Hive tables.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+ALTER TABLE my_datalake.default.txn_alter DROP COLUMN name;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+ALTER TABLE my_datalake.default.txn_alter RENAME COLUMN name TO full_name;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+ALTER TABLE my_datalake.default.txn_alter ALTER COLUMN id TYPE BIGINT;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+# the partition functions that change the table
+statement ok
+BEGIN;
+
+statement error
+CALL glue_add_partition('my_datalake.default.txn_alter', {'dt': '2024-01-02'});
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CALL glue_drop_partition('my_datalake.default.txn_alter', {'dt': '2024-01-01'});
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CALL glue_rename_partition('my_datalake.default.txn_alter', {'dt': '2024-01-01'}, {'dt': '2024-01-03'});
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CALL glue_set_partition_location('my_datalake.default.txn_alter', {'dt': '2024-01-01'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/txn_elsewhere');
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CALL glue_set_table_location('my_datalake.default.txn_alter', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/txn_elsewhere');
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+# the partition SQL of the glue_hive_ddl grammar extension (rewritten to glue_alter_table)
+statement ok
+BEGIN;
+
+statement error
+ALTER TABLE my_datalake.default.txn_alter ADD PARTITION (dt = '2024-01-02');
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+ALTER TABLE my_datalake.default.txn_alter DROP PARTITION (dt = '2024-01-01');
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+# INSERT
+statement ok
+BEGIN;
+
+statement error
+INSERT INTO my_datalake.default.txn_alter VALUES (1, 'a', '2024-01-01');
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+INSERT INTO my_datalake.default.txn_alter SELECT 2, 'b', '2024-01-05';
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+INSERT INTO my_datalake.default.txn_alter BY NAME SELECT '2024-01-01' AS dt, 3 AS id, 'c' AS name;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+# the error aborts the DuckDB transaction; ROLLBACK, COMMIT and ABORT all end it
+statement ok
+BEGIN;
+
+statement error
+ALTER TABLE my_datalake.default.txn_alter ADD COLUMN score DOUBLE;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement error
+SELECT count(*) FROM my_datalake.default.txn_alter;
+----
+<REGEX>:TransactionContext Error.*Current transaction is aborted.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CALL glue_add_partition('my_datalake.default.txn_alter', {'dt': '2024-01-02'});
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement error
+SELECT count(*) FROM my_datalake.default.txn_alter;
+----
+<REGEX>:TransactionContext Error.*Current transaction is aborted.*
+
+statement ok
+COMMIT;
+
+statement ok
+BEGIN;
+
+statement error
+CALL glue_add_partition('my_datalake.default.txn_alter', {'dt': '2024-01-02'});
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ABORT;
+
+# reading the table and its partitions in a transaction still works
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) FROM my_datalake.default.txn_alter;
+----
+0
+
+query I
+SELECT dt FROM glue_partitions('my_datalake.default.txn_alter');
+----
+2024-01-01
+
+statement ok
+COMMIT;
+
+# nothing was changed in Glue
+query II
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'txn_alter' ORDER BY column_index;
+----
+id	INTEGER
+name	VARCHAR
+dt	VARCHAR
+
+query I
+SELECT dt FROM glue_partitions('my_datalake.default.txn_alter');
+----
+2024-01-01
+
+# outside of a transaction the same statements work
+statement ok
+ALTER TABLE my_datalake.default.txn_alter ADD COLUMN score DOUBLE;
+
+statement ok
+CALL glue_add_partition('my_datalake.default.txn_alter', {'dt': '2024-01-02'});
+
+query I
+SELECT dt FROM glue_partitions('my_datalake.default.txn_alter') ORDER BY dt;
+----
+2024-01-01
+2024-01-02
+
+statement ok
+INSERT INTO my_datalake.default.txn_alter BY NAME SELECT 1 AS id, 'a' AS name, '2024-01-01' AS dt, 1.5 AS score;
+
+query IIII
+SELECT id, name, dt, score FROM my_datalake.default.txn_alter;
+----
+1	a	2024-01-01	1.5
+
+statement ok
+DROP TABLE my_datalake.default.txn_alter;

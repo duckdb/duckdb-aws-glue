@@ -28,6 +28,8 @@ public:
 public:
 	//! Look up the (s3 or aws) secret that holds the AWS credentials for this catalog
 	static unique_ptr<SecretEntry> GetStorageSecret(ClientContext &context, const string &secret_name);
+	//! Glue has no transactions: throw on ALTER or INSERT of a Hive table inside an explicit (BEGIN) transaction
+	static void ThrowIfInExplicitTransaction(ClientContext &context);
 
 	void Initialize(bool load_builtin) override;
 	string GetCatalogType() override {

@@ -279,7 +279,8 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	} else {
 		copy.file_path = location;
 		copy.partition_output = false;
-		copy.write_empty_file = false;
+		// without it the copy also opens a file at the table location itself (unsupported with per-thread output)
+		copy.write_empty_file = true;
 		copy.per_thread_output = true;
 	}
 	copy.file_extension = format_name;

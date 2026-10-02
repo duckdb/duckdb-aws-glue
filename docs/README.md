@@ -88,7 +88,10 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   `CASCADE` is given.
 
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
-is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported.
+is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. Altering a Hive table (`ALTER
+TABLE`, the partition SQL, or `glue_add_partition`, `glue_alter_table`, ...) or inserting into one inside an explicit
+`BEGIN` transaction is an error that aborts the transaction; end it with `COMMIT`, `ABORT` or `ROLLBACK` and run the
+statement again.
 
 ## Views
 
