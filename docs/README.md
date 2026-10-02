@@ -1,8 +1,9 @@
 # DuckDB Glue extension
 
 Experimental extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
-SDK Glue client and works with Hive (Glue native) tables stored as parquet on S3. Tables of other formats that Glue
-registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or written.
+SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Tables of other
+formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or
+written.
 
 ```sql
 CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');
@@ -24,8 +25,13 @@ Attach options:
 
 ## Reading
 
-Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet` through a custom
-`MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
+The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
+LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is
+1, delimiter from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per
+line, keys by name) and AvroSerDe with `read_avro` (columns by name) from the avro extension, which is loaded on
+demand. Other SerDes (ORC, Ion, ...) are not supported.
+
+Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
 - The data files are those below the location of every partition Glue lists (`GetPartitions`), at any depth, or
   below the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>`
@@ -38,15 +44,9 @@ Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet`
   10) partitions below the table location, the location is listed once, recursively (one S3 request per 1000
   keys), and the files are matched to their partitions by prefix; fewer partitions, and partitions at custom
   locations, are listed one directory each.
-- The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
-  by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
-  a different type in the file is cast, and file columns Glue does not list are ignored.
-
-The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
-OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
-from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per line, keys by
-name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion,
-...) are not supported.
+- The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. A column a file
+  does not have (added after the file was written) reads as NULL, a column with a different type in the file is
+  cast, and file columns Glue does not list are ignored.
 
 ## Writing
 
@@ -81,7 +81,7 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
-  Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
+  Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
