@@ -436,6 +436,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		function_name = "read_avro";
 		break;
 	}
+	if (!scan_info->compression.IsAutoDetect()) {
+		param_map["compression"] = Value(scan_info->compression.ToString());
+	}
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;

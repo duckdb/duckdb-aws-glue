@@ -171,8 +171,22 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	string copy_format = format_name;
 	identifier_map_t<vector<Value>> copy_options;
 	switch (file_format) {
-	case HiveFileFormat::PARQUET:
+	case HiveFileFormat::PARQUET: {
+		auto codec = table_info.GetParquetCompression();
+		if (codec.empty()) {
+			break;
+		}
+		copy_options[Identifier("compression")] = {Value(codec)};
+		// DuckDB's parquet writer takes a compression_level for zstd only
+		if (codec != "zstd") {
+			break;
+		}
+		auto level = table_info.GetCompressionLevel();
+		if (!level.empty()) {
+			copy_options[Identifier("compression_level")] = {Value(level)};
+		}
 		break;
+	}
 	case HiveFileFormat::AVRO:
 		ExtensionHelper::AutoLoadExtension(context, "avro");
 		break;
@@ -240,6 +254,12 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 		break;
 	}
 	}
+	if (IsTextFileFormat(file_format)) {
+		auto codec = table_info.GetTextCompression();
+		if (codec.IsCompressed()) {
+			copy_options[Identifier("compression")] = {Value(codec.ToString())};
+		}
+	}
 	auto copy_function = TryGetCopyFunction(*context.db, copy_format);
 	if (!copy_function) {
 		throw MissingExtensionException("Writing to Hive table '%s' requires the %s copy function", table_info.name,
@@ -253,6 +273,7 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 
 	// Hive convention: partition columns live in the directory names, not in the files
 	CopyFunctionBindInput bind_input(*copy_info);
+	bind_input.file_extension = format_name;
 	auto names_to_write = LogicalCopyToFile::GetNamesWithoutPartitions(copy_names, partition_columns, false);
 	auto types_to_write = LogicalCopyToFile::GetTypesWithoutPartitions(copy_types, partition_columns, false);
 	auto function_data = copy_function->function.copy_to_bind(context, bind_input, names_to_write, types_to_write);
@@ -282,7 +303,7 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 		copy.write_empty_file = false;
 		copy.per_thread_output = true;
 	}
-	copy.file_extension = format_name;
+	copy.file_extension = bind_input.file_extension;
 	copy.overwrite_mode = CopyOverwriteMode::COPY_OVERWRITE_OR_IGNORE;
 	copy.return_type = CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST;
 	copy.names = copy_names;

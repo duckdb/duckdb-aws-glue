@@ -48,6 +48,11 @@ from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_js
 name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion,
 ...) are not supported.
 
+Compression: a csv or json table is read with the codec it records (`write.compression`, else the `compressionType`
+Glue crawlers set), whatever the names of its files; DuckDB reads gzip and zstd, another codec is an error. A table
+that records none is read with DuckDB's default, which tells `.gz` and `.zst` files by their extension. Parquet and
+avro files carry their codec themselves.
+
 ## Writing
 
 - `CREATE SCHEMA [IF NOT EXISTS] ... [WITH (comment = '...', location = '...', <property> = '...')]` creates a Glue
@@ -83,6 +88,9 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
   Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
+- Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
+  for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
+  codec is an error.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`

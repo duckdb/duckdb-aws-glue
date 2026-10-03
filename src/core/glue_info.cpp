@@ -44,6 +44,10 @@ string HiveFileFormatToString(HiveFileFormat format) {
 	throw InternalException("Unknown HiveFileFormat");
 }
 
+bool IsTextFileFormat(HiveFileFormat format) {
+	return format == HiveFileFormat::CSV || format == HiveFileFormat::JSON;
+}
+
 HiveFileFormat HiveFileFormatFromString(const string &format) {
 	auto lower = StringUtil::Lower(format);
 	if (lower == "parquet") {
@@ -135,6 +139,33 @@ string GlueTableInfo::GetFieldDelimiter() const {
 
 bool GlueTableInfo::HasHeader() const {
 	return GetParameter("skip.header.line.count") == "1";
+}
+
+FileCompressionType GlueTableInfo::GetTextCompression() const {
+	auto codec = GetParameter("write.compression");
+	if (codec.empty()) {
+		codec = GetParameter("compressionType");
+	}
+	if (codec.empty()) {
+		return FileCompressionType::AUTO_DETECT;
+	}
+	FileCompressionType compression(codec);
+	if (compression.IsCompressed() && compression != FileCompressionType::GZIP &&
+	    compression != FileCompressionType::ZSTD) {
+		throw NotImplementedException("Hive table '%s.%s' is %s compressed, DuckDB reads and writes only gzip and zstd "
+		                              "compressed csv and json files",
+		                              database_name, name, compression.ToString());
+	}
+	return compression;
+}
+
+string GlueTableInfo::GetParquetCompression() const {
+	auto codec = StringUtil::Lower(GetParameter("parquet.compression"));
+	return codec == "none" ? "uncompressed" : codec;
+}
+
+string GlueTableInfo::GetCompressionLevel() const {
+	return GetParameter("compression_level");
 }
 
 string GlueTableInfo::GetQuoteCharacter() const {

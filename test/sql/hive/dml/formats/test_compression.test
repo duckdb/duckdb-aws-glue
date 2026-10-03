@@ -1,0 +1,246 @@
+# name: test/sql/hive/dml/formats/test_compression.test
+# description: Read and write files with the codec the table records
+# group: [formats]
+
+require httpfs
+
+require parquet
+
+require json
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+#---------------------------------------------------------------------------
+# write.compression 'GZIP' on a partitioned csv table: gzip files named .csv.gz
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.compr_csv_gzip (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt)
+WITH (format = 'csv', 'write.compression' = 'GZIP');
+
+statement ok
+INSERT INTO my_datalake.default.compr_csv_gzip VALUES (1, 'a', '2024-01-01'), (2, 'b', '2024-01-02');
+
+query II
+SELECT count(*), bool_and(file LIKE '%.csv.gz') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_gzip/*/*');
+----
+2	true
+
+# the files start with the gzip magic bytes
+query I
+SELECT bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_gzip/*/*');
+----
+true
+
+query III
+SELECT id, name, dt FROM my_datalake.default.compr_csv_gzip ORDER BY id;
+----
+1	a	2024-01-01
+2	b	2024-01-02
+
+#---------------------------------------------------------------------------
+# write.compression 'ZSTD' on a json table
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.compr_json_zstd (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'ZSTD');
+
+statement ok
+INSERT INTO my_datalake.default.compr_json_zstd VALUES (1, 'a');
+
+query II
+SELECT bool_and(filename LIKE '%.json.zst'), bool_and(hex(content)[1:8] = '28B52FFD') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_zstd/*');
+----
+true	true
+
+query II
+SELECT id, name FROM my_datalake.default.compr_json_zstd;
+----
+1	a
+
+# write.compression 'NONE' writes plain files
+statement ok
+CREATE TABLE my_datalake.default.compr_csv_none (id INTEGER) WITH (format = 'csv', 'write.compression' = 'NONE');
+
+statement ok
+INSERT INTO my_datalake.default.compr_csv_none VALUES (1);
+
+query I
+SELECT bool_and(file LIKE '%/%.csv') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_none/*');
+----
+true
+
+# CREATE TABLE ... AS writes with the codec too
+statement ok
+CREATE TABLE my_datalake.default.compr_csv_ctas WITH (format = 'csv', 'write.compression' = 'gzip') AS SELECT 1 AS id;
+
+query II
+SELECT bool_and(filename LIKE '%.csv.gz'), bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_ctas/*');
+----
+true	true
+
+query I
+SELECT id FROM my_datalake.default.compr_csv_ctas;
+----
+1
+
+#---------------------------------------------------------------------------
+# reads: the codec the table records wins over the file name
+#---------------------------------------------------------------------------
+# write.compression 'NONE': a gzip file is read as plain text, whatever its name
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_none/part-00001.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
+
+statement error
+SELECT * FROM my_datalake.default.compr_csv_none;
+----
+<REGEX>:.*(Invalid unicode|CSV Error|Could not convert).*
+
+# compressionType, which Glue crawlers record, names the codec when write.compression does not
+statement ok
+CREATE TABLE my_datalake.default.compr_csv_crawler (id INTEGER) WITH (format = 'csv', 'compressionType' = 'gzip');
+
+statement ok
+COPY (SELECT 5 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_crawler/part-00000.csv' (FORMAT csv, HEADER false, COMPRESSION gzip);
+
+query I
+SELECT id FROM my_datalake.default.compr_csv_crawler;
+----
+5
+
+statement ok
+INSERT INTO my_datalake.default.compr_csv_crawler VALUES (6);
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_crawler/*.csv.gz');
+----
+1
+
+#---------------------------------------------------------------------------
+# reads of a table that records no codec: DuckDB tells gzip and zstd files by their extension
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.compr_csv_plain (id INTEGER) WITH (format = 'csv');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_plain/part-00000.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_plain/part-00001.csv' (FORMAT csv, HEADER false);
+
+query I
+SELECT id FROM my_datalake.default.compr_csv_plain ORDER BY id;
+----
+1
+2
+
+# a codec DuckDB can not write
+statement ok
+CREATE TABLE my_datalake.default.compr_csv_bzip2 (id INTEGER) WITH (format = 'csv', 'write.compression' = 'BZIP2');
+
+statement error
+INSERT INTO my_datalake.default.compr_csv_bzip2 VALUES (1);
+----
+Hive table 'default.compr_csv_bzip2' is bzip2 compressed, DuckDB reads and writes only gzip and zstd compressed csv and json files
+
+statement error
+SELECT * FROM my_datalake.default.compr_csv_bzip2;
+----
+Hive table 'default.compr_csv_bzip2' is bzip2 compressed
+
+#---------------------------------------------------------------------------
+# parquet.compression and compression_level
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_zstd (id INTEGER) WITH ('parquet.compression' = 'ZSTD', 'compression_level' = '9');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_gzip (id INTEGER) WITH ('parquet.compression' = 'GZIP');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_none (id INTEGER) WITH ('parquet.compression' = 'NONE');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_default (id INTEGER);
+
+foreach table compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_default
+
+statement ok
+INSERT INTO my_datalake.default.{table} SELECT range FROM range(100);
+
+endloop
+
+query II
+SELECT regexp_extract(file_name, 'compr_parquet_([a-z]+)', 1) AS t, string_agg(DISTINCT compression)
+FROM parquet_metadata('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_parquet_*/*.parquet') GROUP BY t ORDER BY t;
+----
+default	SNAPPY
+gzip	GZIP
+none	UNCOMPRESSED
+zstd	ZSTD
+
+query I
+SELECT sum(id) FROM my_datalake.default.compr_parquet_zstd;
+----
+4950
+
+# compressionType, which Glue crawlers record, is ignored: parquet files carry their own codec
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_crawler (id INTEGER) WITH ('compressionType' = 'gzip');
+
+statement ok
+INSERT INTO my_datalake.default.compr_parquet_crawler VALUES (1);
+
+query II
+SELECT count(*), bool_and(file LIKE '%.parquet') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_parquet_crawler/*');
+----
+1	true
+
+query I
+SELECT id FROM my_datalake.default.compr_parquet_crawler;
+----
+1
+
+# compression_level is ignored for codecs other than zstd, whatever its value
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_level (id INTEGER) WITH ('parquet.compression' = 'GZIP', 'compression_level' = 'high');
+
+statement ok
+INSERT INTO my_datalake.default.compr_parquet_level VALUES (1);
+
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_badlevel (id INTEGER) WITH ('parquet.compression' = 'ZSTD', 'compression_level' = 'high');
+
+statement error
+INSERT INTO my_datalake.default.compr_parquet_badlevel VALUES (1);
+----
+Could not convert string 'high' to INT64
+
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_lzo (id INTEGER) WITH ('parquet.compression' = 'LZO');
+
+statement error
+INSERT INTO my_datalake.default.compr_parquet_lzo VALUES (1);
+----
+Expected "compression" argument to be any of
+
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

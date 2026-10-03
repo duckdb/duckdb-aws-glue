@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/enums/file_compression_type.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -38,6 +39,8 @@ struct GlueDatabaseInfo {
 //! The file format of a Hive table's data files, decided by its SerDe
 enum class HiveFileFormat : uint8_t { PARQUET, CSV, JSON, AVRO };
 string HiveFileFormatToString(HiveFileFormat format);
+//! Whether the data files are text files (csv, json), whose codec the table records rather than the files themselves
+bool IsTextFileFormat(HiveFileFormat format);
 //! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
 
@@ -109,6 +112,13 @@ public:
 	string GetFieldDelimiter() const;
 	//! Whether the data files of a CSV table start with a header line (skip.header.line.count)
 	bool HasHeader() const;
+	//! The codec of a csv / json table's files (write.compression, else compressionType), auto-detection when the
+	//! table names none; throws for a codec DuckDB can not read and write
+	FileCompressionType GetTextCompression() const;
+	//! parquet.compression, empty when the table does not say
+	string GetParquetCompression() const;
+	//! compression_level, empty when the table does not say
+	string GetCompressionLevel() const;
 	//! The quote character of a CSV table (quoteChar of OpenCSVSerde), '"' when the SerDe does not say
 	string GetQuoteCharacter() const;
 	//! The escape character of a CSV table (escapeChar of OpenCSVSerde), else the quote character
