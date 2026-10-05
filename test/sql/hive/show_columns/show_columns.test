@@ -1,0 +1,230 @@
+# name: test/sql/hive/show_columns/show_columns.test
+# description: glue_show_columns, the column names of a Glue table
+# group: [show_columns]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# a schema of our own so the test does not collide with the shared 'default' database
+statement ok
+DROP VIEW IF EXISTS my_datalake.show_columns_db.orders_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.show_columns_db.orders;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.show_columns_db.unpart;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.show_columns_db.upper_cols;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.show_columns_db;
+
+statement ok
+CREATE SCHEMA my_datalake.show_columns_db;
+
+# data columns id, amount, customer; partition keys dt, country
+statement ok
+CREATE TABLE my_datalake.show_columns_db.orders
+    (id INTEGER, amount DOUBLE, customer VARCHAR, dt VARCHAR, country VARCHAR)
+    PARTITIONED BY (dt, country);
+
+statement ok
+CREATE TABLE my_datalake.show_columns_db.unpart (a INTEGER, b VARCHAR, c DOUBLE);
+
+# fully qualified: data columns first, then partition keys
+query I
+SELECT * FROM glue_show_columns('my_datalake.show_columns_db.orders');
+----
+id
+amount
+customer
+dt
+country
+
+# a single VARCHAR column named "field"
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM glue_show_columns('my_datalake.show_columns_db.orders'));
+----
+field	VARCHAR
+
+# composes like any table function
+query I
+SELECT count(*) FROM glue_show_columns('my_datalake.show_columns_db.orders') WHERE field LIKE 'c%';
+----
+2
+
+# unpartitioned table: just the data columns
+query I
+SELECT * FROM glue_show_columns('my_datalake.show_columns_db.unpart');
+----
+a
+b
+c
+
+# partially qualified and bare names resolve like in a query
+statement ok
+USE my_datalake.show_columns_db;
+
+query I
+SELECT * FROM glue_show_columns('orders');
+----
+id
+amount
+customer
+dt
+country
+
+query I
+SELECT * FROM glue_show_columns('show_columns_db.unpart');
+----
+a
+b
+c
+
+statement ok
+USE memory;
+
+# quoted identifiers
+query I
+SELECT * FROM glue_show_columns('"my_datalake"."show_columns_db"."unpart"');
+----
+a
+b
+c
+
+# names are returned exactly as Glue stores them, with no extra case folding
+# (real Glue lower-cases Hive column names; moto stores them verbatim)
+statement ok
+CREATE TABLE my_datalake.show_columns_db.upper_cols ("UpperCol" INTEGER, "MixedCase" VARCHAR);
+
+query I
+SELECT * FROM glue_show_columns('my_datalake.show_columns_db.upper_cols');
+----
+UpperCol
+MixedCase
+
+# table not found
+statement error
+SELECT * FROM glue_show_columns('my_datalake.show_columns_db.does_not_exist');
+----
+does not exist in Glue catalog
+
+# database not found
+statement error
+SELECT * FROM glue_show_columns('my_datalake.no_such_db_xyz.orders');
+----
+does not exist in Glue catalog
+
+# catalog not found
+statement error
+SELECT * FROM glue_show_columns('no_such_catalog.show_columns_db.orders');
+----
+Catalog 'no_such_catalog' does not exist
+
+# not a Glue catalog
+statement ok
+CREATE TABLE memory.main.mem_tbl (x INTEGER, y VARCHAR);
+
+statement error
+SELECT * FROM glue_show_columns('memory.main.mem_tbl');
+----
+only works on tables of a Glue catalog
+
+statement error
+SELECT * FROM glue_show_columns('mem_tbl');
+----
+only works on tables of a Glue catalog
+
+# NULL table name
+statement error
+SELECT * FROM glue_show_columns(NULL);
+----
+can not be NULL
+
+# no SHOW COLUMNS syntax is added, only the function
+statement error
+SHOW COLUMNS FROM my_datalake.show_columns_db.orders;
+----
+syntax error
+
+# a Glue view: the columns Glue records for it
+statement ok
+CREATE VIEW my_datalake.show_columns_db.orders_view AS SELECT id, amount * 2 AS twice FROM my_datalake.show_columns_db.orders;
+
+query I
+SELECT * FROM glue_show_columns('my_datalake.show_columns_db.orders_view');
+----
+id
+twice
+
+statement ok
+USE my_datalake.show_columns_db;
+
+query I
+SELECT * FROM glue_show_columns('orders_view');
+----
+id
+twice
+
+statement ok
+USE memory;
+
+# non-Hive table (Iceberg): the columns Glue records are listed, no error
+# fixture_iceberg is registered in the 'default' database by scripts/docker-compose.yml
+# DESCRIBE binds a scan, which is not possible for this table
+statement error
+DESCRIBE my_datalake.default.fixture_iceberg;
+----
+Scan from table with type ICEBERG
+
+query I
+SELECT * FROM glue_show_columns('my_datalake.default.fixture_iceberg');
+----
+id
+payload
+
+# works on a READ_ONLY attached catalog (only reads from Glue)
+statement ok
+attach '{GLUE_CATALOG_ID}' as ro_datalake (
+    TYPE glue,
+    READ_ONLY,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT * FROM glue_show_columns('ro_datalake.show_columns_db.orders');
+----
+id
+amount
+customer
+dt
+country
+
+# cleanup
+statement ok
+DROP VIEW my_datalake.show_columns_db.orders_view;
+
+statement ok
+DROP TABLE my_datalake.show_columns_db.orders;
+
+statement ok
+DROP TABLE my_datalake.show_columns_db.unpart;
+
+statement ok
+DROP TABLE my_datalake.show_columns_db.upper_cols;
+
+statement ok
+DROP SCHEMA my_datalake.show_columns_db;

@@ -352,6 +352,20 @@ FROM glue_get_partition_response('my_datalake.default.some_table', {dt: '2024-01
 description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
 `'<database>'` is resolved like in a query, through the search path.
 
+The column names of a table are listed with `glue_show_columns` (`SHOW COLUMNS`): one row per column in a single
+VARCHAR column named `field`, data columns first and partition keys last.
+
+```sql
+SELECT * FROM glue_show_columns('my_datalake.default.some_table');
+SELECT * FROM glue_show_columns('some_table');      -- resolved like a table name in a query
+```
+
+`DESCRIBE` shows the same column names for Hive tables, but it binds a scan of the table: it fails for Iceberg, Delta
+and Hudi tables and for tables with types DuckDB can't map, and it fetches all partitions from Glue. `glue_show_columns`
+makes a single Glue `GetTable` call and works on any table format. It is also much faster than filtering
+`duckdb_columns()`, which lists the whole catalog. For Iceberg, Delta and Hudi tables it returns the columns recorded
+in Glue, which can lag the table's own metadata.
+
 ## HTTP transport and logging
 
 The AWS SDK's Glue calls are routed through DuckDB's HTTP layer (httpfs), so they honor DuckDB's proxy and
