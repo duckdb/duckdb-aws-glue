@@ -119,7 +119,7 @@ ALTER TABLE my_datalake.default.ddl_properties RESET (retention_days, batch);
 query I
 SELECT list_sort(map_keys(parameters)) FROM glue_get_table_response('my_datalake.default.ddl_properties');
 ----
-[EXTERNAL, classification, comment, compression_level, owner, parquet.compression]
+[EXTERNAL, classification, comment, compression_level, numFiles, numRows, owner, parquet.compression, totalSize]
 
 statement ok
 ALTER TABLE my_datalake.default.ddl_properties RESET (does_not_exist);

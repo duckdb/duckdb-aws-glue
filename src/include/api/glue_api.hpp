@@ -57,6 +57,10 @@ public:
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
 	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                             const string &table_name, const string &location);
+	//! Add the statistics of newly written files to the numRows, numFiles and totalSize parameters of the table.
+	//! Nothing changes when the table has no (valid) statistics.
+	static void AddTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                               const string &table_name, const GlueBasicStatistics &statistics);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
 	//! table format is derived from (GlueTableInfo::IsFormatParameter) are refused.
@@ -72,7 +76,7 @@ public:
 	//! Register one partition of a Hive table. Returns false if it already exists and 'if_not_exists' is set, throws
 	//! a CatalogException if it already exists otherwise.
 	static bool CreatePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                            const string &table_name, const GluePartitionInput &partition, bool if_not_exists);
+	                            const string &table_name, const GluePartitionInfo &partition, bool if_not_exists);
 	//! Unregister a partition (the data files are left in place), returns false if it does not exist
 	static bool DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            const string &table_name, const vector<string> &values);
@@ -84,9 +88,10 @@ public:
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
-	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped.
+	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped, but get
+	//! the statistics of the given partition added to theirs (when they have valid statistics and the same location).
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                  const string &table_name, const vector<GluePartitionInput> &partitions);
+	                                  const string &table_name, const vector<GluePartitionInfo> &partitions);
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
