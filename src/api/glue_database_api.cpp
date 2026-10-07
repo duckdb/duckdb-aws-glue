@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/string_util.hpp"
 
@@ -59,6 +60,7 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 }
 
 void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateDatabase");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -86,6 +88,7 @@ void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const
 }
 
 void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetDatabaseRequest get_request;
@@ -125,6 +128,7 @@ void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const
 }
 
 void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "DeleteDatabase");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);

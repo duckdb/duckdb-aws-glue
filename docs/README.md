@@ -114,7 +114,10 @@ Glue has no transactions: DDL takes effect immediately, files are visible as soo
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
 of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
 ...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
-`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
+`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again. Within a DuckDB transaction
+(`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
+inside those partitions are listed at each scan. So a partition added outside the transaction is seen at its end, while
+a file added to an existing partition is seen at once.
 
 ## Views
 

@@ -23,6 +23,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_transaction.hpp"
 
 namespace duckdb {
 
@@ -413,6 +414,10 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
 	auto &table_info = table.table_info;
+	if (!state.written_files.empty()) {
+		// the files changed even when no partition needs registering (unpartitioned table)
+		GlueTransactionCache::Invalidate(context, table.catalog);
+	}
 	if (discard || table_info.partition_keys.empty() || state.written_files.empty()) {
 		return SinkFinalizeType::READY;
 	}

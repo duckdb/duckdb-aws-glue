@@ -10,6 +10,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
@@ -77,12 +78,20 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	if (entry != entries.end()) {
 		return entry->second.get();
 	}
-	// not cached, ask Glue for this table directly
-	GlueTableInfo table;
-	if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
+	// not in the entry set: load through the transaction's cache, so a scan bind of the same table fetches nothing
+	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		GlueTableInfo table;
+		if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
+			return nullptr;
+		}
+		return make_shared_ptr<const GlueTableInfo>(std::move(table));
+	};
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	auto table = cache ? cache->GetTable(schema.database_info.name, name, load) : load();
+	if (!table) {
 		return nullptr;
 	}
-	auto result = entries.emplace(table.name, CreateEntry(table));
+	auto result = entries.emplace(table->name, CreateEntry(*table));
 	return result.first->second.get();
 }
 
