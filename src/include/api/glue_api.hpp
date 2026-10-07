@@ -59,7 +59,7 @@ public:
 	                             const string &table_name, const string &location);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
-	//! table format is derived from (GlueTableInfo::IsFormatParameter) are refused.
+	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
 	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<pair<string, string>> &set,
 	                                  const vector<string> &unset);

@@ -1,0 +1,117 @@
+# name: test/sql/hive/bugs/foreign_input_format_as_hive.test
+# description: tables with another engine's InputFormat over a Parquet SerDe (Hudi, symlink manifests, unknown classes) were read and written as plain Hive tables
+# group: [bugs]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# The fixture tables of scripts/docker-compose.yml all register Parquet's SerDe. Hudi's Hive sync and a symlink
+# manifest table announce their format only through the InputFormat; a Delta manifest table also through
+# spark.sql.sources.provider, which wins; a class the extension does not know stays a Hive table.
+query II
+SELECT table_name, tags['table_type'] FROM duckdb_tables()
+WHERE database_name = 'my_datalake'
+  AND table_name IN ('fixture_hudi', 'fixture_symlink', 'fixture_delta_symlink', 'fixture_foreign_input_format', 'fixture_no_input_format')
+ORDER BY table_name;
+----
+fixture_delta_symlink	DELTA
+fixture_foreign_input_format	HIVE
+fixture_hudi	HUDI
+fixture_no_input_format	HIVE
+fixture_symlink	SYMLINK
+
+query II
+SELECT table_type, response.StorageDescriptor.InputFormat::VARCHAR
+FROM glue_get_table_response('my_datalake.default.fixture_hudi');
+----
+HUDI	org.apache.hudi.hadoop.HoodieParquetInputFormat
+
+# Hudi: file slices and log files below the location, which a parquet scan would read as duplicate rows
+statement error
+SELECT * FROM my_datalake.default.fixture_hudi;
+----
+Scan from table with type HUDI (input format 'org.apache.hudi.hadoop.HoodieParquetInputFormat')
+
+statement error
+INSERT INTO my_datalake.default.fixture_hudi VALUES ('20240101000000000', 1, 1.0);
+----
+INSERT on Glue table 'fixture_hudi' with type HUDI (input format 'org.apache.hudi.hadoop.HoodieParquetInputFormat') is not supported, only Hive tables can be written
+
+# symlink manifest: the location holds text files listing the data files, not the data files
+statement error
+SELECT * FROM my_datalake.default.fixture_symlink;
+----
+Scan from table with type SYMLINK (input format 'org.apache.hadoop.hive.ql.io.SymlinkTextInputFormat')
+
+statement error
+INSERT INTO my_datalake.default.fixture_symlink VALUES (1, 1.0);
+----
+with type SYMLINK (input format 'org.apache.hadoop.hive.ql.io.SymlinkTextInputFormat') is not supported
+
+statement error
+SELECT * FROM my_datalake.default.fixture_delta_symlink;
+----
+Scan from table with type DELTA
+
+# An InputFormat the extension does not know over Parquet's SerDe: the files are parquet, so the table reads, but how
+# they are laid out below the location is that engine's business, so nothing is written into it
+query I
+SELECT count(*) FROM my_datalake.default.fixture_foreign_input_format;
+----
+0
+
+statement error
+INSERT INTO my_datalake.default.fixture_foreign_input_format VALUES (1, 1.0);
+----
+INSERT into Glue table 'fixture_foreign_input_format' is not supported: its InputFormat 'com.example.hadoop.ManifestedParquetInputFormat' is not one Hive uses for parquet tables
+
+# nothing was written below the locations of the refused tables
+query I
+SELECT count(*) FROM (
+    SELECT file FROM glob('{DEFAULT_S3_LOCATION}/fixture/fixture_hudi/**')
+    UNION ALL SELECT file FROM glob('{DEFAULT_S3_LOCATION}/fixture/fixture_symlink/**')
+    UNION ALL SELECT file FROM glob('{DEFAULT_S3_LOCATION}/fixture/fixture_delta_symlink/**')
+    UNION ALL SELECT file FROM glob('{DEFAULT_S3_LOCATION}/fixture/fixture_foreign_input_format/**')
+);
+----
+0
+
+# Without an InputFormat the SerDe alone decides, as for reads: the table is written
+statement ok
+INSERT INTO my_datalake.default.fixture_no_input_format VALUES (1, 1.0);
+
+query I
+SELECT count(*) >= 1 FROM my_datalake.default.fixture_no_input_format;
+----
+true
+
+# The tables this extension creates keep their InputFormats and stay writable
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.input_format_csv;
+
+statement ok
+CREATE TABLE my_datalake.default.input_format_csv (id INTEGER, name VARCHAR) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.input_format_csv VALUES (1, 'a');
+
+query II
+SELECT response.StorageDescriptor.InputFormat::VARCHAR, (SELECT count(*) FROM my_datalake.default.input_format_csv)
+FROM glue_get_table_response('my_datalake.default.input_format_csv');
+----
+org.apache.hadoop.mapred.TextInputFormat	1
+
+statement ok
+DROP TABLE my_datalake.default.input_format_csv;

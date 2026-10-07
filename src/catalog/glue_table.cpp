@@ -64,11 +64,12 @@ GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	// Ask Glue what kind of table this is right before scanning: only Hive (Glue native) tables can be read
 	auto latest_info = RefreshTableInfo(context);
-	switch (latest_info.GetFormat()) {
-	case GlueTableFormat::HIVE:
+	auto format = latest_info.GetFormat();
+	switch (format.format) {
+	case GlueFormat::HIVE:
 		return GetHiveScanFunction(context, bind_data, latest_info);
 	default:
-		throw NotImplementedException("Scan from table with type %s", latest_info.GetFormatName());
+		throw NotImplementedException("Scan from table with type %s", format.Describe(latest_info));
 	}
 }
 

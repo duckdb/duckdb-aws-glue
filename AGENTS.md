@@ -7,9 +7,10 @@ This file provides guidance to coding agents when working with code in this repo
 
 A DuckDB extension (`glue`, attached with `ATTACH '<account_id>' AS cat (TYPE GLUE)`) that exposes an AWS Glue Data
 Catalog as a DuckDB catalog through the AWS SDK Glue client. Only Hive (Glue native) tables are readable/writable
-(parquet, csv, json, avro SerDes); Iceberg/Delta/Hudi tables are listed (`duckdb_tables().tags['table_type']`) but
-scans and DML throw. The top-level `README.md` is empty — `docs/README.md` is the real user-facing spec (attach
-options, read/write semantics, partition functions, testing, benchmarks). Keep it in sync when behavior changes.
+(parquet, csv, json, avro SerDes); Iceberg/Delta/Hudi/symlink-manifest tables (told apart by table parameters and the
+InputFormat) are listed (`duckdb_tables().tags['table_type']`) but scans and DML throw. The top-level `README.md` is
+empty — `docs/README.md` is the real user-facing spec (attach options, read/write semantics, partition functions,
+testing, benchmarks). Keep it in sync when behavior changes.
 
 ## Build
 
