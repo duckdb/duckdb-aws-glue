@@ -27,9 +27,9 @@ Attach options:
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is
-1, delimiter from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per
-line, keys by name) and AvroSerDe with `read_avro` (columns by name) from the avro extension, which is loaded on
-demand. Other SerDes (ORC, Ion, ...) are not supported.
+1, delimiter from `field.delim` / `separatorChar`, `,` otherwise), the Hive and the OpenX JsonSerDe with `read_json`
+(one object per line, keys by name; SerDe properties are not applied) and AvroSerDe with `read_avro` (columns by
+name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
@@ -99,7 +99,10 @@ their codec themselves.
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
   before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
   (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
-  they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
+  they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
+  Athena, JSON tables are written only with the Hive JsonSerDe (`org.apache.hive.hcatalog.data.JsonSerDe`, what
+  `CREATE TABLE ... WITH (format = 'json')` creates): `INSERT` into a table with the OpenX JSON SerDe
+  (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.

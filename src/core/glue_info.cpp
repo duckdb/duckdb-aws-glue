@@ -105,24 +105,51 @@ string GlueTableInfo::DescribeBucketing() const {
 	return result;
 }
 
-HiveFileFormat GlueTableInfo::GetFileFormat() const {
+HiveFileFormat HiveSerDeFileFormat(HiveSerDe serde) {
+	switch (serde) {
+	case HiveSerDe::PARQUET:
+		return HiveFileFormat::PARQUET;
+	case HiveSerDe::LAZY_SIMPLE:
+	case HiveSerDe::OPEN_CSV:
+		return HiveFileFormat::CSV;
+	case HiveSerDe::HIVE_JSON:
+	case HiveSerDe::OPENX_JSON:
+		return HiveFileFormat::JSON;
+	case HiveSerDe::AVRO:
+		return HiveFileFormat::AVRO;
+	}
+	throw InternalException("Unknown HiveSerDe");
+}
+
+HiveSerDe GlueTableInfo::GetSerDe() const {
 	auto serde = StringUtil::Lower(serde_library);
 	if (StringUtil::Contains(serde, "parquet")) {
-		return HiveFileFormat::PARQUET;
+		return HiveSerDe::PARQUET;
 	}
-	if (StringUtil::Contains(serde, "lazysimpleserde") || StringUtil::Contains(serde, "opencsvserde")) {
-		return HiveFileFormat::CSV;
+	if (StringUtil::Contains(serde, "lazysimpleserde")) {
+		return HiveSerDe::LAZY_SIMPLE;
 	}
+	if (StringUtil::Contains(serde, "opencsvserde")) {
+		return HiveSerDe::OPEN_CSV;
+	}
+	if (StringUtil::Contains(serde, "openx")) {
+		return HiveSerDe::OPENX_JSON;
+	}
+	// org.apache.hive.hcatalog.data.JsonSerDe, Hive 3's org.apache.hadoop.hive.serde2.JsonSerDe, ...
 	if (StringUtil::Contains(serde, "json")) {
-		return HiveFileFormat::JSON;
+		return HiveSerDe::HIVE_JSON;
 	}
 	if (StringUtil::Contains(serde, "avro")) {
-		return HiveFileFormat::AVRO;
+		return HiveSerDe::AVRO;
 	}
 	throw NotImplementedException("Hive table '%s.%s' uses SerDe '%s', only parquet (ParquetHiveSerDe), csv "
 	                              "(LazySimpleSerDe, OpenCSVSerde), json (JsonSerDe) and avro (AvroSerDe) tables are "
 	                              "supported",
 	                              database_name, name, serde_library);
+}
+
+HiveFileFormat GlueTableInfo::GetFileFormat() const {
+	return HiveSerDeFileFormat(GetSerDe());
 }
 
 string GlueTableInfo::GetFieldDelimiter() const {
