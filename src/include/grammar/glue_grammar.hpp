@@ -12,9 +12,11 @@ class DatabaseInstance;
 //!   ALTER TABLE t PARTITION (k = v, ...) RENAME TO PARTITION (k = v, ...)
 //!   ALTER TABLE t PARTITION (k = v, ...) SET LOCATION '...'
 //!   ALTER TABLE t SET LOCATION '...'
+//!   MSCK REPAIR TABLE t
 //!
 //! Several of these actions can follow each other in one statement. The statement is turned into
-//! CALL glue_alter_table(t, [actions]). Activate it with SET active_grammar_extensions = ['glue_hive_ddl'].
+//! CALL glue_alter_table(t, [actions]); MSCK REPAIR TABLE becomes CALL glue_repair_table(t). Activate it
+//! with SET active_grammar_extensions = ['glue_hive_ddl'].
 void RegisterGlueGrammarExtension(DatabaseInstance &db);
 
 } // namespace duckdb
