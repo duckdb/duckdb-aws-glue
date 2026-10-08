@@ -2,10 +2,16 @@
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "duckdb/common/error_data.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/parser/parsed_data/alter_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
@@ -21,12 +27,17 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
 
+static atomic<idx_t> next_iceberg_database_id {0};
+
 GlueCatalog::GlueCatalog(AttachedDatabase &db_p, AccessMode access_mode, GlueAttachOptions options_p)
-    : Catalog(db_p), access_mode(access_mode), options(std::move(options_p)), schemas(*this) {
+    : Catalog(db_p), access_mode(access_mode), options(std::move(options_p)), schemas(*this),
+      // unique, so that ATTACH OR REPLACE can attach the new catalog's before the old one's is detached
+      iceberg_database_name(StringUtil::Format("__glue_iceberg_%s_%llu", options.name, ++next_iceberg_database_id)) {
 }
 
 GlueCatalog::~GlueCatalog() {
@@ -309,7 +320,28 @@ PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 
 PhysicalOperator &GlueCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                  LogicalCreateTable &op, PhysicalOperator &plan) {
+	if (GlueSchemaEntry::GetCreateTableFormat(context, op.info->Base()) == GlueTableFormat::ICEBERG) {
+		return PlanIcebergCreateTableAs(context, planner, op, plan);
+	}
 	return GlueHiveInsert::PlanCreateTableAs(context, planner, op, plan);
+}
+
+PhysicalOperator &GlueCatalog::PlanIcebergCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
+                                                        LogicalCreateTable &op, PhysicalOperator &plan) {
+	auto &glue_schema = op.schema.Cast<GlueSchemaEntry>();
+	ThrowIfInExplicitTransaction(context);
+	// CREATE TABLE ... AS on an existing table is planned as a plain CREATE TABLE: this only sees OR REPLACE
+	if (glue_schema.CheckCreateTableConflict(context, op.info->Base())) {
+		throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"",
+		                       op.info->Base().GetTableName().GetIdentifierName(), glue_schema.database_info.name);
+	}
+	auto &iceberg_schema = GetIcebergSchema(context, glue_schema.database_info.name);
+	auto iceberg_info = glue_schema.BindIcebergCreateTable(context, *op.info, iceberg_schema);
+	LogicalCreateTable iceberg_op(iceberg_schema, std::move(iceberg_info));
+	iceberg_op.types = op.types;
+	GlueTransaction::Get(context, *this)
+	    .AddIcebergTable(glue_schema.database_info.name, op.info->Base().GetTableName().GetIdentifierName());
+	return iceberg_schema.catalog.PlanCreateTableAs(context, planner, iceberg_op, plan);
 }
 
 PhysicalOperator &GlueCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
@@ -330,6 +362,97 @@ PhysicalOperator &GlueCatalog::PlanMergeInto(ClientContext &context, PhysicalPla
 unique_ptr<LogicalOperator> GlueCatalog::BindCreateIndex(Binder &binder, CreateStatement &stmt,
                                                          TableCatalogEntry &table, unique_ptr<LogicalOperator> plan) {
 	throw NotImplementedException("Indexes are not supported for Glue catalogs");
+}
+
+//===--------------------------------------------------------------------===//
+// Iceberg
+//===--------------------------------------------------------------------===//
+Catalog &GlueCatalog::GetIcebergCatalog(ClientContext &context) {
+	lock_guard<mutex> guard(iceberg_lock);
+	auto &db_manager = DatabaseManager::Get(context);
+	Identifier name(iceberg_database_name);
+	if (iceberg_database) {
+		// rolling back the transaction that attached it detaches it again
+		if (db_manager.GetDatabase(name) == iceberg_database) {
+			return iceberg_database->GetCatalog();
+		}
+		iceberg_database = nullptr;
+	}
+	AttachInfo info;
+	info.name = name;
+	info.path = options.path;
+	auto uri =
+	    options.endpoint.empty() ? StringUtil::Format("glue.%s.amazonaws.com", options.region) : options.endpoint;
+	info.options = {{"type", Value("iceberg")},
+	                {"endpoint_type", Value("glue")},
+	                {"uri", Value(uri + "/iceberg")},
+	                {"sigv4_region", Value(options.region)},
+	                // Glue rejects DropTable with purgeRequested=true for Iceberg tables
+	                {"purge_requested", Value::BOOLEAN(false)}};
+	if (!options.secret_name.empty()) {
+		info.options["secret"] = Value(options.secret_name);
+	}
+	AttachOptions attach_options(DBConfig::GetConfig(context).options);
+	attach_options.access_mode = access_mode;
+	attach_options.db_type = "iceberg";
+	attach_options.visibility = AttachVisibility::HIDDEN;
+	iceberg_database = db_manager.AttachDatabase(context, info, attach_options);
+	if (!iceberg_database) {
+		throw InternalException("Attaching the Iceberg catalog of Glue catalog \"%s\" failed",
+		                        GetName().GetIdentifierName());
+	}
+	return iceberg_database->GetCatalog();
+}
+
+SchemaCatalogEntry &GlueCatalog::GetIcebergSchema(ClientContext &context, const string &database_name) {
+	auto &iceberg_catalog = GetIcebergCatalog(context);
+	EntryLookupInfo lookup(CatalogType::SCHEMA_ENTRY, QualifiedName(Identifier(database_name)));
+	auto schema = iceberg_catalog.LookupSchema(iceberg_catalog.GetCatalogTransaction(context), lookup,
+	                                           OnEntryNotFound::RETURN_NULL);
+	if (!schema) {
+		throw CatalogException("Glue database \"%s\" is not served by Glue's Iceberg REST endpoint", database_name);
+	}
+	return *schema;
+}
+
+TableCatalogEntry &GlueCatalog::GetIcebergTable(ClientContext &context, const string &database_name,
+                                                const string &table_name, optional_ptr<BoundAtClause> at_clause) {
+	auto &iceberg_catalog = GetIcebergCatalog(context);
+	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY,
+	                       QualifiedName(iceberg_catalog.GetName(), Identifier(database_name), Identifier(table_name)),
+	                       at_clause, QueryErrorContext());
+	auto entry = Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
+		throw CatalogException("Iceberg table \"%s.%s\" is registered in Glue but Glue's Iceberg REST endpoint does "
+		                       "not return it",
+		                       database_name, table_name);
+	}
+	return entry->Cast<TableCatalogEntry>();
+}
+
+void GlueCatalog::AttachIcebergCatalog(ClientContext &context) {
+	try {
+		GetIcebergCatalog(context);
+	} catch (std::exception &ex) {
+		// e.g. a Glue compatible server without the Iceberg REST endpoint: Hive tables still work, the first use of
+		// an Iceberg table tries again and reports the error
+		ErrorData error(ex);
+		DUCKDB_LOG_WARNING(context, "Glue catalog '%s': attaching its Iceberg catalog failed: %s",
+		                   GetName().GetIdentifierName(), error.RawMessage());
+	}
+}
+
+void GlueCatalog::OnDetach(ClientContext &context) {
+	lock_guard<mutex> guard(iceberg_lock);
+	if (!iceberg_database) {
+		return;
+	}
+	auto &db_manager = DatabaseManager::Get(context);
+	Identifier name(iceberg_database_name);
+	if (db_manager.GetDatabase(name) == iceberg_database) {
+		db_manager.DetachDatabase(context, name, OnEntryNotFound::RETURN_NULL);
+	}
+	iceberg_database = nullptr;
 }
 
 //===--------------------------------------------------------------------===//

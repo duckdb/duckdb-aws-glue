@@ -6,6 +6,7 @@
 		"snappy",
 		"liblzma",
 		"jansson",
+		"roaring",
 		{
 			"name": "aws-sdk-cpp",
 			"features": [

@@ -18,6 +18,8 @@ class GlueClient;
 } // namespace Aws
 
 namespace duckdb {
+class AttachedDatabase;
+class BoundAtClause;
 class GlueTable;
 
 class GlueCatalog : public Catalog {
@@ -50,6 +52,10 @@ public:
 		return false;
 	}
 	optional<Identifier> GetDefaultSchema() const override;
+	//! Only Iceberg tables can be read at a snapshot, see GlueSchemaEntry::LookupEntry
+	bool SupportsTimeTravel() const override {
+		return true;
+	}
 	//! Allow CREATE TABLE ... PARTITIONED BY (...) WITH (location = '...', <property> = '...'); the options are
 	//! validated in GlueSchemaEntry::CreateTable
 	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
@@ -82,6 +88,17 @@ public:
 	unique_ptr<LogicalOperator> BindCreateIndex(Binder &binder, CreateStatement &stmt, TableCatalogEntry &table,
 	                                            unique_ptr<LogicalOperator> plan) override;
 
+	void OnDetach(ClientContext &context) override;
+
+	//! The hidden Iceberg catalog over Glue's Iceberg REST endpoint, attached on ATTACH (and again when that failed
+	//! or was rolled back)
+	Catalog &GetIcebergCatalog(ClientContext &context);
+	//! Attach the Iceberg catalog, logging rather than throwing when that fails
+	void AttachIcebergCatalog(ClientContext &context);
+	SchemaCatalogEntry &GetIcebergSchema(ClientContext &context, const string &database_name);
+	TableCatalogEntry &GetIcebergTable(ClientContext &context, const string &database_name, const string &table_name,
+	                                   optional_ptr<BoundAtClause> at_clause = nullptr);
+
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
 	bool InMemory() override;
 	string GetDBPath() override;
@@ -98,12 +115,17 @@ public:
 private:
 	//! Throw unless 'table' is a Hive table, the only kind that can be written
 	static GlueTable &GetHiveTableForDML(TableCatalogEntry &table, const char *statement);
+	PhysicalOperator &PlanIcebergCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
+	                                           LogicalCreateTable &op, PhysicalOperator &plan);
 	//! Apply one CREATE / ALTER SCHEMA option: 'comment' is the Description, 'location' the LocationUri and any other
 	//! key a database parameter
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);
 
 private:
 	GlueSchemaSet schemas;
+	mutex iceberg_lock;
+	string iceberg_database_name;
+	shared_ptr<AttachedDatabase> iceberg_database;
 };
 
 } // namespace duckdb

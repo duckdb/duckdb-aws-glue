@@ -1,0 +1,167 @@
+# name: test/sql/combined_table_types/join_hive_iceberg.test
+# description: queries that read Hive and Iceberg tables of the same Glue catalog together
+# group: [combined_table_types]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_customers_hive;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_orders_iceberg;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_returns_hive;
+
+# customers and returns are Hive tables (one partitioned), orders an Iceberg table
+statement ok
+CREATE TABLE my_datalake.default.mix_customers_hive (customer_id INTEGER, name VARCHAR, country VARCHAR)
+PARTITIONED BY (country);
+
+statement ok
+INSERT INTO my_datalake.default.mix_customers_hive VALUES
+    (1, 'alice', 'NL'), (2, 'bob', 'DE'), (3, 'carol', 'NL'), (4, 'dave', 'FR');
+
+statement ok
+CREATE TABLE my_datalake.default.mix_orders_iceberg (order_id INTEGER, customer_id INTEGER, amount DOUBLE)
+WITH (table_type = 'iceberg');
+
+statement ok
+INSERT INTO my_datalake.default.mix_orders_iceberg VALUES
+    (10, 1, 10.0), (11, 1, 15.0), (12, 2, 7.5), (13, 3, 1.0), (14, 99, 3.0);
+
+statement ok
+CREATE TABLE my_datalake.default.mix_returns_hive (order_id INTEGER, reason VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.mix_returns_hive VALUES (11, 'damaged'), (13, 'late');
+
+query II
+SELECT c.name, sum(o.amount) FROM my_datalake.default.mix_customers_hive c
+JOIN my_datalake.default.mix_orders_iceberg o USING (customer_id)
+GROUP BY c.name ORDER BY c.name;
+----
+alice	25.0
+bob	7.5
+carol	1.0
+
+# partition pruning on the Hive side, filters on the Iceberg side
+query II
+SELECT o.order_id, o.amount FROM my_datalake.default.mix_orders_iceberg o
+JOIN my_datalake.default.mix_customers_hive c ON c.customer_id = o.customer_id
+WHERE c.country = 'NL' AND o.amount > 5 ORDER BY o.order_id;
+----
+10	10.0
+11	15.0
+
+query III
+SELECT c.name, o.order_id, r.reason
+FROM my_datalake.default.mix_customers_hive c
+JOIN my_datalake.default.mix_orders_iceberg o USING (customer_id)
+JOIN my_datalake.default.mix_returns_hive r USING (order_id)
+ORDER BY o.order_id;
+----
+alice	11	damaged
+carol	13	late
+
+# outer joins keep the rows without a match on either side
+query II
+SELECT c.name, o.order_id FROM my_datalake.default.mix_customers_hive c
+FULL OUTER JOIN my_datalake.default.mix_orders_iceberg o USING (customer_id)
+WHERE c.name IS NULL OR o.order_id IS NULL ORDER BY ALL;
+----
+dave	NULL
+NULL	14
+
+query I
+SELECT customer_id FROM my_datalake.default.mix_customers_hive
+EXCEPT
+SELECT customer_id FROM my_datalake.default.mix_orders_iceberg
+ORDER BY 1;
+----
+4
+
+query II
+SELECT 'hive' AS source, count(*) FROM my_datalake.default.mix_customers_hive
+UNION ALL
+SELECT 'iceberg', count(*) FROM my_datalake.default.mix_orders_iceberg
+ORDER BY source;
+----
+hive	4
+iceberg	5
+
+query I
+WITH spend AS (
+    SELECT customer_id, sum(amount) AS total FROM my_datalake.default.mix_orders_iceberg GROUP BY customer_id
+)
+SELECT string_agg(name, ',' ORDER BY name) FROM my_datalake.default.mix_customers_hive
+WHERE customer_id IN (SELECT customer_id FROM spend WHERE total > 5);
+----
+alice,bob
+
+# a correlated subquery in each direction
+query II
+SELECT name, (SELECT count(*) FROM my_datalake.default.mix_orders_iceberg o WHERE o.customer_id = c.customer_id)
+FROM my_datalake.default.mix_customers_hive c ORDER BY name;
+----
+alice	2
+bob	1
+carol	1
+dave	0
+
+query I
+SELECT count(*) FROM my_datalake.default.mix_orders_iceberg o
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.default.mix_returns_hive r WHERE r.order_id = o.order_id);
+----
+3
+
+# the same Iceberg table twice in one query
+query I
+SELECT count(*) FROM my_datalake.default.mix_orders_iceberg a JOIN my_datalake.default.mix_orders_iceberg b
+ON a.customer_id = b.customer_id AND a.order_id < b.order_id;
+----
+1
+
+# DML on the Iceberg table using the Hive table
+statement ok
+DELETE FROM my_datalake.default.mix_orders_iceberg
+WHERE order_id IN (SELECT order_id FROM my_datalake.default.mix_returns_hive);
+
+statement ok
+UPDATE my_datalake.default.mix_orders_iceberg SET amount = amount * 2
+WHERE customer_id IN (SELECT customer_id FROM my_datalake.default.mix_customers_hive WHERE country = 'DE');
+
+query II
+SELECT order_id, amount FROM my_datalake.default.mix_orders_iceberg ORDER BY order_id;
+----
+10	10.0
+12	15.0
+14	3.0
+
+statement ok
+DROP TABLE my_datalake.default.mix_customers_hive;
+
+statement ok
+DROP TABLE my_datalake.default.mix_orders_iceberg;
+
+statement ok
+DROP TABLE my_datalake.default.mix_returns_hive;

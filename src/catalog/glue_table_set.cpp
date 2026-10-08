@@ -23,8 +23,19 @@ unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
 		return GlueView::FromTableInfo(catalog, schema, table);
 	}
 	CreateTableInfo info(schema, Identifier(table.name));
+	auto is_iceberg = table.GetFormat() == GlueTableFormat::ICEBERG;
 	for (auto &column : table.columns) {
-		info.columns.AddColumn(ColumnDefinition(Identifier(column.name), GlueTypes::ToLogicalType(column.type)));
+		LogicalType type;
+		try {
+			type = GlueTypes::ToLogicalType(column.type);
+		} catch (std::exception &) {
+			if (!is_iceberg) {
+				throw;
+			}
+			// only listed: scans and DESCRIBE of an Iceberg table use the schema of the Iceberg catalog
+			type = LogicalType::UNKNOWN;
+		}
+		info.columns.AddColumn(ColumnDefinition(Identifier(column.name), std::move(type)));
 	}
 	// Hive tables store their partition columns separately, they are regular (trailing) columns for a scan
 	for (auto &column : table.partition_keys) {
@@ -109,6 +120,12 @@ optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> en
 void GlueTableSet::RemoveEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
 	RetireEntry(name);
+}
+
+void GlueTableSet::InvalidateEntry(const string &name) {
+	lock_guard<mutex> guard(entry_lock);
+	RetireEntry(name);
+	is_loaded = false;
 }
 
 void GlueTableSet::RetireEntry(const string &name) {

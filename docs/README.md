@@ -1,9 +1,10 @@
 # DuckDB Glue extension
 
 Experimental extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
-SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Tables of other
-formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or
-written.
+SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3, and with Iceberg
+tables, which are read and written through Glue's Iceberg REST endpoint (see [Iceberg tables](#iceberg-tables)). Tables
+of other formats that Glue registers (Delta, Hudi, ...) are listed, with the columns Glue reports, but can not be read
+or written.
 
 ```sql
 CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');
@@ -74,10 +75,11 @@ their codec themselves.
 - `ALTER SCHEMA ... SET (<key> = '...', ...)` merges options into the Glue database (UpdateDatabase), with the same
   keys as `CREATE SCHEMA`; `ALTER SCHEMA ... RESET (<key>, ...)` removes them. Keys are case-insensitive.
 - `CREATE TABLE ... [PARTITIONED BY (col, ...)] [WITH (format = 'parquet' | 'csv' | 'json' | 'avro', location = '...',
-  <property> = '...')]` creates a parquet (default), csv (LazySimpleSerDe, `,` delimited, no header), json
+  <property> = '...')]` creates a Hive table (`table_type = 'hive'`, the default; `table_type = 'iceberg'` creates an
+  [Iceberg table](#iceberg-tables)): a parquet (default), csv (LazySimpleSerDe, `,` delimited, no header), json
   (JsonSerDe, one object per line) or avro (AvroSerDe)
   Hive table at `location`, else `<DEFAULT_LOCATION>/<database>/<table>`, else `<database LocationUri>/<table>`;
-  without any of these the statement fails. Partition keys must be plain column names; they become Glue
+  without any of these the statement fails, as it does for an empty `location`. Partition keys must be plain column names; they become Glue
   PartitionKeys and are listed last in the table's columns. Unknown `WITH` keys are stored as Glue table parameters.
   Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
   `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
@@ -126,10 +128,45 @@ their codec themselves.
   `CASCADE` is given.
 
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
-is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
-of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
-...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
-`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
+is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported for Hive tables. DDL
+(`CREATE`/`ALTER`/`DROP` of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or
+`glue_add_partition`, `glue_alter_table`, ...) and `INSERT` inside an explicit `BEGIN` transaction are an error that
+aborts the transaction; end it with `COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
+
+## Iceberg tables
+
+Glue also serves its catalog through the [Iceberg REST
+API](https://docs.aws.amazon.com/glue/latest/dg/connect-glu-iceberg-rest.html). Iceberg tables are read and written
+through it by the iceberg extension: ATTACH also attaches a hidden Iceberg catalog (`TYPE iceberg, ENDPOINT_TYPE
+glue`, with the same catalog id, secret and region, at `<ENDPOINT>/iceberg` when `ENDPOINT` is given; one request to
+Glue), and Iceberg tables are looked up there. When that attach fails (e.g. a Glue compatible server without the
+Iceberg REST endpoint) ATTACH logs a warning and still succeeds; the first use of an Iceberg table then reports the
+error. The hidden catalog is not listed: `SHOW ALL TABLES`, `duckdb_tables()` and `duckdb_databases()` show the
+tables under the Glue catalog only, and it is detached with it.
+
+```sql
+CREATE TABLE my_datalake.default.events (id BIGINT, kind VARCHAR, day DATE) PARTITIONED BY (day)
+    WITH (table_type = 'iceberg');
+INSERT INTO my_datalake.default.events VALUES (1, 'click', '2024-01-01');
+UPDATE my_datalake.default.events SET kind = 'view' WHERE id = 1;
+SELECT * FROM my_datalake.default.events AT (VERSION => <snapshot id>);
+```
+
+- `CREATE TABLE ... WITH (table_type = 'iceberg')` and `CREATE TABLE ... AS` create the table through the REST
+  endpoint, at `location` or the same default location as a Hive table. `PARTITIONED BY` makes an Iceberg partition
+  spec; other `WITH` keys (e.g. `'format-version' = 2`) are Iceberg table properties. The Hive options (`format`,
+  `delimiter`, `quote`, `escape`, `header`, the bucketing options) are refused. As for Hive tables, `CREATE TABLE ...
+  AS` creates the table before the query runs.
+- `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE INTO`, time travel (`AT (VERSION => ...)`), `ALTER TABLE` (add, drop
+  and rename columns, widening type changes) and `DROP TABLE` are those of the iceberg extension, as are its
+  functions (`iceberg_snapshots('my_datalake.default.events')`, ...). Glue's endpoint does not support
+  `ALTER TABLE ... RENAME TO`. Time travel on a Hive table or a view is an error.
+- Iceberg tables can only be used in auto-commit statements: in an explicit transaction (`BEGIN ... COMMIT`) every
+  statement that uses one fails, also when it only reads.
+- The listing (`duckdb_columns()`, `information_schema.columns`) uses the columns Glue stores for the table, in Glue's
+  types: `TIMESTAMPTZ` is listed as `TIMESTAMP`, `TIME` and `UUID` as `VARCHAR`. `DESCRIBE` and scans use the Iceberg
+  schema.
+- The Hive partition functions, the `glue_hive_ddl` statements and `hive_scan` only work on Hive tables.
 
 ## Views
 
@@ -257,6 +294,12 @@ The tests are written against two `--test-config` files, which decide where the 
 A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT` and `DEFAULT_S3_LOCATION`,
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under
 `test/sql/cloud/` read tables of the live account that the tests do not create and only run with the cloud config.
+moto does not serve Glue's Iceberg REST endpoint, so the tests that use Iceberg tables (`test/sql/iceberg/` and
+`test/sql/combined_table_types/`, Hive and Iceberg tables in one query) `require-env ICEBERG_SUPPORTED`, which only
+the cloud config sets. These tests also `set ignore_error_messages`:
+the test runner otherwise skips a test on any error mentioning `HTTP`, which every error of the REST endpoint does.
+The cloud config expects the Glue database `default` and the `fixture_*` tables and views of
+`scripts/docker-compose.yml` to exist in the account.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
@@ -268,13 +311,23 @@ AWS_PROFILE=... AWS_CONFIG_FILE=~/.aws/config AWS_SHARED_CREDENTIALS_FILE=~/.aws
 
 Both targets set `AWS_EC2_METADATA_DISABLED=true`: the test runner hides `~/.aws`, and without a region from the
 environment or a profile the AWS SDK asks the EC2 instance metadata service for one, which off EC2 hangs for
-minutes per client. A test config can not export process environment variables, so this stays on the command.
+minutes per client. A test config can not export process environment variables, so this stays on the command. On
+an EC2 instance whose credentials come from its instance role, run `unittest` directly without it (with `AWS_REGION`
+set) instead of `make test-cloud`.
 
 `make test-local` runs the tests through DuckDB's `duckdb/scripts/ci/run_tests.py` (Python 3.10+; pick the
 interpreter with `PYTHON=python3.14`), one test per process and one at a time, and reruns a failing test up to twice:
 against the local servers a read right after a write occasionally comes back with no rows. Every retry is reported in
 the output. `TEST_BUILD=release` runs the `release` build instead of
 `relassert`.
+
+A maintainer can run the whole suite of a pull request, on a release build, against a live catalog with the
+`Cloud Glue tests` workflow
+(`.github/workflows/CloudGlueTests.yml`, `gh workflow run CloudGlueTests.yml -f pr_number=<n>`). It is never
+triggered by a PR, refuses to run for anyone below the `maintain` role, tests the PR's head commit as it was when the
+run started, and reports the result as a `Cloud Glue tests` status on that commit. The catalog, region, S3 prefix and
+AWS credentials come from the variables and secrets of the `cloud-glue` environment, listed at the top of the
+workflow.
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.

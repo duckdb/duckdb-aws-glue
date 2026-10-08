@@ -9,6 +9,7 @@
 #include "catalog/glue_table_set.hpp"
 
 namespace duckdb {
+struct BoundCreateTableInfo;
 struct CreateTableInfo;
 
 //! Options accepted in CREATE TABLE ... WITH (...) for Glue tables
@@ -63,6 +64,13 @@ public:
 	static GlueCreateTableOptions ParseCreateTableOptions(ClientContext &context, const CreateTableInfo &create_info);
 	//! BucketColumns, NumberOfBuckets or SortColumns (case-insensitive)
 	static bool IsBucketingOption(const string &key);
+	//! The 'table_type' option of CREATE TABLE: HIVE (the default) or ICEBERG
+	static GlueTableFormat GetCreateTableFormat(ClientContext &context, const CreateTableInfo &create_info);
+	//! The existing entry when CREATE TABLE IF NOT EXISTS names one, nullptr when there is none; throws otherwise
+	optional_ptr<CatalogEntry> CheckCreateTableConflict(ClientContext &context, const CreateTableInfo &create_info);
+	//! The CREATE TABLE of an Iceberg table, rebound to the schema of the Iceberg catalog
+	unique_ptr<BoundCreateTableInfo> BindIcebergCreateTable(ClientContext &context, BoundCreateTableInfo &info,
+	                                                        SchemaCatalogEntry &iceberg_schema);
 	//! Type changes Hive can read back from the existing parquet files: widening only
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
 	//! Replace the cached entry of an altered table with what Glue stored
@@ -71,6 +79,9 @@ public:
 private:
 	static bool CatalogTypeIsSupported(CatalogType type);
 	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
+	optional_ptr<CatalogEntry> CreateIcebergTable(ClientContext &context, BoundCreateTableInfo &info);
+	//! The Glue entry of an Iceberg table, or nullptr for any other entry
+	static optional_ptr<GlueTable> AsIcebergTable(optional_ptr<CatalogEntry> entry);
 
 public:
 	//! The database definition as returned by Glue

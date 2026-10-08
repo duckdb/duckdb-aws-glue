@@ -100,7 +100,8 @@ private:
 
 	LogicalType ParseType() {
 		auto name = StringUtil::Lower(ReadIdentifier());
-		if (name == "array") {
+		// Glue writes the schema of an Iceberg table with 'list<...>' and 'varbyte'
+		if (name == "array" || name == "list") {
 			Expect('<');
 			auto child = ParseType();
 			Expect('>');
@@ -182,7 +183,7 @@ private:
 		if (name == "string") {
 			return LogicalType::VARCHAR;
 		}
-		if (name == "binary") {
+		if (name == "binary" || name == "varbyte") {
 			return LogicalType::BLOB;
 		}
 		if (name == "date") {

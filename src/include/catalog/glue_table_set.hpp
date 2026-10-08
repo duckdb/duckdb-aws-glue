@@ -26,6 +26,8 @@ public:
 	//! Insert a (new) entry into the set, replacing any existing entry with the same name
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
 	void RemoveEntry(const string &name);
+	//! Remove the entry and reload the listing from Glue on the next scan
+	void InvalidateEntry(const string &name);
 
 	//! Build the catalog entry for a Glue table definition: a GlueView for a VIRTUAL_VIEW, else a GlueTable
 	unique_ptr<CatalogEntry> CreateEntry(const GlueTableInfo &table);

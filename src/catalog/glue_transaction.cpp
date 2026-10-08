@@ -22,12 +22,25 @@ void GlueTransaction::Commit() {
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
+	InvalidateIcebergTables();
 }
 
 void GlueTransaction::Rollback() {
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
+	InvalidateIcebergTables();
+}
+
+void GlueTransaction::AddIcebergTable(const string &database_name, const string &table_name) {
+	iceberg_tables.emplace_back(database_name, table_name);
+}
+
+void GlueTransaction::InvalidateIcebergTables() {
+	for (auto &table : iceberg_tables) {
+		glue_catalog.GetSchemas().InvalidateTableEntry(table.first, table.second);
+	}
+	iceberg_tables.clear();
 }
 
 GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) {

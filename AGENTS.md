@@ -6,9 +6,9 @@ This file provides guidance to coding agents when working with code in this repo
 ## What this is
 
 A DuckDB extension (`glue`, attached with `ATTACH '<account_id>' AS cat (TYPE GLUE)`) that exposes an AWS Glue Data
-Catalog as a DuckDB catalog through the AWS SDK Glue client. Only Hive (Glue native) tables are readable/writable
-(parquet, csv, json, avro SerDes); Iceberg/Delta/Hudi tables are listed (`duckdb_tables().tags['table_type']`) but
-scans and DML throw. The top-level `README.md` is empty — `docs/README.md` is the real user-facing spec (attach
+Catalog as a DuckDB catalog through the AWS SDK Glue client. Hive (Glue native) tables are readable/writable
+(parquet, csv, json, avro SerDes); Iceberg tables are served by a hidden duckdb-iceberg catalog over Glue's Iceberg
+REST endpoint; Delta/Hudi tables are listed (`duckdb_tables().tags['table_type']`) but scans and DML throw. The top-level `README.md` is empty — `docs/README.md` is the real user-facing spec (attach
 options, read/write semantics, partition functions, testing, benchmarks). Keep it in sync when behavior changes.
 
 ## Build
@@ -26,7 +26,8 @@ BUILD_BENCHMARK=1 ... make relassert                                            
 Each `src/` subdirectory has its own `CMakeLists.txt` (an `add_library_unity` object library appended to
 `GLUE_EXTENSION_FILES`, like DuckDB's own source tree): add new `.cpp` files there, and a new directory with
 `add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds` and `avro` (avro is
-loaded on demand for AvroSerDe tables).
+loaded on demand for AvroSerDe tables) and `iceberg` (pinned with `APPLY_PATCHES` to the hash the duckdb submodule
+pins; needs `roaring` from vcpkg).
 
 Run `make format-fix` (clang-format over `src` and `test`, via the duckdb submodule) before committing.
 
@@ -39,7 +40,9 @@ SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CAT
   `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything through DuckDB's
   `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially, retrying a failing test twice: against the local
   servers a read right after a write occasionally comes back empty.
-- `test/configs/cloud_glue.json`: live AWS (credential chain, eu-central-1). `test/sql/cloud/` only runs here
+- `.github/workflows/CloudGlueTests.yml`: maintainer-only `workflow_dispatch` (input `pr_number`) running all tests
+  of a PR against the account configured in the `cloud-glue` environment (`make test-cloud CLOUD_TEST_CONFIG=...`).
+- `test/configs/cloud_glue.json`: live AWS (credential chain, eu-north-1). `test/sql/cloud/` only runs here
   (`require-env GLUE_TEST_CONFIG cloud`) and reads pre-existing tables in the account.
 
 Single test:
@@ -60,6 +63,11 @@ AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 \
   narrowest path there with a concrete reason instead of weakening the test; remove the skip when support lands.
   Validate config edits with `jq empty test/configs/*.json`.
 - Test targets don't build first: rebuild before running tests.
+
+Tests that need Iceberg tables (`test/sql/iceberg/`, `test/sql/combined_table_types/`) have
+`require-env ICEBERG_SUPPORTED`, which only the cloud config sets (moto has no Iceberg REST endpoint), and
+`set ignore_error_messages`, so REST errors (which mention `HTTP`) fail the test instead of skipping it. New tests
+that create or read Iceberg tables need both.
 
 Test format is DuckDB's sqllogictest (`statement ok|error`, `query I...`, `----`, `<REGEX>:` for error patterns,
 `require-env`). Slow tests use `.test_slow`. Do not add `PRAGMA enable_verification`. Test error paths, not just the
@@ -96,6 +104,14 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition
   SQL into `CALL glue_alter_table(...)`.
+- **Iceberg** (`GlueCatalog::GetIcebergCatalog`): ATTACH also attaches a hidden (`AttachVisibility::HIDDEN`)
+  `TYPE iceberg, ENDPOINT_TYPE glue` catalog `__glue_iceberg_<name>_<n>` (a failure is only logged; the next Iceberg
+  lookup attaches again, as after a rollback of the attaching transaction).
+  `GlueSchemaEntry::LookupEntry` returns that catalog's table entry, so duckdb-iceberg binds and plans scans, DML,
+  DROP and ALTER (its planners cast `op.table` to their own entry type); listing stays on Glue. CREATE / CTAS with
+  `table_type = 'iceberg'` reach the Glue schema and are rebound to the Iceberg schema. Cached Glue entries of
+  Iceberg tables a transaction touched are invalidated when it ends (`GlueTransaction`), never during binding:
+  listings hold references to them. Iceberg tables are refused in explicit transactions.
 - `glue_get_table_response` (`src/functions/glue_functions.cpp`) returns the raw Glue `Table` as VARIANT — handy for
   asserting Glue state in tests.
 

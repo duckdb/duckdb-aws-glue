@@ -19,12 +19,19 @@ public:
 	void Rollback();
 
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
+	//! An Iceberg table this transaction looked up: the Iceberg catalog binds its DDL, so the cached Glue entry of
+	//! the table is refreshed once the transaction ends
+	void AddIcebergTable(const string &database_name, const string &table_name);
 
 public:
 	GlueCatalog &glue_catalog;
 
 private:
+	void InvalidateIcebergTables();
+
+private:
 	GlueTransactionState transaction_state;
+	vector<pair<string, string>> iceberg_tables;
 };
 
 } // namespace duckdb

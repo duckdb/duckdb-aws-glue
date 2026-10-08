@@ -36,6 +36,27 @@ SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hive_table' FROM glue_get_ta
 ----
 true
 
+# an empty location is an error rather than falling back to the location of the database
+statement error
+CREATE TABLE my_datalake.default.hive_table_empty_location (i INTEGER) WITH (location = '');
+----
+<REGEX>:.*Binder Error.*CREATE TABLE option 'location' must not be empty.*
+
+statement error
+CREATE TABLE my_datalake.default.hive_table_empty_location (i INTEGER) WITH (location = '/');
+----
+<REGEX>:.*Binder Error.*CREATE TABLE option 'location' must not be empty.*
+
+statement error
+CREATE TABLE my_datalake.default.hive_table_empty_location WITH (location = '') AS SELECT 1 AS i;
+----
+<REGEX>:.*Binder Error.*CREATE TABLE option 'location' must not be empty.*
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'hive_table_empty_location';
+----
+0
+
 mode skip
 
 # We are not inserting into hive tables yet.

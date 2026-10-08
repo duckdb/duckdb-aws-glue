@@ -103,7 +103,9 @@ void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const
 	Aws::Glue::Model::DatabaseInput input;
 	input.SetName(database.name);
 	input.SetDescription(database.description);
-	input.SetLocationUri(database.location_uri);
+	if (!database.location_uri.empty()) {
+		input.SetLocationUri(database.location_uri);
+	}
 	input.SetParameters(ToAwsMap(database.parameters));
 	if (current.CreateTableDefaultPermissionsHasBeenSet()) {
 		input.SetCreateTableDefaultPermissions(current.GetCreateTableDefaultPermissions());

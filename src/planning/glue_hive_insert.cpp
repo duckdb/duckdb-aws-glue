@@ -384,7 +384,7 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 		// CREATE TABLE IF NOT EXISTS on an existing table: nothing is created and nothing is inserted
 		auto &base = op.info->Base();
 		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(base.GetTableName()));
-		auto existing = op.schema.LookupEntry(transaction, lookup);
+		auto existing = op.schema.Cast<GlueSchemaEntry>().tables.GetEntry(context, lookup);
 		auto &insert = planner.Make<GlueHiveInsert>(op, existing->Cast<GlueTable>(), true);
 		insert.children.push_back(plan);
 		return insert;

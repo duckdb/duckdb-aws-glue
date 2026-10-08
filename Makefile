@@ -28,5 +28,7 @@ PYTHON ?= python3
 TEST_BUILD ?= relassert
 test-local:
 	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 $(PYTHON) duckdb/scripts/ci/run_tests.py ./build/$(TEST_BUILD)/test/unittest --test-config test/configs/local_glue.json --workers 1 --batch-size 1 --retry 2 'test/sql/*'
+# CLOUD_TEST_CONFIG: a copy of cloud_glue.json pointing at another account, as .github/workflows/CloudGlueTests.yml does
+CLOUD_TEST_CONFIG ?= test/configs/cloud_glue.json
 test-cloud:
-	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/relassert/test/unittest --test-config test/configs/cloud_glue.json 'test/sql/*'
+	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-config $(CLOUD_TEST_CONFIG) 'test/sql/*'

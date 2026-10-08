@@ -60,14 +60,14 @@ FROM glue_get_table_response('my_datalake.default.gr_view');
 ----
 SELECT id FROM gr_orders	[{'Name': id, 'Type': int}]
 
-# no columns are stored for a view that is not bound at creation
+# no columns are stored for a view that is not bound at creation (Glue returns an empty list, moto none)
 statement ok
 CREATE VIEW my_datalake.default.gr_defer WITH (DEFER_BINDING) AS SELECT id FROM gr_missing;
 
 query I
-SELECT response.StorageDescriptor.Columns IS NULL FROM glue_get_table_response('my_datalake.default.gr_defer');
+SELECT coalesce(response.StorageDescriptor.Columns::VARCHAR, '[]') FROM glue_get_table_response('my_datalake.default.gr_defer');
 ----
-true
+[]
 
 statement ok
 DROP VIEW my_datalake.default.gr_defer;

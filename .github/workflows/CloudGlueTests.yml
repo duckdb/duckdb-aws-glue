@@ -1,0 +1,160 @@
+# Runs all sqllogictests of a pull request, on a release build, against a live AWS Glue Data Catalog
+# (test/configs/cloud_glue.json), for a maintainer who suspects a PR breaks the cloud tests. It is never triggered by
+# a PR: a maintainer starts it from the Actions tab (or `gh workflow run CloudGlueTests.yml -f pr_number=123`) after
+# reading the PR, because it runs the PR's code with the AWS credentials of the 'cloud-glue' environment.
+#
+# The 'cloud-glue' environment provides:
+#   variables  GLUE_CATALOG_ID       the AWS account id of the Glue Data Catalog
+#              GLUE_REGION           its region, e.g. eu-north-1
+#              DEFAULT_S3_LOCATION   S3 prefix the tests write under, e.g. s3://my-bucket/warehouse
+#              AWS_ROLE_ARN          optional: an IAM role to assume through GitHub's OIDC provider
+#   secrets    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, when no AWS_ROLE_ARN is given
+# The credentials need Glue and S3 access to that account and prefix. The account needs the Glue database 'default'
+# and the fixture tables and views that scripts/docker-compose.yml creates locally (see docs/README.md, Testing).
+# The tests drop and create tables in it: use an account that holds nothing else.
+
+name: Cloud Glue tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Number of the pull request whose head commit is tested
+        required: true
+        type: number
+
+# the tests share the Glue database 'default' of the account: one run at a time
+concurrency:
+  group: cloud-glue-tests
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  cloud-glue-tests:
+    runs-on: ubuntu-latest
+    environment: cloud-glue
+
+    permissions:
+      contents: read
+      # the commit status on the PR's head commit
+      statuses: write
+      # AWS_ROLE_ARN: OIDC token for configure-aws-credentials
+      id-token: write
+
+    env:
+      GEN: ninja
+      PR_NUMBER: ${{ inputs.pr_number }}
+      GH_TOKEN: ${{ github.token }}
+      # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: ${{ vars.GLUE_REGION }}
+
+    steps:
+      # workflow_dispatch already needs write access; running a PR's code with the AWS credentials needs more
+      - name: Check that a maintainer started the run
+        run: |
+          role=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.triggering_actor }}/permission" --jq .role_name)
+          echo "${{ github.triggering_actor }} has role '$role'"
+          if [ "$role" != "admin" ] && [ "$role" != "maintain" ]; then
+            echo "::error::Only maintainers can run the cloud Glue tests"
+            exit 1
+          fi
+
+      - name: Check the configuration
+        run: |
+          missing=0
+          for name in GLUE_CATALOG_ID GLUE_REGION DEFAULT_S3_LOCATION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable $name is not set in the 'cloud-glue' environment"
+              missing=1
+            fi
+          done
+          exit $missing
+        env:
+          GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+          GLUE_REGION: ${{ vars.GLUE_REGION }}
+          DEFAULT_S3_LOCATION: ${{ vars.DEFAULT_S3_LOCATION }}
+
+      # resolve the head commit once: a push to the PR during the run does not change what is tested
+      - name: Resolve the pull request
+        id: pr
+        run: |
+          gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" \
+            --jq '"sha=\(.head.sha)\ntitle=\(.title)\nstate=\(.state)"' >> "$GITHUB_OUTPUT"
+          gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" \
+            --jq '"Testing PR #\(.number) (\(.state)) \(.title) at \(.head.sha)"'
+
+      - name: Mark the commit as pending
+        run: |
+          gh api "repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }}" \
+            -f state=pending -f context="Cloud Glue tests" -f description="Running against the cloud Glue catalog" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      # the build and its vcpkg dependencies otherwise fill the runner's disk
+      - name: Free disk space
+        uses: ./duckdb/.github/actions/cleanup_runner
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq ninja-build jq
+
+      - name: Setup Ccache
+        uses: ./duckdb/.github/actions/ccache-action
+        with:
+          save: false
+
+      - name: Build
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        with:
+          build-type: release
+          build: python3 duckdb/scripts/ci/retry.py -- make release
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
+
+      - name: AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          aws-region: ${{ vars.GLUE_REGION }}
+
+      # cloud_glue.json with the catalog, region and S3 prefix of the environment; the credentials reach the S3
+      # secret and the Glue client through the credential chain (environment variables)
+      - name: Test config
+        run: |
+          jq --arg catalog "$GLUE_CATALOG_ID" --arg region "$GLUE_REGION" --arg location "$DEFAULT_S3_LOCATION" '
+            .on_init = "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION '"'"'\($region)'"'"');"
+            | .test_env |= map(
+                if .env_name == "GLUE_CATALOG_ID" then .env_value = $catalog
+                elif .env_name == "DEFAULT_S3_LOCATION" then .env_value = $location
+                else . end)
+          ' test/configs/cloud_glue.json > "$RUNNER_TEMP/cloud_glue_ci.json"
+          jq '{on_init, test_env}' "$RUNNER_TEMP/cloud_glue_ci.json"
+        env:
+          GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+          GLUE_REGION: ${{ vars.GLUE_REGION }}
+          DEFAULT_S3_LOCATION: ${{ vars.DEFAULT_S3_LOCATION }}
+
+      - name: Run tests
+        run: make test-cloud TEST_BUILD=release CLOUD_TEST_CONFIG="$RUNNER_TEMP/cloud_glue_ci.json"
+
+      - name: Report the result on the commit
+        if: always() && steps.pr.outputs.sha != ''
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            state=success; description="All tests passed against the cloud Glue catalog"
+          else
+            state=failure; description="Failed against the cloud Glue catalog"
+          fi
+          gh api "repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }}" \
+            -f state=$state -f context="Cloud Glue tests" -f description="$description" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

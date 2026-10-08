@@ -2,6 +2,7 @@
 #include "catalog/glue_view.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/common/enum_util.hpp"
@@ -17,6 +18,7 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
 
 #include "core/glue_types.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -25,6 +27,7 @@
 #include "catalog/glue_view.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 
 namespace duckdb {
 
@@ -76,6 +79,25 @@ GlueSchemaEntry::EvaluateOptions(ClientContext &context,
 bool GlueSchemaEntry::IsBucketingOption(const string &key) {
 	return StringUtil::CIEquals(key, "BucketColumns") || StringUtil::CIEquals(key, "NumberOfBuckets") ||
 	       StringUtil::CIEquals(key, "SortColumns");
+}
+
+GlueTableFormat GlueSchemaEntry::GetCreateTableFormat(ClientContext &context, const CreateTableInfo &create_info) {
+	auto entry = create_info.options.find("table_type");
+	if (entry == create_info.options.end()) {
+		return GlueTableFormat::HIVE;
+	}
+	case_insensitive_map_t<unique_ptr<ParsedExpression>> option;
+	option.emplace(entry->first, entry->second->Copy());
+	auto table_type = StringUtil::Lower(EvaluateOptions(context, option, "CREATE TABLE")[0].second.ToString());
+	if (table_type == "hive") {
+		return GlueTableFormat::HIVE;
+	}
+	if (table_type == "iceberg") {
+		return GlueTableFormat::ICEBERG;
+	}
+	throw BinderException("Unknown Glue table type '%s' for option 'table_type', accepted values are 'hive' and "
+	                      "'iceberg'",
+	                      table_type);
 }
 
 //! The Glue option another spelling of a bucketing option stands for, empty if the key is none of them
@@ -253,17 +275,16 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 		auto &value = option.second;
 		auto string_value = value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
 
-		if (StringUtil::CIEquals(key, "type")) {
-			// only Hive (Glue native) tables can be created
-			if (StringUtil::Upper(string_value) != "HIVE") {
-				throw BinderException("Unknown Glue table type '%s' for option 'type', only 'HIVE' is supported",
-				                      string_value);
-			}
+		if (StringUtil::CIEquals(key, "table_type")) {
+			continue;
 		} else if (StringUtil::CIEquals(key, "format")) {
 			result.format = HiveFileFormatFromString(string_value);
 		} else if (StringUtil::CIEquals(key, "location")) {
 			result.location = string_value;
 			StringUtil::RTrim(result.location, "/");
+			if (result.location.empty()) {
+				throw BinderException("CREATE TABLE option 'location' must not be empty");
+			}
 		} else if (StringUtil::CIEquals(key, "delimiter") || StringUtil::CIEquals(key, "quote") ||
 		           StringUtil::CIEquals(key, "escape")) {
 			// the csv dialect: Hive SerDes take single characters
@@ -314,6 +335,82 @@ static void CheckEntryType(optional_ptr<CatalogEntry> existing, CatalogType expe
 	}
 }
 
+optional_ptr<CatalogEntry> GlueSchemaEntry::CheckCreateTableConflict(ClientContext &context,
+                                                                      const CreateTableInfo &create_info) {
+	auto table_name = create_info.GetTableName().GetIdentifierName();
+	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)));
+	auto existing = tables.GetEntry(context, lookup);
+	CheckEntryType(existing, CatalogType::TABLE_ENTRY, table_name, "create");
+	if (!existing) {
+		return nullptr;
+	}
+	switch (create_info.on_conflict) {
+	case OnCreateConflict::IGNORE_ON_CONFLICT:
+		return existing;
+	case OnCreateConflict::ERROR_ON_CONFLICT:
+		throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table_name,
+		                       database_info.name);
+	default:
+		throw NotImplementedException(
+		    "CREATE OR REPLACE TABLE is not supported for Glue catalogs, use separate DROP and CREATE statements");
+	}
+}
+
+unique_ptr<BoundCreateTableInfo> GlueSchemaEntry::BindIcebergCreateTable(ClientContext &context,
+                                                                         BoundCreateTableInfo &info,
+                                                                         SchemaCatalogEntry &iceberg_schema) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	auto base = unique_ptr_cast<CreateInfo, CreateTableInfo>(info.Base().Copy());
+	auto table_name = base->GetTableName().GetIdentifierName();
+	string location;
+	for (auto &option : EvaluateOptions(context, base->options, "CREATE TABLE")) {
+		auto &key = option.first;
+		if (StringUtil::CIEquals(key, "location")) {
+			location = option.second.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
+			StringUtil::RTrim(location, "/");
+			if (location.empty()) {
+				throw BinderException("CREATE TABLE option 'location' must not be empty");
+			}
+		} else if (StringUtil::CIEquals(key, "format") || StringUtil::CIEquals(key, "delimiter") ||
+		           StringUtil::CIEquals(key, "quote") || StringUtil::CIEquals(key, "escape") ||
+		           StringUtil::CIEquals(key, "header") || IsBucketingOption(key) || !BucketingOptionFor(key).empty()) {
+			throw BinderException("CREATE TABLE option '%s' is only supported for Hive tables", key);
+		}
+	}
+	if (location.empty()) {
+		location = glue_catalog.GetTableLocation(database_info, table_name);
+	}
+	base->options.erase("table_type");
+	base->options.erase("location");
+	base->options.emplace("location", ConstantExpression::FromValue(Value(location)));
+	base->SetCatalog(iceberg_schema.catalog.GetName());
+	auto result = make_uniq<BoundCreateTableInfo>(iceberg_schema, std::move(base));
+	for (auto &constraint : info.Base().constraints) {
+		result->Base().constraints.push_back(constraint->Copy());
+	}
+	return result;
+}
+
+optional_ptr<CatalogEntry> GlueSchemaEntry::CreateIcebergTable(ClientContext &context, BoundCreateTableInfo &info) {
+	auto &iceberg_schema = catalog.Cast<GlueCatalog>().GetIcebergSchema(context, database_info.name);
+	auto iceberg_info = BindIcebergCreateTable(context, info, iceberg_schema);
+	auto entry = iceberg_schema.CreateTable(iceberg_schema.catalog.GetCatalogTransaction(context), *iceberg_info);
+	GlueTransaction::Get(context, catalog).AddIcebergTable(database_info.name,
+	                                                       info.Base().GetTableName().GetIdentifierName());
+	return entry;
+}
+
+optional_ptr<GlueTable> GlueSchemaEntry::AsIcebergTable(optional_ptr<CatalogEntry> entry) {
+	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
+		return nullptr;
+	}
+	auto &glue_table = entry->Cast<GlueTable>();
+	if (glue_table.table_info.GetFormat() != GlueTableFormat::ICEBERG) {
+		return nullptr;
+	}
+	return &glue_table;
+}
+
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
 	auto &context = transaction.GetContext();
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
@@ -321,20 +418,11 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction trans
 	auto &base = info.Base();
 	auto table_name = base.GetTableName().GetIdentifierName();
 
-	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)));
-	auto existing = tables.GetEntry(context, lookup);
-	CheckEntryType(existing, CatalogType::TABLE_ENTRY, table_name, "create");
-	if (existing) {
-		switch (base.on_conflict) {
-		case OnCreateConflict::IGNORE_ON_CONFLICT:
-			return nullptr;
-		case OnCreateConflict::ERROR_ON_CONFLICT:
-			throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table_name,
-			                       database_info.name);
-		default:
-			throw NotImplementedException(
-			    "CREATE OR REPLACE TABLE is not supported for Glue catalogs, use separate DROP and CREATE statements");
-		}
+	if (CheckCreateTableConflict(context, base)) {
+		return nullptr;
+	}
+	if (GetCreateTableFormat(context, base) == GlueTableFormat::ICEBERG) {
+		return CreateIcebergTable(context, info);
 	}
 	if (!base.constraints.empty()) {
 		throw NotImplementedException("Constraints are not supported when creating tables in a Glue catalog");
@@ -792,7 +880,22 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction trans
 		return nullptr;
 	}
 	auto &context = transaction.GetContext();
-	return tables.GetEntry(context, lookup_info);
+	auto entry = tables.GetEntry(context, lookup_info);
+	if (entry && lookup_info.GetAtClause() && !AsIcebergTable(entry)) {
+		throw BinderException(lookup_info.GetErrorContext(),
+		                      "Time travel is only supported for Iceberg tables in a Glue catalog, \"%s\" is not one",
+		                      entry->name.GetIdentifierName());
+	}
+	if (AsIcebergTable(entry) && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		GlueCatalog::ThrowIfInExplicitTransaction(context);
+		// The Iceberg catalog plans scans and DML of the table, and DROP / ALTER are bound to it, so they never
+		// reach this table set: the next lookup or listing after this transaction asks Glue again
+		auto table_name = entry->name.GetIdentifierName();
+		GlueTransaction::Get(context, catalog).AddIcebergTable(database_info.name, table_name);
+		return catalog.Cast<GlueCatalog>().GetIcebergTable(context, database_info.name, table_name,
+		                                                   lookup_info.GetAtClause());
+	}
+	return entry;
 }
 
 } // namespace duckdb

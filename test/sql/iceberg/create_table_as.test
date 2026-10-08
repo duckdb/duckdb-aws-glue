@@ -1,0 +1,180 @@
+# name: test/sql/iceberg/create_table_as.test
+# description: CREATE TABLE ... WITH (table_type = 'iceberg') AS SELECT
+# group: [iceberg]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_ctas;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_ctas_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_ctas_empty;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_ctas_location;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_ctas_error;
+
+query I
+CREATE TABLE my_datalake.default.ice_ctas WITH (table_type = 'iceberg') AS
+SELECT range::INTEGER AS id, 'name_' || range AS name, range % 3 AS bucket FROM range(100);
+----
+100
+
+query III
+SELECT count(*), sum(id), count(DISTINCT bucket) FROM my_datalake.default.ice_ctas;
+----
+100	4950	3
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.ice_ctas);
+----
+id	INTEGER
+name	VARCHAR
+bucket	BIGINT
+
+query I
+SELECT table_type FROM glue_get_table_response('my_datalake.default.ice_ctas');
+----
+ICEBERG
+
+# the table is listed right away
+query I
+SELECT tags['table_type'] FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ice_ctas';
+----
+ICEBERG
+
+query I
+CREATE TABLE my_datalake.default.ice_ctas_partitioned PARTITIONED BY (bucket) WITH (table_type = 'iceberg') AS
+SELECT * FROM my_datalake.default.ice_ctas;
+----
+100
+
+query II
+SELECT bucket, count(*) FROM my_datalake.default.ice_ctas_partitioned GROUP BY bucket ORDER BY bucket;
+----
+0	34
+1	33
+2	33
+
+query I
+CREATE TABLE my_datalake.default.ice_ctas_empty WITH (table_type = 'iceberg') AS
+SELECT * FROM my_datalake.default.ice_ctas WHERE id < 0;
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.ice_ctas_empty;
+----
+0
+
+query I
+CREATE TABLE my_datalake.default.ice_ctas_location
+WITH (table_type = 'iceberg', location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/ice_ctas_location') AS
+SELECT 42 AS answer;
+----
+1
+
+query I
+SELECT location FROM glue_get_table_response('my_datalake.default.ice_ctas_location');
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/ice_ctas_location
+
+query I
+SELECT * FROM my_datalake.default.ice_ctas_location;
+----
+42
+
+#---------------------------------------------------------------------------
+# existing tables
+#---------------------------------------------------------------------------
+statement error
+CREATE TABLE my_datalake.default.ice_ctas WITH (table_type = 'iceberg') AS SELECT 1 AS id;
+----
+<REGEX>:.*Catalog Error.*Table with name "ice_ctas" already exists in Glue database "default".*
+
+# IF NOT EXISTS on an existing table neither creates nor inserts anything
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.default.ice_ctas WITH (table_type = 'iceberg') AS SELECT 1 AS id;
+
+query I
+SELECT count(*) FROM my_datalake.default.ice_ctas;
+----
+100
+
+statement error
+CREATE OR REPLACE TABLE my_datalake.default.ice_ctas WITH (table_type = 'iceberg') AS SELECT 1 AS id;
+----
+<REGEX>:.*Not implemented Error.*CREATE OR REPLACE TABLE is not supported for Glue catalogs.*
+
+#---------------------------------------------------------------------------
+# errors
+#---------------------------------------------------------------------------
+statement error
+CREATE TABLE my_datalake.default.ice_ctas_error WITH (table_type = 'iceberg', format = 'json') AS SELECT 1 AS id;
+----
+<REGEX>:.*Binder Error.*CREATE TABLE option 'format' is only supported for Hive tables.*
+
+statement error
+CREATE TABLE my_datalake.default.ice_ctas_error WITH (table_type = 'iceberg', location = '') AS SELECT 1 AS id;
+----
+<REGEX>:.*Binder Error.*CREATE TABLE option 'location' must not be empty.*
+
+statement error
+CREATE TABLE my_datalake.default.ice_ctas_error WITH (table_type = 'paimon') AS SELECT 1 AS id;
+----
+<REGEX>:.*Binder Error.*Unknown Glue table type 'paimon' for option 'table_type'.*
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ice_ctas_error';
+----
+0
+
+# as for Hive tables, the table is created in Glue before the query runs and stays when the query fails
+statement error
+CREATE TABLE my_datalake.default.ice_ctas_error WITH (table_type = 'iceberg') AS SELECT error('boom')::INTEGER AS id;
+----
+<REGEX>:.*boom.*
+
+query I
+SELECT count(*) FROM my_datalake.default.ice_ctas_error;
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.ice_ctas_error;
+
+statement ok
+DROP TABLE my_datalake.default.ice_ctas;
+
+statement ok
+DROP TABLE my_datalake.default.ice_ctas_partitioned;
+
+statement ok
+DROP TABLE my_datalake.default.ice_ctas_empty;
+
+statement ok
+DROP TABLE my_datalake.default.ice_ctas_location;

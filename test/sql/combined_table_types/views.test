@@ -1,0 +1,107 @@
+# name: test/sql/combined_table_types/views.test
+# description: Glue views over Hive and Iceberg tables
+# group: [combined_table_types]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_joined;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_iceberg;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_view_hive;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_view_ice;
+
+statement ok
+CREATE TABLE my_datalake.default.mix_view_hive (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.mix_view_hive VALUES (1, 'one'), (2, 'two'), (3, 'three');
+
+statement ok
+CREATE TABLE my_datalake.default.mix_view_ice (id INTEGER, score DOUBLE) WITH (table_type = 'iceberg');
+
+statement ok
+INSERT INTO my_datalake.default.mix_view_ice VALUES (1, 0.5), (3, 1.5);
+
+statement ok
+CREATE VIEW my_datalake.default.mix_view_iceberg AS SELECT id, score * 2 AS double_score FROM my_datalake.default.mix_view_ice;
+
+statement ok
+CREATE VIEW my_datalake.default.mix_view_joined AS
+SELECT h.name, i.double_score FROM my_datalake.default.mix_view_hive h
+JOIN my_datalake.default.mix_view_iceberg i USING (id);
+
+query II
+SELECT * FROM my_datalake.default.mix_view_joined ORDER BY name;
+----
+one	1.0
+three	3.0
+
+# the views read the current state of the Iceberg table
+statement ok
+INSERT INTO my_datalake.default.mix_view_ice VALUES (2, 10.0);
+
+query II
+SELECT * FROM my_datalake.default.mix_view_joined ORDER BY name;
+----
+one	1.0
+three	3.0
+two	20.0
+
+# a fresh connection to the catalog reads the stored view SQL
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT count(*) FROM my_datalake.default.mix_view_joined;
+----
+3
+
+# a view over a dropped Iceberg table fails when it is used
+statement ok
+DROP TABLE my_datalake.default.mix_view_ice;
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_joined;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_joined;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_iceberg;
+
+statement ok
+DROP TABLE my_datalake.default.mix_view_hive;

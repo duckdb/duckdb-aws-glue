@@ -1,0 +1,168 @@
+# name: test/sql/combined_table_types/copy_between_table_types.test
+# description: moving data between Hive and Iceberg tables with INSERT ... SELECT and CREATE TABLE ... AS
+# group: [combined_table_types]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_copy_hive;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_copy_hive_csv;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_copy_iceberg;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_copy_iceberg_from_hive;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_copy_hive_from_iceberg;
+
+statement ok
+CREATE TABLE my_datalake.default.mix_copy_hive (id INTEGER, label VARCHAR, day DATE) PARTITIONED BY (day);
+
+statement ok
+INSERT INTO my_datalake.default.mix_copy_hive
+SELECT range, 'label_' || range, DATE '2024-01-01' + (range % 3)::INTEGER FROM range(30);
+
+statement ok
+CREATE TABLE my_datalake.default.mix_copy_hive_csv (id INTEGER, label VARCHAR) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.mix_copy_hive_csv VALUES (100, 'from csv'), (101, 'also csv');
+
+#---------------------------------------------------------------------------
+# Hive -> Iceberg
+#---------------------------------------------------------------------------
+query I
+CREATE TABLE my_datalake.default.mix_copy_iceberg_from_hive PARTITIONED BY (day) WITH (table_type = 'iceberg') AS
+SELECT * FROM my_datalake.default.mix_copy_hive;
+----
+30
+
+query II
+SELECT day, count(*) FROM my_datalake.default.mix_copy_iceberg_from_hive GROUP BY day ORDER BY day;
+----
+2024-01-01	10
+2024-01-02	10
+2024-01-03	10
+
+statement ok
+CREATE TABLE my_datalake.default.mix_copy_iceberg (id INTEGER, label VARCHAR) WITH (table_type = 'iceberg');
+
+query I
+INSERT INTO my_datalake.default.mix_copy_iceberg SELECT id, label FROM my_datalake.default.mix_copy_hive WHERE id < 5;
+----
+5
+
+query I
+INSERT INTO my_datalake.default.mix_copy_iceberg SELECT * FROM my_datalake.default.mix_copy_hive_csv;
+----
+2
+
+query I
+SELECT string_agg(id::VARCHAR, ',' ORDER BY id) FROM my_datalake.default.mix_copy_iceberg;
+----
+0,1,2,3,4,100,101
+
+#---------------------------------------------------------------------------
+# Iceberg -> Hive
+#---------------------------------------------------------------------------
+query I
+CREATE TABLE my_datalake.default.mix_copy_hive_from_iceberg AS SELECT * FROM my_datalake.default.mix_copy_iceberg;
+----
+7
+
+query I
+SELECT tags['table_type'] FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'mix_copy_hive_from_iceberg';
+----
+HIVE
+
+query I
+INSERT INTO my_datalake.default.mix_copy_hive_csv SELECT id, label FROM my_datalake.default.mix_copy_iceberg WHERE id < 2;
+----
+2
+
+query I
+SELECT count(*) FROM my_datalake.default.mix_copy_hive_csv;
+----
+4
+
+# the copies agree with their sources
+query I
+SELECT count(*) FROM (
+    SELECT * FROM my_datalake.default.mix_copy_hive_from_iceberg
+    EXCEPT
+    SELECT * FROM my_datalake.default.mix_copy_iceberg
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM my_datalake.default.mix_copy_hive
+    EXCEPT
+    SELECT * FROM my_datalake.default.mix_copy_iceberg_from_hive
+);
+----
+0
+
+#---------------------------------------------------------------------------
+# errors
+#---------------------------------------------------------------------------
+# an Iceberg column type the Hive table does not have
+statement error
+INSERT INTO my_datalake.default.mix_copy_hive_csv SELECT label, id FROM my_datalake.default.mix_copy_iceberg;
+----
+<REGEX>:.*Conversion Error.*
+
+# a failed copy leaves the destination as it was
+query I
+SELECT count(*) FROM my_datalake.default.mix_copy_hive_csv;
+----
+4
+
+statement error
+INSERT INTO my_datalake.default.mix_copy_iceberg SELECT id, error('boom') FROM my_datalake.default.mix_copy_hive;
+----
+<REGEX>:.*boom.*
+
+query I
+SELECT count(*) FROM my_datalake.default.mix_copy_iceberg;
+----
+7
+
+statement ok
+DROP TABLE my_datalake.default.mix_copy_hive;
+
+statement ok
+DROP TABLE my_datalake.default.mix_copy_hive_csv;
+
+statement ok
+DROP TABLE my_datalake.default.mix_copy_iceberg;
+
+statement ok
+DROP TABLE my_datalake.default.mix_copy_iceberg_from_hive;
+
+statement ok
+DROP TABLE my_datalake.default.mix_copy_hive_from_iceberg;

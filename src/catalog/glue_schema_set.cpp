@@ -74,6 +74,14 @@ void GlueSchemaSet::RemoveEntry(const string &name) {
 	entries.erase(name);
 }
 
+void GlueSchemaSet::InvalidateTableEntry(const string &schema_name, const string &table_name) {
+	lock_guard<mutex> guard(entry_lock);
+	auto entry = entries.find(schema_name);
+	if (entry != entries.end()) {
+		entry->second->tables.InvalidateEntry(table_name);
+	}
+}
+
 void GlueSchemaSet::ClearEntries() {
 	lock_guard<mutex> guard(entry_lock);
 	entries.clear();

@@ -1,6 +1,6 @@
 {
 	"description": "A live AWS Glue Data Catalog; credentials from the AWS credential chain (AWS_PROFILE, environment, ...)",
-	"on_init": "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');",
+	"on_init": "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-north-1');",
 	"statically_loaded_extensions": [
 		"core_functions",
 		"parquet",
@@ -8,6 +8,7 @@
 		"avro",
 		"httpfs",
 		"aws",
+		"iceberg",
 		"glue"
 	],
 	"test_env": [
@@ -17,7 +18,7 @@
 		},
 		{
 			"env_name": "GLUE_CATALOG_ID",
-			"env_value": "984506134640"
+			"env_value": "176760123605"
 		},
 		{
 			"env_name": "GLUE_ENDPOINT",
@@ -25,7 +26,11 @@
 		},
 		{
 			"env_name": "DEFAULT_S3_LOCATION",
-			"env_value": "s3://simple-s3-glue-database/glue-database-root"
+			"env_value": "s3://duckdb-glue-test-176760123605/warehouse"
+		},
+		{
+			"env_name": "ICEBERG_SUPPORTED",
+			"env_value": "true"
 		}
 	],
 	"skip_tests": [
@@ -37,9 +42,15 @@
 			]
 		},
 		{
-			"reason": "needs the bucketed fixture tables that scripts/docker-compose.yml creates in the local Glue",
+			"reason": "counts moto's single GetPartitions request per partition listing: AWS Glue lists in segments (glue_get_partitions_segments) and ends every listing with an extra, empty page",
 			"paths": [
-				"test/sql/hive/dml/insert/insert_into_bucketed_table.test"
+				"test/sql/hive/bugs/s3_plan_time_cost_invariants.test"
+			]
+		},
+		{
+			"reason": "AWS Glue stores column names in lower case ('Mixed Case' reads back as 'mixed case'); moto keeps them as given",
+			"paths": [
+				"test/sql/hive/ddl/alter_column/glue_replace_columns.test"
 			]
 		}
 	]
