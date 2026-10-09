@@ -44,6 +44,11 @@ bool IsTextFileFormat(HiveFileFormat format);
 //! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
 
+//! The SerDe of a Hive table, decided by its SerializationLibrary; SerDes of one file format can differ in how they
+//! read the data files and which engines write them
+enum class HiveSerDe : uint8_t { PARQUET, LAZY_SIMPLE, OPEN_CSV, HIVE_JSON, OPENX_JSON, AVRO };
+HiveFileFormat HiveSerDeFileFormat(HiveSerDe serde);
+
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
 //! VIRTUAL_VIEW, GOVERNED, whatever a writer sets), so anything else is OTHER and the raw value is kept alongside.
 enum class GlueTableType : uint8_t { EXTERNAL_TABLE, VIRTUAL_VIEW, OTHER };
@@ -106,6 +111,8 @@ public:
 	bool IsBucketed() const;
 	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;
+	//! The SerDe, derived from serde_library; throws NotImplementedException for other SerDes
+	HiveSerDe GetSerDe() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
 	//! The field delimiter of a CSV table (field.delim / separatorChar), ',' when the SerDe does not say

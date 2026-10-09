@@ -41,6 +41,12 @@
 			"paths": [
 				"test/sql/hive/dml/insert/insert_into_bucketed_table.test"
 			]
+		},
+		{
+			"reason": "needs the OpenX JSON fixture table that scripts/docker-compose.yml creates in the local Glue",
+			"paths": [
+				"test/sql/hive/dml/insert/insert_into_openx_json_table.test"
+			]
 		}
 	]
 }
