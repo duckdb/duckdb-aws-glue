@@ -1,0 +1,89 @@
+# name: ${FILE_PATH}
+# description: ${DESCRIPTION}
+# group: [tpch]
+
+# TPC-H at scale factor ${SF} generated locally with dbgen and written to Hive tables in the local Glue (moto) + S3
+# (MinIO) with CTAS:
+# lineitem and orders are partitioned by 10-day buckets of l_shipdate and o_orderdate (l_shipbucket, o_orderbucket),
+# the other tables unpartitioned. A partition per day makes moto's GetPartitions dominate the timings. The queries in
+# benchmark/tpch/queries are DuckDB's with bucket filters added next to the date filters. The local tables are dropped
+# after the load, so the queries read the Glue tables; the cache only keeps a marker table.
+
+require parquet
+
+require json
+
+require avro
+
+require httpfs
+
+require glue
+
+require tpch
+
+cache glue_tpch_${SF_NAME}_${FORMAT}.duckdb
+
+load
+CALL dbgen(sf=${SF});
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT};
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.lineitem PARTITIONED BY (l_shipbucket) WITH (format = '${FORMAT}') AS SELECT *, date_diff('day', DATE '1970-01-01', l_shipdate) // 10 AS l_shipbucket FROM lineitem;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.orders PARTITIONED BY (o_orderbucket) WITH (format = '${FORMAT}') AS SELECT *, date_diff('day', DATE '1970-01-01', o_orderdate) // 10 AS o_orderbucket FROM orders;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.customer WITH (format = '${FORMAT}') AS SELECT * FROM customer;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.part WITH (format = '${FORMAT}') AS SELECT * FROM part;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.partsupp WITH (format = '${FORMAT}') AS SELECT * FROM partsupp;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.supplier WITH (format = '${FORMAT}') AS SELECT * FROM supplier;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.nation WITH (format = '${FORMAT}') AS SELECT * FROM nation;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.region WITH (format = '${FORMAT}') AS SELECT * FROM region;
+DROP TABLE lineitem;
+DROP TABLE orders;
+DROP TABLE customer;
+DROP TABLE part;
+DROP TABLE partsupp;
+DROP TABLE supplier;
+DROP TABLE nation;
+DROP TABLE region;
+CREATE TABLE glue_tpch_${SF_NAME}_${FORMAT}_loaded AS SELECT 1 AS loaded;
+USE my_datalake.bench_tpch_${SF_NAME}_${FORMAT};
+SET enable_external_file_cache=false;
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+USE my_datalake.bench_tpch_${SF_NAME}_${FORMAT};
+SET enable_external_file_cache=false;
+
+
+
+name Q${QUERY_NUMBER_PADDED}_${FORMAT}
+group tpch_glue
+subgroup ${SF_NAME}_${FORMAT}
+
+run benchmark/tpch/queries/q${QUERY_NUMBER_PADDED}.sql
+
+result duckdb/extension/tpch/dbgen/answers/sf${SF}/q${QUERY_NUMBER_PADDED}.csv

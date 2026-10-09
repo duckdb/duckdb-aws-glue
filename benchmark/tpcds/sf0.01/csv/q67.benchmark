@@ -1,0 +1,10 @@
+# name: benchmark/tpcds/sf0.01/csv/q67.benchmark
+# description: Run query 67 from the TPC-DS benchmark at SF0.01 on csv Hive tables in the local Glue
+# group: [csv]
+
+template benchmark/tpcds/tpcds.benchmark.in
+QUERY_NUMBER=67
+QUERY_NUMBER_PADDED=67
+FORMAT=csv
+SF=0.01
+SF_NAME=sf0_01

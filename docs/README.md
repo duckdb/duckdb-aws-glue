@@ -295,35 +295,45 @@ SeaweedFS does not have (`make glue-fixture` first; the benchmark runner needs a
 AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner benchmark/heavily_partitioned_table.benchmark
 ```
 
-`benchmark/tpch/sf1/` runs the 22 TPC-H queries at SF1 against Hive tables in the Glue database `bench_tpch_sf1`
-(`lineitem` and `orders` partitioned by 10-day buckets of `l_shipdate` and `o_orderdate`) and checks the answers.
-The queries in `benchmark/tpch/queries/` are DuckDB's with filters on the bucket columns added next to the date
-filters. The first run generates the data with `dbgen` and writes it with CTAS, which takes a while; later runs reuse
-`duckdb_benchmark_data/glue_tpch_sf1.duckdb`, which `make glue-fixture` removes:
+`benchmark/tpch/<sf>/<format>/` runs the 22 TPC-H queries against Hive tables of that format in the Glue database
+`bench_tpch_<sf>_<format>` (`lineitem` and `orders` partitioned by 10-day buckets of `l_shipdate` and `o_orderdate`)
+and checks the answers: `sf1/parquet/` at SF1, `sf0.1/csv/`, `sf0.1/json/` and `sf0.1/avro/` at SF0.1 (the Glue
+database names spell the scale factor `sf1`, `sf0_1`, ...). The queries in `benchmark/tpch/queries/` are DuckDB's with
+filters on the bucket columns added next to the date filters. The first run generates the data with `dbgen` and
+writes it with CTAS, which takes a while; later runs reuse `duckdb_benchmark_data/glue_tpch_<sf>_<format>.duckdb`,
+which `make glue-fixture` removes:
 
 ```sh
-AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner 'benchmark/tpch/sf1/.*'
+AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner 'benchmark/tpch/sf1/parquet/.*'
 ```
 
-`benchmark/tpcds/sf1/` does the same for the 99 TPC-DS queries at SF1, with the Glue database `bench_tpcds_sf1`: the
-fact tables are partitioned by their date key (`ss_sold_date_sk`, `sr_returned_date_sk`, `cs_sold_date_sk`,
-`cr_returned_date_sk`, `ws_sold_date_sk`, `wr_returned_date_sk`, `inv_date_sk`), the dimension tables are not. Its
-cache is `duckdb_benchmark_data/glue_tpcds_sf1.duckdb`:
+`benchmark/tpcds/<sf>/<format>/` does the same for the 99 TPC-DS queries, `sf1/parquet/` at SF1 and the other formats
+at SF0.01 (`sf0.01/<format>/`), with the Glue database `bench_tpcds_<sf>_<format>`: the fact tables are partitioned by
+10-day buckets of their date key (`ss_sold_date_bucket`, `sr_returned_date_bucket`, `cs_sold_date_bucket`,
+`cr_returned_date_bucket`, `ws_sold_date_bucket`, `wr_returned_date_bucket`, `inv_date_bucket`, each
+`(date_sk - 2440588) // 10`, the same buckets as the TPC-H tables), the dimension tables are not. The queries in
+`benchmark/tpcds/queries/` are DuckDB's with filters on the bucket columns added where a fact table's date key is
+joined to a filtered `date_dim`. Its cache is `duckdb_benchmark_data/glue_tpcds_<sf>_<format>.duckdb`:
 
 ```sh
-AWS_EC2_METADATA_DISABLED=true ./build/release/benchmark/benchmark_runner 'benchmark/tpcds/sf1/.*'
+AWS_EC2_METADATA_DISABLED=true ./build/release/benchmark/benchmark_runner 'benchmark/tpcds/sf1/parquet/.*'
 ```
 
-The TPC-DS load needs a build without assertions (`BUILD_BENCHMARK=1 make release`): its fact tables have rows with a
-NULL date key, and writing such a partition trips a `D_ASSERT` in DuckDB's partitioned copy (see the header of
-`benchmark/tpcds/sf1/tpcds_sf1.benchmark.in` for a repro without Glue).
+Both suites share a template per suite (`benchmark/tpch/tpch.benchmark.in`, `benchmark/tpcds/tpcds.benchmark.in`)
+that takes `FORMAT`, `SF` and `SF_NAME`. The TPC-DS load needs a build without assertions
+(`BUILD_BENCHMARK=1 make release`): its fact tables have rows with a NULL date key, and writing such a partition trips
+a `D_ASSERT` in DuckDB's partitioned copy (see the header of `benchmark/tpcds/tpcds.benchmark.in` for a repro without
+Glue).
 
-Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so changing a load (e.g. the scale
-factor) has no effect while the tables are in Glue: rebuild the fixture with
-`make glue-fixture-down && make glue-fixture` first.
+Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so changing a load has no effect while
+the tables are in Glue: rebuild the fixture with `make glue-fixture-down && make glue-fixture` first.
 
-`.github/workflows/Regression.yml` runs `benchmark/*.benchmark`, `benchmark/pushdown/`, `benchmark/optimizer/` and
-`benchmark/tpch/sf1/` for a PR and for its merge base and compares the timings. It does not run `benchmark/tpcds/`.
+`.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
+their timings (5 runs each) in a job per format: the TPC-H and TPC-DS benchmarks of that format, plus
+`benchmark/*.benchmark`, `benchmark/pushdown/` and `benchmark/optimizer/` in the parquet job. To keep the jobs short it
+skips the queries that take under 0.6s on parquet at SF1 and the ones that are mostly filtered scans of one table
+(TPC-H q06, TPC-DS q09, q28, q88, q90, q96), and per format the TPC-DS queries that time out or fail: q85 on parquet
+(bad join order), q95 except on csv (the CTE inliner can't copy the Glue scan), and q64 and q72 on avro.
 
 ## Building
 

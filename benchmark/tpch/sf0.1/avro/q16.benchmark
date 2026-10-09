@@ -1,0 +1,10 @@
+# name: benchmark/tpch/sf0.1/avro/q16.benchmark
+# description: Run query 16 from the TPC-H benchmark at SF0.1 on avro Hive tables in the local Glue
+# group: [avro]
+
+template benchmark/tpch/tpch.benchmark.in
+QUERY_NUMBER=16
+QUERY_NUMBER_PADDED=16
+FORMAT=avro
+SF=0.1
+SF_NAME=sf0_1

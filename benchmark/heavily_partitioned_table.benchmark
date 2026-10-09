@@ -60,7 +60,7 @@ ATTACH '123456789012' AS my_datalake (
     ENDPOINT 'http://localhost:5555',
     DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
 );
-USE my_datalake.bench_tpch_sf1;
+USE my_datalake.default;
 SET enable_external_file_cache=false;
 SET debug_fs_delay_mean_ms=20;
 
