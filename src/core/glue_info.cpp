@@ -6,21 +6,6 @@
 
 namespace duckdb {
 
-string GlueTableFormatToString(GlueTableFormat format) {
-	switch (format) {
-	case GlueTableFormat::ICEBERG:
-		return "ICEBERG";
-	case GlueTableFormat::DELTA:
-		return "DELTA";
-	case GlueTableFormat::HUDI:
-		return "HUDI";
-	case GlueTableFormat::HIVE:
-		return "HIVE";
-	default:
-		return "UNKNOWN";
-	}
-}
-
 string GlueTableInfo::GetParameter(const string &key) const {
 	for (auto &entry : parameters) {
 		if (StringUtil::CIEquals(entry.first, key)) {
@@ -208,39 +193,6 @@ string GlueTableInfo::GetEscapeCharacter() const {
 	return escape;
 }
 
-GlueTableFormat GlueTableInfo::GetFormat() const {
-	// Open table formats register themselves through the 'table_type' parameter
-	auto table_type = StringUtil::Upper(GetParameter("table_type"));
-	if (table_type == "ICEBERG") {
-		return GlueTableFormat::ICEBERG;
-	}
-	if (table_type == "DELTA") {
-		return GlueTableFormat::DELTA;
-	}
-	if (table_type == "HUDI") {
-		return GlueTableFormat::HUDI;
-	}
-	// Spark registers Delta tables through the data source provider
-	auto provider = StringUtil::Lower(GetParameter("spark.sql.sources.provider"));
-	if (provider == "delta") {
-		return GlueTableFormat::DELTA;
-	}
-	if (provider == "iceberg") {
-		return GlueTableFormat::ICEBERG;
-	}
-	if (provider == "hudi") {
-		return GlueTableFormat::HUDI;
-	}
-	if (!GetMetadataLocation().empty()) {
-		return GlueTableFormat::ICEBERG;
-	}
-	if (!input_format.empty() || !location.empty()) {
-		// Regular (Hive style) table with a storage descriptor
-		return GlueTableFormat::HIVE;
-	}
-	return GlueTableFormat::UNKNOWN;
-}
-
 GlueTableType GlueTableTypeFromString(const string &type) {
 	if (StringUtil::CIEquals(type, "EXTERNAL_TABLE")) {
 		return GlueTableType::EXTERNAL_TABLE;
@@ -251,24 +203,12 @@ GlueTableType GlueTableTypeFromString(const string &type) {
 	return GlueTableType::OTHER;
 }
 
-string GlueTableInfo::GetFormatName() const {
-	auto format = GetFormat();
-	if (format == GlueTableFormat::HIVE) {
-		return StringUtil::Format("HIVE (input format '%s')", input_format);
-	}
-	if (format == GlueTableFormat::UNKNOWN && !glue_table_type.empty()) {
-		return StringUtil::Format("UNKNOWN (glue table type '%s')", glue_table_type);
-	}
-	return GlueTableFormatToString(format);
+GlueTableFormat GlueTableInfo::GetFormat() const {
+	return GlueTableFormat::Of(*this);
 }
 
 string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
-}
-
-bool GlueTableInfo::IsFormatParameter(const string &key) {
-	return StringUtil::CIEquals(key, "table_type") || StringUtil::CIEquals(key, "spark.sql.sources.provider") ||
-	       StringUtil::CIEquals(key, "metadata_location");
 }
 
 } // namespace duckdb

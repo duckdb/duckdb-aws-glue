@@ -41,6 +41,12 @@
 			"paths": [
 				"test/sql/hive/dml/insert/insert_into_bucketed_table.test"
 			]
+		},
+		{
+			"reason": "needs the fixture tables with other engines' InputFormats that scripts/docker-compose.yml creates in the local Glue",
+			"paths": [
+				"test/sql/hive/bugs/foreign_input_format_as_hive.test"
+			]
 		}
 	]
 }

@@ -22,7 +22,8 @@ public:
 
 	//! INSERT INTO <hive table>
 	static PhysicalOperator &PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
-	                                    GlueTable &table, optional_ptr<PhysicalOperator> plan);
+	                                    GlueTable &table, const GlueTableInfo &table_info,
+	                                    optional_ptr<PhysicalOperator> plan);
 	//! CREATE TABLE <hive table> AS <query>: the copy creates the table in Glue when it starts, then writes the result
 	static PhysicalOperator &PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
 	                                           LogicalCreateTable &op, PhysicalOperator &plan);

@@ -96,8 +96,9 @@ public:
 	std::shared_ptr<Aws::Glue::GlueClient> glue_client;
 
 private:
-	//! Throw unless 'table' is a Hive table, the only kind that can be written
-	static GlueTable &GetHiveTableForDML(TableCatalogEntry &table, const char *statement);
+	//! Throw unless Glue's current definition of 'table' (returned in 'table_info') is a Hive table DuckDB writes
+	static GlueTable &GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
+	                                     GlueTableInfo &table_info);
 	//! Apply one CREATE / ALTER SCHEMA option: 'comment' is the Description, 'location' the LocationUri and any other
 	//! key a database parameter
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);

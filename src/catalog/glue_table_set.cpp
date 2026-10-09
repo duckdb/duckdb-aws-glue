@@ -36,8 +36,8 @@ unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
 }
 
 void GlueTableSet::SetTableTypeTag(GlueTable &entry) {
-	// exposed through duckdb_tables().tags['table_type'] (ICEBERG / DELTA / HIVE / UNKNOWN)
-	entry.tags["table_type"] = GlueTableFormatToString(entry.table_info.GetFormat());
+	// exposed through duckdb_tables().tags['table_type'] (ICEBERG / DELTA / HUDI / SYMLINK / HIVE / UNKNOWN)
+	entry.tags["table_type"] = entry.table_info.GetFormat().ToString();
 }
 
 void GlueTableSet::LoadEntries(ClientContext &context) {
