@@ -105,19 +105,26 @@ string GlueTableInfo::DescribeBucketing() const {
 	return result;
 }
 
-HiveFileFormat GlueTableInfo::GetFileFormat() const {
+bool GlueTableInfo::TryGetFileFormat(HiveFileFormat &result) const {
 	auto serde = StringUtil::Lower(serde_library);
 	if (StringUtil::Contains(serde, "parquet")) {
-		return HiveFileFormat::PARQUET;
+		result = HiveFileFormat::PARQUET;
+	} else if (StringUtil::Contains(serde, "lazysimpleserde") || StringUtil::Contains(serde, "opencsvserde")) {
+		result = HiveFileFormat::CSV;
+	} else if (StringUtil::Contains(serde, "json")) {
+		result = HiveFileFormat::JSON;
+	} else if (StringUtil::Contains(serde, "avro")) {
+		result = HiveFileFormat::AVRO;
+	} else {
+		return false;
 	}
-	if (StringUtil::Contains(serde, "lazysimpleserde") || StringUtil::Contains(serde, "opencsvserde")) {
-		return HiveFileFormat::CSV;
-	}
-	if (StringUtil::Contains(serde, "json")) {
-		return HiveFileFormat::JSON;
-	}
-	if (StringUtil::Contains(serde, "avro")) {
-		return HiveFileFormat::AVRO;
+	return true;
+}
+
+HiveFileFormat GlueTableInfo::GetFileFormat() const {
+	HiveFileFormat result;
+	if (TryGetFileFormat(result)) {
+		return result;
 	}
 	throw NotImplementedException("Hive table '%s.%s' uses SerDe '%s', only parquet (ParquetHiveSerDe), csv "
 	                              "(LazySimpleSerDe, OpenCSVSerde), json (JsonSerDe) and avro (AvroSerDe) tables are "

@@ -108,6 +108,8 @@ public:
 	string DescribeBucketing() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
+	//! As GetFileFormat, but returns false for other SerDes
+	bool TryGetFileFormat(HiveFileFormat &result) const;
 	//! The field delimiter of a CSV table (field.delim / separatorChar), ',' when the SerDe does not say
 	string GetFieldDelimiter() const;
 	//! Whether the data files of a CSV table start with a header line (skip.header.line.count)

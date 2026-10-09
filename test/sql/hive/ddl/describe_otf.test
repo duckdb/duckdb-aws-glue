@@ -1,0 +1,30 @@
+# name: test/sql/hive/ddl/describe_otf.test
+# description: DESCRIBE works on non-Hive tables in Glue; scanning gives a clear error
+# group: [ddl]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# fixture_orc is a pre-created ORC table (created by scripts/docker-compose.yml)
+# It has columns id INTEGER and amount DOUBLE
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.fixture_orc) ORDER BY column_name;
+----
+amount	DOUBLE
+id	INTEGER
+
+statement error
+SELECT * FROM my_datalake.default.fixture_orc;
+----
+<REGEX>:.*not yet supported.*

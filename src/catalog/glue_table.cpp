@@ -61,14 +61,74 @@ GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 //===--------------------------------------------------------------------===//
 // Scan
 //===--------------------------------------------------------------------===//
+//! Bind data for the unsupported-format stub scan: the format name for the error message
+struct GlueUnsupportedScanData : public FunctionData {
+	string format_name;
+	explicit GlueUnsupportedScanData(string format_name_p) : format_name(std::move(format_name_p)) {
+	}
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<GlueUnsupportedScanData>(format_name);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return format_name == other.Cast<GlueUnsupportedScanData>().format_name;
+	}
+};
+
+//! Carries column schema and format name into the unsupported-format stub scan
+struct GlueUnsupportedScanInfo : public TableFunctionInfo {
+	string format_name;
+	vector<LogicalType> column_types;
+	vector<Identifier> column_names;
+};
+
+static unique_ptr<FunctionData> GlueUnsupportedBind(ClientContext &, TableFunctionBindInput &input,
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto &info = input.info->Cast<GlueUnsupportedScanInfo>();
+	return_types = info.column_types;
+	names = info.column_names;
+	return make_uniq<GlueUnsupportedScanData>(info.format_name);
+}
+
+static void GlueUnsupportedScan(ClientContext &, TableFunctionInput &input, DataChunk &) {
+	string format = "non-Hive";
+	if (input.bind_data) {
+		format = input.bind_data->Cast<GlueUnsupportedScanData>().format_name;
+	}
+	throw NotImplementedException("Scanning %s tables from a Glue catalog is not yet supported; "
+	                              "use glue_get_table_response() to inspect the table definition",
+	                              format);
+}
+
+static TableFunction GlueUnsupportedStub(const GlueTableInfo &info) {
+	auto fn_info = make_shared_ptr<GlueUnsupportedScanInfo>();
+	fn_info->format_name = info.GetFormatName();
+	for (auto &col : info.columns) {
+		fn_info->column_types.push_back(GlueTypes::ToLogicalType(col.type));
+		fn_info->column_names.emplace_back(col.name);
+	}
+	for (auto &key : info.partition_keys) {
+		fn_info->column_types.push_back(GlueTypes::ToLogicalType(key.type));
+		fn_info->column_names.emplace_back(key.name);
+	}
+	TableFunction stub("glue_unsupported_scan", {}, GlueUnsupportedScan, GlueUnsupportedBind);
+	stub.function_info = std::move(fn_info);
+	return stub;
+}
+
 TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	// Ask Glue what kind of table this is right before scanning: only Hive (Glue native) tables can be read
 	auto latest_info = RefreshTableInfo(context);
 	switch (latest_info.GetFormat()) {
-	case GlueTableFormat::HIVE:
+	case GlueTableFormat::HIVE: {
+		// an unsupported SerDe (e.g. ORC) gets the stub too, so DESCRIBE works
+		HiveFileFormat file_format;
+		if (!latest_info.TryGetFileFormat(file_format)) {
+			return GlueUnsupportedStub(latest_info);
+		}
 		return GetHiveScanFunction(context, bind_data, latest_info);
+	}
 	default:
-		throw NotImplementedException("Scan from table with type %s", latest_info.GetFormatName());
+		return GlueUnsupportedStub(latest_info);
 	}
 }
 
