@@ -1,0 +1,89 @@
+# name: test/sql/hive/bugs/s3_cardinality_partition_sizes.test
+# description: S3 - partitions of different sizes: the estimate must not take the first partition for all of them
+# group: [bugs]
+
+# The root listing's first page holds the files of many partitions. Measuring only the first one scaled a nearly empty
+# first partition (an early date bucket, NULL keys) to the whole table: TPC-DS web_returns came out at 651 rows of
+# 71,763.
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.psize;
+
+statement ok
+CREATE TABLE my_datalake.default.psize (id BIGINT, payload VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+# d0 sorts first and holds 10 rows, d1 .. d9 hold 10,000 each
+statement ok
+INSERT INTO my_datalake.default.psize SELECT range, repeat('x', 20) || range, 'd0' FROM range(10);
+
+statement ok
+INSERT INTO my_datalake.default.psize SELECT range, repeat('x', 20) || range, 'd' || (1 + range % 9) FROM range(90000);
+
+query I
+SELECT count(*) FROM my_datalake.default.psize;
+----
+90010
+
+# ten partitions: the scan lists the root, and every partition in its first page counts with its own size
+query II
+EXPLAIN SELECT * FROM my_datalake.default.psize;
+----
+physical_plan	<REGEX>:.*Hive Scan.*~(8[5-9]|9[0-5]),[0-9]{3} rows.*
+
+# the small partition alone stays small
+query II
+EXPLAIN SELECT * FROM my_datalake.default.psize WHERE dt = 'd0';
+----
+physical_plan	<REGEX>:.*Hive Scan.*~[0-9]{1,2} rows.*
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.psize WHERE dt IN ('d1', 'd2');
+----
+physical_plan	<REGEX>:.*Hive Scan.*~(1[89]|2[01]),[0-9]{3} rows.*
+
+# A filter the partition values decide is true of every row the scan reads: it is not costed a second time on top of
+# the pruning (a range filter kept a fifth of the 20,000 rows of d1 and d2)
+query II
+EXPLAIN SELECT * FROM my_datalake.default.psize WHERE dt BETWEEN 'd1' AND 'd2';
+----
+physical_plan	<REGEX>:.*Hive Scan.*~(1[89]|2[01]),[0-9]{3} rows.*
+
+query I
+SELECT count(*) FROM my_datalake.default.psize WHERE dt BETWEEN 'd1' AND 'd2';
+----
+20000
+
+# a filter on a data column stays, the one on the partition column is decided by the pruning
+query I
+SELECT count(*) FROM my_datalake.default.psize WHERE dt >= 'd1' AND id < 9;
+----
+9
+
+query I
+SELECT count(*) FROM my_datalake.default.psize WHERE dt >= 'd1' OR id < 9;
+----
+90009
+
+# a filter on the partition values together with data columns is not decided by them, and stays
+query I
+SELECT count(*) FROM my_datalake.default.psize WHERE dt = 'd0' OR payload = 'xxxxxxxxxxxxxxxxxxxx5';
+----
+11
+
+statement ok
+DROP TABLE my_datalake.default.psize;

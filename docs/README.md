@@ -40,7 +40,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
-  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a query reads at least
+  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). A filter the partition values decide is
+  true of every row the scan then reads, and is dropped from the plan, as for `read_parquet` with hive
+  partitioning. When a query reads at least
   `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
   recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
   partitions, and partitions at custom locations, are listed one directory each.
@@ -48,8 +50,15 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the
   parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
-  that one measurement by the partitions it reads, and a scan that lists the same directory reuses the listing.
-  Avro tables are not measured, so planning them lists nothing.
+  that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
+  count with their own size, the others with the average of those. A scan that lists the same directory reuses
+  the listing. Avro tables are not measured, so planning them lists nothing.
+- An unpartitioned parquet table of at most 32 files has the footers of all its files read instead (8 at a time,
+  with `parquet_metadata`): the row count is exact, and the columns get a distinct count for the join order
+  optimizer, the dictionary size the writer recorded or the width of an integer column's min/max. The
+  statistics claim nothing else (no min/max), so nothing is pruned on them.
+- The Glue table definition and the partition list are fetched once per query and table, however often the
+  query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
@@ -295,35 +304,54 @@ SeaweedFS does not have (`make glue-fixture` first; the benchmark runner needs a
 AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner benchmark/heavily_partitioned_table.benchmark
 ```
 
-`benchmark/tpch/sf1/` runs the 22 TPC-H queries at SF1 against Hive tables in the Glue database `bench_tpch_sf1`
-(`lineitem` and `orders` partitioned by 10-day buckets of `l_shipdate` and `o_orderdate`) and checks the answers.
-The queries in `benchmark/tpch/queries/` are DuckDB's with filters on the bucket columns added next to the date
-filters. The first run generates the data with `dbgen` and writes it with CTAS, which takes a while; later runs reuse
-`duckdb_benchmark_data/glue_tpch_sf1.duckdb`, which `make glue-fixture` removes:
+`benchmark/tpch/<sf>/<format>/` runs the 22 TPC-H queries against Hive tables of that format in the Glue database
+`bench_tpch_<sf>_<format>` (`lineitem` and `orders` partitioned by 10-day buckets of `l_shipdate` and `o_orderdate`)
+and checks the answers: `sf1/parquet/` at SF1, `sf0.1/csv/`, `sf0.1/json/` and `sf0.1/avro/` at SF0.1 (the Glue
+database names spell the scale factor `sf1`, `sf0_1`, ...). The queries in `benchmark/tpch/queries/` are DuckDB's with
+filters on the bucket columns added next to the date filters. The first run generates the data with `dbgen` and
+writes it with CTAS, which takes a while; later runs reuse `duckdb_benchmark_data/glue_tpch_<sf>_<format>.duckdb`,
+which `make glue-fixture` removes:
 
 ```sh
-AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner 'benchmark/tpch/sf1/.*'
+AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner 'benchmark/tpch/sf1/parquet/.*'
 ```
 
-`benchmark/tpcds/sf1/` does the same for the 99 TPC-DS queries at SF1, with the Glue database `bench_tpcds_sf1`: the
-fact tables are partitioned by their date key (`ss_sold_date_sk`, `sr_returned_date_sk`, `cs_sold_date_sk`,
-`cr_returned_date_sk`, `ws_sold_date_sk`, `wr_returned_date_sk`, `inv_date_sk`), the dimension tables are not. Its
-cache is `duckdb_benchmark_data/glue_tpcds_sf1.duckdb`:
+`benchmark/tpcds/<sf>/<format>/` does the same for the 99 TPC-DS queries, `sf1/parquet/` at SF1 and the other formats
+at SF0.01 (`sf0.01/<format>/`), with the Glue database `bench_tpcds_<sf>_<format>`: the fact tables are partitioned by
+10-day buckets of their date key (`ss_sold_date_bucket`, `sr_returned_date_bucket`, `cs_sold_date_bucket`,
+`cr_returned_date_bucket`, `ws_sold_date_bucket`, `wr_returned_date_bucket`, `inv_date_bucket`, each
+`(date_sk - 2440588) // 10`, the same buckets as the TPC-H tables), the dimension tables are not. The queries in
+`benchmark/tpcds/queries/` are DuckDB's with filters on the bucket columns added where a fact table's date key is
+joined to a filtered `date_dim`. Its cache is `duckdb_benchmark_data/glue_tpcds_<sf>_<format>.duckdb`:
 
 ```sh
-AWS_EC2_METADATA_DISABLED=true ./build/release/benchmark/benchmark_runner 'benchmark/tpcds/sf1/.*'
+AWS_EC2_METADATA_DISABLED=true ./build/release/benchmark/benchmark_runner 'benchmark/tpcds/sf1/parquet/.*'
 ```
 
-The TPC-DS load needs a build without assertions (`BUILD_BENCHMARK=1 make release`): its fact tables have rows with a
-NULL date key, and writing such a partition trips a `D_ASSERT` in DuckDB's partitioned copy (see the header of
-`benchmark/tpcds/sf1/tpcds_sf1.benchmark.in` for a repro without Glue).
+Both suites share a template per suite (`benchmark/tpch/tpch.benchmark.in`, `benchmark/tpcds/tpcds.benchmark.in`)
+that takes `FORMAT`, `SF` and `SF_NAME`. The TPC-DS load needs a build without assertions
+(`BUILD_BENCHMARK=1 make release`): its fact tables have rows with a NULL date key, and writing such a partition trips
+a `D_ASSERT` in DuckDB's partitioned copy (see the header of `benchmark/tpcds/tpcds.benchmark.in` for a repro without
+Glue).
 
-Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so changing a load (e.g. the scale
-factor) has no effect while the tables are in Glue: rebuild the fixture with
-`make glue-fixture-down && make glue-fixture` first.
+`benchmark/{tpch,tpcds}/sf10/parquet/` run the same queries at SF10 (the TPC-DS load writes ~4 GB to S3), and
+`benchmark/{tpch,tpcds}/sf0.01/parquet/` at SF0.01, which has as many partitions and files as SF1 but almost no rows,
+so its timings are mostly the Glue calls, the S3 listings and the file opens. Neither runs in CI. (TPC-H q17 fails at
+SF0.01: DuckDB's answer file for it is empty, the query returns one NULL.)
 
-`.github/workflows/Regression.yml` runs `benchmark/*.benchmark`, `benchmark/pushdown/`, `benchmark/optimizer/` and
-`benchmark/tpch/sf1/` for a PR and for its merge base and compares the timings. It does not run `benchmark/tpcds/`.
+Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so changing a load has no effect while
+the tables are in Glue: rebuild the fixture with `make glue-fixture-down && make glue-fixture` first.
+
+`benchmark_runner` runs the benchmarks below its own root (the repository), not the working directory. DuckDB's own
+TPC-H and TPC-DS benchmarks on native tables, the reference for these, run with
+`--root-dir duckdb` (`'benchmark/tpcds/sf1/.*' --sf 10` for TPC-DS at SF10).
+
+`.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
+their timings (5 runs each) in a job per format: the TPC-H and TPC-DS benchmarks of that format, plus
+`benchmark/*.benchmark`, `benchmark/pushdown/` and `benchmark/optimizer/` in the parquet job. To keep the jobs short it
+skips the queries that take under 0.6s on parquet at SF1 (TPC-H q06 and TPC-DS q96, mostly filtered scans of one table,
+among them), and per format the TPC-DS queries that time out or come close: q85 on parquet (the base build's join
+order takes ~75s at 2 threads) and q64 and q72 on avro (avro tables are not sampled for their row count).
 
 ## Building
 

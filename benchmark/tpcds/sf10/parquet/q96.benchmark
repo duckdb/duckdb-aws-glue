@@ -1,0 +1,10 @@
+# name: benchmark/tpcds/sf10/parquet/q96.benchmark
+# description: Run query 96 from the TPC-DS benchmark at SF10 on parquet Hive tables in the local Glue
+# group: [parquet]
+
+template benchmark/tpcds/tpcds.benchmark.in
+QUERY_NUMBER=96
+QUERY_NUMBER_PADDED=96
+FORMAT=parquet
+SF=10
+SF_NAME=sf10

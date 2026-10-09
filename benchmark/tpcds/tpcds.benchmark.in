@@ -1,0 +1,128 @@
+# name: ${FILE_PATH}
+# description: ${DESCRIPTION}
+# group: [tpcds]
+
+# TPC-DS at scale factor ${SF} generated locally with dsdgen and written to Hive tables in the local Glue (moto) + S3
+# (MinIO) with CTAS.
+# The fact tables are partitioned by 10-day buckets of their date key (ss_sold_date_bucket, ...; the date keys are
+# Julian days, so (date_sk - 2440588) // 10 is the bucket of the TPC-H tables), the dimension tables are unpartitioned.
+# A partition per day makes moto's GetPartitions dominate the timings. The queries in benchmark/tpcds/queries are
+# DuckDB's with bucket filters added next to the date filters. The local tables are dropped after the load, so the
+# queries read the Glue tables; the cache only keeps a marker table. The load skips tables that already exist in Glue:
+# rebuild the fixture to change the data.
+#
+# The load needs a build without assertions (make release): the fact tables have rows with a NULL date key, and
+# writing a partition with a NULL value more than one batch at a time trips a D_ASSERT in DuckDB's partitioned copy
+# (PartitionedCopyBatchState::SetValues compares the partition values, and comparing NULL Values throws). Reproduces
+# without Glue:
+#   COPY (SELECT range AS id, CASE WHEN range % 2 = 0 THEN NULL ELSE range % 3 END AS k, repeat('x', 200) AS payload
+#         FROM range(3000000)) TO 'out' (FORMAT parquet, PARTITION_BY (k));
+
+require parquet
+
+require json
+
+require avro
+
+require httpfs
+
+require glue
+
+require tpcds
+
+cache glue_tpcds_${SF_NAME}_${FORMAT}.duckdb
+
+load
+CALL dsdgen(sf=${SF});
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT};
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.store_sales PARTITIONED BY (ss_sold_date_bucket) WITH (format = '${FORMAT}') AS SELECT *, (ss_sold_date_sk - 2440588) // 10 AS ss_sold_date_bucket FROM store_sales;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.store_returns PARTITIONED BY (sr_returned_date_bucket) WITH (format = '${FORMAT}') AS SELECT *, (sr_returned_date_sk - 2440588) // 10 AS sr_returned_date_bucket FROM store_returns;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.catalog_sales PARTITIONED BY (cs_sold_date_bucket) WITH (format = '${FORMAT}') AS SELECT *, (cs_sold_date_sk - 2440588) // 10 AS cs_sold_date_bucket FROM catalog_sales;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.catalog_returns PARTITIONED BY (cr_returned_date_bucket) WITH (format = '${FORMAT}') AS SELECT *, (cr_returned_date_sk - 2440588) // 10 AS cr_returned_date_bucket FROM catalog_returns;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.web_sales PARTITIONED BY (ws_sold_date_bucket) WITH (format = '${FORMAT}') AS SELECT *, (ws_sold_date_sk - 2440588) // 10 AS ws_sold_date_bucket FROM web_sales;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.web_returns PARTITIONED BY (wr_returned_date_bucket) WITH (format = '${FORMAT}') AS SELECT *, (wr_returned_date_sk - 2440588) // 10 AS wr_returned_date_bucket FROM web_returns;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.inventory PARTITIONED BY (inv_date_bucket) WITH (format = '${FORMAT}') AS SELECT *, (inv_date_sk - 2440588) // 10 AS inv_date_bucket FROM inventory;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.call_center WITH (format = '${FORMAT}') AS SELECT * FROM call_center;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.catalog_page WITH (format = '${FORMAT}') AS SELECT * FROM catalog_page;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.customer WITH (format = '${FORMAT}') AS SELECT * FROM customer;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.customer_address WITH (format = '${FORMAT}') AS SELECT * FROM customer_address;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.customer_demographics WITH (format = '${FORMAT}') AS SELECT * FROM customer_demographics;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.date_dim WITH (format = '${FORMAT}') AS SELECT * FROM date_dim;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.household_demographics WITH (format = '${FORMAT}') AS SELECT * FROM household_demographics;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.income_band WITH (format = '${FORMAT}') AS SELECT * FROM income_band;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.item WITH (format = '${FORMAT}') AS SELECT * FROM item;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.promotion WITH (format = '${FORMAT}') AS SELECT * FROM promotion;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.reason WITH (format = '${FORMAT}') AS SELECT * FROM reason;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.ship_mode WITH (format = '${FORMAT}') AS SELECT * FROM ship_mode;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.store WITH (format = '${FORMAT}') AS SELECT * FROM store;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.time_dim WITH (format = '${FORMAT}') AS SELECT * FROM time_dim;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.warehouse WITH (format = '${FORMAT}') AS SELECT * FROM warehouse;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.web_page WITH (format = '${FORMAT}') AS SELECT * FROM web_page;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_${FORMAT}.web_site WITH (format = '${FORMAT}') AS SELECT * FROM web_site;
+DROP TABLE store_sales;
+DROP TABLE store_returns;
+DROP TABLE catalog_sales;
+DROP TABLE catalog_returns;
+DROP TABLE web_sales;
+DROP TABLE web_returns;
+DROP TABLE inventory;
+DROP TABLE call_center;
+DROP TABLE catalog_page;
+DROP TABLE customer;
+DROP TABLE customer_address;
+DROP TABLE customer_demographics;
+DROP TABLE date_dim;
+DROP TABLE household_demographics;
+DROP TABLE income_band;
+DROP TABLE item;
+DROP TABLE promotion;
+DROP TABLE reason;
+DROP TABLE ship_mode;
+DROP TABLE store;
+DROP TABLE time_dim;
+DROP TABLE warehouse;
+DROP TABLE web_page;
+DROP TABLE web_site;
+CREATE TABLE glue_tpcds_${SF_NAME}_${FORMAT}_loaded AS SELECT 1 AS loaded;
+USE my_datalake.bench_tpcds_${SF_NAME}_${FORMAT};
+SET enable_external_file_cache=false;
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+USE my_datalake.bench_tpcds_${SF_NAME}_${FORMAT};
+SET enable_external_file_cache=false;
+
+name DSQ${QUERY_NUMBER_PADDED}_${FORMAT}
+group tpcds_glue
+subgroup ${SF_NAME}_${FORMAT}
+
+run benchmark/tpcds/queries/${QUERY_NUMBER_PADDED}.sql
+
+result duckdb/extension/tpcds/dsdgen/answers/sf${SF}/${QUERY_NUMBER_PADDED}.csv

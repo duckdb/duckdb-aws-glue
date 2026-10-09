@@ -1,0 +1,10 @@
+# name: benchmark/tpch/sf10/parquet/q14.benchmark
+# description: Run query 14 from the TPC-H benchmark at SF10 on parquet Hive tables in the local Glue
+# group: [parquet]
+
+template benchmark/tpch/tpch.benchmark.in
+QUERY_NUMBER=14
+QUERY_NUMBER_PADDED=14
+FORMAT=parquet
+SF=10
+SF_NAME=sf10

@@ -112,6 +112,48 @@ FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
 ----
 1	1
 
+# Glue is asked for the table and its partitions once per query, not once per scan. Without the optimizer, so the
+# common subplan optimizer can not fold the scans into one: these are four scans, each bound on its own
+statement ok
+PRAGMA disable_optimizer;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd3'
+UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
+UNION ALL SELECT * FROM my_datalake.default.plancost_wide
+UNION ALL SELECT * FROM my_datalake.default.plancost_wide);
+----
+8400
+
+query II
+SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] IS NOT NULL GROUP BY 1 ORDER BY 1;
+----
+AWSGlue.GetPartitions	1
+AWSGlue.GetTable	1
+
+# the next query asks again
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (SELECT * FROM my_datalake.default.plancost_wide UNION ALL SELECT * FROM my_datalake.default.plancost_wide);
+----
+8000
+
+query II
+SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] IS NOT NULL GROUP BY 1 ORDER BY 1;
+----
+AWSGlue.GetPartitions	1
+AWSGlue.GetTable	1
+
+statement ok
+PRAGMA enable_optimizer;
+
 # and each scan scales that one sample by its own partitions: twenty partitions are 4,000 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd3'

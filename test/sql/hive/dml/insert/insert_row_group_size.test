@@ -1,0 +1,70 @@
+# name: test/sql/hive/dml/insert/insert_row_group_size.test
+# description: Parquet files written to a Hive table have row groups of the writer's row_group_size, not one per chunk
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET threads = 1;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rg_flat;
+
+statement ok
+CREATE TABLE my_datalake.default.rg_flat AS SELECT range AS id, range % 7 AS v FROM range(300000);
+
+# 300,000 rows in 122,880-row groups: three of them, where every 2,048-row chunk used to be one (147)
+query II
+SELECT count(*), max(row_group_num_rows) FROM parquet_metadata('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rg_flat/*.parquet') WHERE column_id = 0;
+----
+3	122880
+
+statement ok
+INSERT INTO my_datalake.default.rg_flat SELECT range AS id, range % 7 AS v FROM range(200000);
+
+query I
+SELECT count(*) FROM parquet_metadata('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rg_flat/*.parquet') WHERE column_id = 0;
+----
+5
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.rg_flat;
+----
+500000	64999750000
+
+# partitioned writes too: each partition's 150,000 rows are a full row group and the rest
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rg_part;
+
+statement ok
+CREATE TABLE my_datalake.default.rg_part PARTITIONED BY (p) AS SELECT range AS id, range % 2 AS p FROM range(300000);
+
+query II
+SELECT count(*), max(row_group_num_rows) FROM parquet_metadata('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rg_part/*/*.parquet') WHERE column_id = 0;
+----
+4	122880
+
+query III
+SELECT p, count(*), sum(id) FROM my_datalake.default.rg_part GROUP BY p ORDER BY p;
+----
+0	150000	22499850000
+1	150000	22500000000
+
+statement ok
+DROP TABLE my_datalake.default.rg_flat;
+
+statement ok
+DROP TABLE my_datalake.default.rg_part;

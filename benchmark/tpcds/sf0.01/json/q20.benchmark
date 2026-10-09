@@ -1,0 +1,10 @@
+# name: benchmark/tpcds/sf0.01/json/q20.benchmark
+# description: Run query 20 from the TPC-DS benchmark at SF0.01 on json Hive tables in the local Glue
+# group: [json]
+
+template benchmark/tpcds/tpcds.benchmark.in
+QUERY_NUMBER=20
+QUERY_NUMBER_PADDED=20
+FORMAT=json
+SF=0.01
+SF_NAME=sf0_01

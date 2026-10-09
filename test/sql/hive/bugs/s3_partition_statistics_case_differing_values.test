@@ -123,23 +123,23 @@ EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'us';
 ----
 physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~300 rows.*
 
-# the two range bounds: a folded bound would keep both partitions or neither. VARCHAR statistics never
-# prove a range always true, so these take the flat 0.2 of the 300 rows
+# the two range bounds: a folded bound would keep both partitions or neither. The partition values decide the
+# filter, so it is true of the 300 rows left and not costed again
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country > 'US';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~60 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~300 rows.*
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country < 'us';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~60 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~300 rows.*
 
-# spanning both: nothing is pruned, 600 rows through the same 0.2
+# spanning both: nothing is pruned, and the filter is true of all 600 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country BETWEEN 'US' AND 'us';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*~120 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~600 rows.*
 
 # 'Us' sorts strictly BETWEEN 'US' and 'us', so pruning to 0/2
 query II

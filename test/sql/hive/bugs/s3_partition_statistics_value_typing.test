@@ -104,17 +104,18 @@ EXPLAIN SELECT k, count(*) FROM my_datalake.default.vtype_vol GROUP BY k;
 physical_plan	<REGEX>:.*Hash Group By.*~3 rows.*
 
 # lexicographic: all three are below '8', so nothing is pruned and the plan carries no
-# "Scanning Files" line at all. Numeric typing would prune '70' here.
+# "Scanning Files" line at all. Numeric typing would prune '70' here. The filter is true of every partition, so it
+# costs nothing: all 600 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vtype_vol WHERE k < '8';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*~120 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~600 rows.*
 
 # '70' sorts above '7', so this keeps two of three
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vtype_vol WHERE k <= '7';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/3.*~80 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/3.*~400 rows.*
 
 # '007' and '7' prune to their own partition each, which is what says they are not one value. The
 # equality is always true of the partition left, so it takes no selectivity

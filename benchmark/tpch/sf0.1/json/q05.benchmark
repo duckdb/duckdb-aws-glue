@@ -1,0 +1,10 @@
+# name: benchmark/tpch/sf0.1/json/q05.benchmark
+# description: Run query 05 from the TPC-H benchmark at SF0.1 on json Hive tables in the local Glue
+# group: [json]
+
+template benchmark/tpch/tpch.benchmark.in
+QUERY_NUMBER=5
+QUERY_NUMBER_PADDED=05
+FORMAT=json
+SF=0.1
+SF_NAME=sf0_1
