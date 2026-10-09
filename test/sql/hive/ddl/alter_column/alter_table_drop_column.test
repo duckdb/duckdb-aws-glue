@@ -99,3 +99,46 @@ FROM glue_get_table_response('my_datalake.default.ddl_drop_bucket_column');
 
 statement ok
 DROP TABLE my_datalake.default.ddl_drop_bucket_column;
+
+#---------------------------------------------------------------------------
+# a csv (text) table is read by position, so DROP COLUMN would silently shift
+# existing files' bytes into the wrong columns - refuse it (as Athena V3 does)
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ddl_drop_column_csv;
+
+statement ok
+CREATE TABLE my_datalake.default.ddl_drop_column_csv (id INTEGER, name VARCHAR, score DOUBLE) WITH (format = 'csv');
+
+statement error
+ALTER TABLE my_datalake.default.ddl_drop_column_csv DROP COLUMN name;
+----
+DROP COLUMN is not supported for csv
+
+# IF EXISTS on a nonexistent column short-circuits before the format check
+statement ok
+ALTER TABLE my_datalake.default.ddl_drop_column_csv DROP COLUMN IF EXISTS nonexistent;
+
+# IF EXISTS on an existing column still hits the format rejection
+statement error
+ALTER TABLE my_datalake.default.ddl_drop_column_csv DROP COLUMN IF EXISTS name;
+----
+DROP COLUMN is not supported for csv
+
+# a second attach sees the schema unchanged: no mutation reached Glue
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake_3 (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake_3' AND table_name = 'ddl_drop_column_csv' ORDER BY column_index;
+----
+id
+name
+score
+
+statement ok
+DROP TABLE my_datalake.default.ddl_drop_column_csv;
