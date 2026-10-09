@@ -167,7 +167,8 @@ static optional_idx GzipUncompressedSize(FileSystem &fs, const string &path) {
 //! Files in line-oriented formats such as csv and json read a bounded prefix, count its lines,
 //! and scale the average line length over the file. csv and newline-delimited json are one row per line. There is no
 //! footer to ask.
-static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const OpenFileInfo &file, bool header) {
+static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const OpenFileInfo &file,
+                                                  idx_t header_lines) {
 	static constexpr idx_t SAMPLE_BYTES = 65536;
 	// zstd records its uncompressed size only optionally, and the scan cannot decompress the others at all
 	for (auto extension : {".zst", ".snappy", ".lz4", ".bz2", ".deflate"}) {
@@ -208,9 +209,7 @@ static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const 
 	}
 	auto bytes_per_line = static_cast<double>(sample_size) / static_cast<double>(lines);
 	auto rows = static_cast<idx_t>(static_cast<double>(file_size) / bytes_per_line);
-	if (header && rows > 1) {
-		rows--;
-	}
+	rows = rows > header_lines ? rows - header_lines : 0;
 	return MaxValue<idx_t>(rows, 1);
 }
 
@@ -244,7 +243,7 @@ static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &
 	case HiveFileFormat::JSON:
 		// no reader is built for these: they are bound with a dialect and an explicit column list that fresh options
 		// would not reproduce. Counting lines needs none of it
-		return SampleLineOrientedRowsPerFile(context, file, info.header);
+		return SampleLineOrientedRowsPerFile(context, file, info.csv_options.skip_lines);
 	case HiveFileFormat::AVRO:
 		return optional_idx();
 	}

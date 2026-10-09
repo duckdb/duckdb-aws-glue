@@ -8,6 +8,7 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -35,6 +36,54 @@ GlueHiveInsert::GlueHiveInsert(PhysicalPlan &physical_plan, LogicalOperator &op,
                                GlueTableInfo table_info_p)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, {LogicalType::BIGINT}, op.estimated_cardinality),
       catalog(catalog), table_info(std::move(table_info_p)) {
+}
+
+//! A field delimiter as it is written in an error message: control characters as their octal escape ('\001')
+static string DelimiterToString(const string &delimiter) {
+	string result;
+	for (auto c : delimiter) {
+		auto byte = static_cast<uint8_t>(c);
+		result += byte < 0x20 ? StringUtil::Format("\\%03o", byte) : string(1, c);
+	}
+	return result;
+}
+
+//! The text of a value written to a Hive text file; an error when it holds a 'forbidden' character or is 'null_string'
+static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_ptr<Expression> value,
+                                               const string &forbidden, optional_ptr<const string> null_string,
+                                               const string &error_message) {
+	auto text = BoundCastExpression::AddCastToType(context, std::move(value), LogicalType::VARCHAR);
+	string pattern = "[";
+	for (auto c : forbidden) {
+		pattern += StringUtil::Format("\\x{%02X}", static_cast<uint8_t>(c));
+	}
+	pattern += "]";
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	vector<unique_ptr<Expression>> match_children;
+	match_children.push_back(text->Copy());
+	match_children.push_back(make_uniq<BoundConstantExpression>(Value(pattern)));
+	unique_ptr<Expression> refused = function_binder.BindScalarFunction(
+	    Identifier::DefaultSchema(), Identifier("regexp_matches"), std::move(match_children), error);
+	if (!refused) {
+		error.Throw();
+	}
+	if (null_string) {
+		auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_OR);
+		conjunction->GetChildrenMutable().push_back(std::move(refused));
+		conjunction->GetChildrenMutable().push_back(BoundComparisonExpression::Create(
+		    ExpressionType::COMPARE_EQUAL, text->Copy(), make_uniq<BoundConstantExpression>(Value(*null_string))));
+		refused = std::move(conjunction);
+	}
+	vector<unique_ptr<Expression>> error_children;
+	error_children.push_back(make_uniq<BoundConstantExpression>(Value(error_message)));
+	auto raise = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("error"),
+	                                                std::move(error_children), error);
+	if (!raise) {
+		error.Throw();
+	}
+	raise = BoundCastExpression::AddCastToType(context, std::move(raise), LogicalType::VARCHAR);
+	return make_uniq<BoundCaseExpression>(std::move(refused), std::move(raise), std::move(text));
 }
 
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
@@ -194,10 +243,12 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		}
 	}
 
-	// For INSERT, derive the file format from Glue's current SerDe. For CTAS the
-	// table does not exist yet, so use the validated CREATE TABLE option stored in
-	// the local definition.
+	// For INSERT, the table's SerDe determines the format.
+	// For CTAS the table is freshly created and has no SerDe yet, so use the option from the CREATE TABLE statement.
 	auto file_format = creating_table ? table_info.file_format : table_info.GetFileFormat();
+	if (IsTextFileFormat(file_format)) {
+		table_info.CheckTextSerdeSupported(file_format);
+	}
 	auto format_name = HiveFileFormatToString(file_format);
 	// the operator feeding the copy and the columns it produces
 	optional_ptr<PhysicalOperator> source = &plan;
@@ -224,22 +275,58 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		ExtensionHelper::AutoLoadExtension(context, "avro");
 		break;
 	case HiveFileFormat::CSV: {
-		// Hive CSV files: the table's dialect, a header line only when the table says so. For CTAS, take the dialect
-		// from the CREATE TABLE options because there is no fetched SerDe yet; apply the same defaults as
-		// CreateHiveTable + the fetched GlueTableInfo getters.
-		auto delimiter = creating_table ? table_info.csv_delimiter : table_info.GetFieldDelimiter();
-		auto quote = creating_table ? table_info.csv_quote : table_info.GetQuoteCharacter();
-		if (quote.empty()) {
-			quote = "\"";
+		// Hive CSV files: the table's dialect and NULL string, a header line only when the table says so
+		auto header_lines = table_info.GetHeaderLineCount();
+		if (header_lines > 1) {
+			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: its files start with %d "
+			                              "header lines, DuckDB writes at most one",
+			                              table_info.database_name, table_info.name, header_lines);
 		}
-		auto escape = creating_table ? table_info.csv_escape : table_info.GetEscapeCharacter();
-		if (escape.empty()) {
-			escape = quote;
+		auto delimiter = table_info.GetFieldDelimiter();
+		auto quoted = table_info.IsOpenCSVSerde();
+		auto null_string = table_info.GetNullFormat();
+		if (delimiter.size() > 1) {
+			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: DuckDB writes single-byte "
+			                              "field delimiters only, the table's is '%s'",
+			                              table_info.database_name, table_info.name, delimiter);
 		}
-		copy_options[Identifier("header")] = {Value::BOOLEAN(table_info.HasHeader())};
+		copy_options[Identifier("header")] = {Value::BOOLEAN(header_lines == 1)};
 		copy_options[Identifier("delimiter")] = {Value(delimiter)};
-		copy_options[Identifier("quote")] = {Value(quote)};
-		copy_options[Identifier("escape")] = {Value(escape)};
+		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
+		copy_options[Identifier("escape")] = {Value(table_info.GetEscapeCharacter())};
+		copy_options[Identifier("nullstr")] = {Value(null_string)};
+		if (quoted) {
+			// as Hive writes OpenCSVSerde files, so that an escape character in a value is escaped too
+			copy_options[Identifier("force_quote")] = {Value("*")};
+		}
+		// every data column is written as text, refused where a field of the table's files can not hold it
+		string forbidden = quoted ? "\n\r" : "\n\r" + delimiter;
+		auto reason = quoted ? string("holds a line break")
+		                     : StringUtil::Format("holds the field delimiter '%s' or a line break, or is the table's "
+		                                          "NULL string '%s'",
+		                                          DelimiterToString(delimiter), null_string);
+		vector<unique_ptr<Expression>> select_list;
+		vector<LogicalType> projected_types;
+		for (idx_t i = 0; i < names.size(); i++) {
+			unique_ptr<Expression> column = make_uniq<BoundReferenceExpression>(types[i], i);
+			if (std::find(partition_columns.begin(), partition_columns.end(), i) == partition_columns.end()) {
+				auto message =
+				    StringUtil::Format("Writing to Hive table '%s.%s' failed: a value of column '%s' %s, "
+				                       "which the table's %s files can not hold in a field",
+				                       table_info.database_name, table_info.name, names[i].GetIdentifierName(), reason,
+				                       quoted ? "OpenCSVSerde" : "LazySimpleSerDe");
+				// only unquoted fields can not tell the NULL string from NULL
+				column =
+				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
+				copy_types[i] = LogicalType::VARCHAR;
+			}
+			projected_types.push_back(column->GetReturnType());
+			select_list.push_back(std::move(column));
+		}
+		auto &projection = planner.Make<PhysicalProjection>(std::move(projected_types), std::move(select_list),
+		                                                    op.estimated_cardinality);
+		projection.children.push_back(plan);
+		source = &projection;
 		break;
 	}
 	case HiveFileFormat::JSON: {

@@ -48,26 +48,32 @@ FROM glue_get_table_response('my_datalake.default.formats_csv_pipe');
 ----
 org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe	|	|	|
 
-# a comma is a plain character now, a value holding the delimiter is quoted
+# a comma is a plain character now. LazySimpleSerDe does not quote, so a value holding the delimiter can not be
+# written: Hive would split it into two fields
 statement ok
-INSERT INTO my_datalake.default.formats_csv_pipe VALUES (1, 'a,b', '2016-05-14'), (2, 'x|y', '2016-05-14'), (3, 'c', '2016-05-15');
+INSERT INTO my_datalake.default.formats_csv_pipe VALUES (1, 'a,b', '2016-05-14'), (2, 'x"y', '2016-05-14'), (3, 'c', '2016-05-15');
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_pipe VALUES (4, 'x|y', '2016-05-14');
+----
+holds the field delimiter '|' or a line break
 
 query I
 SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_pipe/dt=2016-05-14/*.csv');
 ----
-1|a,b<nl>2|"x|y"<nl>
+1|a,b<nl>2|x"y<nl>
 
 query II
-SELECT id, name FROM read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_pipe/dt=2016-05-14/*.csv', header = false, delim = '|', columns = {id: 'INTEGER', name: 'VARCHAR'}) ORDER BY id;
+SELECT id, name FROM read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_pipe/dt=2016-05-14/*.csv', header = false, delim = '|', quote = '', columns = {id: 'INTEGER', name: 'VARCHAR'}) ORDER BY id;
 ----
 1	a,b
-2	x|y
+2	x"y
 
 query III
 SELECT id, name, dt FROM my_datalake.default.formats_csv_pipe ORDER BY id;
 ----
 1	a,b	2016-05-14
-2	x|y	2016-05-14
+2	x"y	2016-05-14
 3	c	2016-05-15
 
 query I
@@ -86,18 +92,23 @@ FROM glue_get_table_response('my_datalake.default.formats_csv_tab');
 org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe	true	true
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_tab VALUES (1, 'a,b'), (2, 'x' || chr(9) || 'y');
+INSERT INTO my_datalake.default.formats_csv_tab VALUES (1, 'a,b'), (2, 'x y');
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_tab VALUES (3, 'x' || chr(9) || 'y');
+----
+holds the field delimiter '\011' or a line break
 
 query I
 SELECT replace(replace(content, chr(10), '<nl>'), chr(9), '<tab>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_tab/*.csv');
 ----
-1<tab>a,b<nl>2<tab>"x<tab>y"<nl>
+1<tab>a,b<nl>2<tab>x y<nl>
 
 query II
-SELECT id, replace(name, chr(9), '<tab>') FROM my_datalake.default.formats_csv_tab ORDER BY id;
+SELECT id, name FROM my_datalake.default.formats_csv_tab ORDER BY id;
 ----
 1	a,b
-2	x<tab>y
+2	x y
 
 # ';' with a header line in every file (Hive's TBLPROPERTIES ('skip.header.line.count' = '1'))
 statement ok
@@ -113,46 +124,56 @@ statement ok
 INSERT INTO my_datalake.default.formats_csv_semicolon VALUES (1, 'a');
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_semicolon VALUES (2, 'b;c');
+INSERT INTO my_datalake.default.formats_csv_semicolon VALUES (2, 'b,c');
 
 query I
 SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_semicolon/*.csv') ORDER BY 1;
 ----
 id;name<nl>1;a<nl>
-id;name<nl>2;"b;c"<nl>
+id;name<nl>2;b,c<nl>
 
 # the header lines are skipped, not read as rows
 query II
 SELECT id, name FROM my_datalake.default.formats_csv_semicolon ORDER BY id;
 ----
 1	a
-2	b;c
+2	b,c
 
 #---------------------------------------------------------------------------
-# quoting with the default dialect: values holding the delimiter, the quote character or a newline are quoted with
-# '"', a quote inside is doubled, an empty string is "" and NULL is an empty field
+# the default dialect does not quote (LazySimpleSerDe): a '"' is a plain character, an empty string is an empty field
+# and NULL is \N. A value holding the delimiter or a line break can not be written, Hive would split it
 #---------------------------------------------------------------------------
 statement ok
 CREATE TABLE my_datalake.default.formats_csv_quoted (id INTEGER, name VARCHAR, note VARCHAR) WITH (format = 'csv');
 
 statement ok
 INSERT INTO my_datalake.default.formats_csv_quoted VALUES
-    (1, 'a,b', 'plain'),
+    (1, 'plain', 'plain'),
     (2, 'say "hi"', ''),
-    (3, 'two' || chr(10) || 'lines', NULL),
+    (3, '"quoted"', NULL),
     (4, ' padded ', '"');
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_quoted VALUES (5, 'a,b', NULL);
+----
+holds the field delimiter ',' or a line break
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_quoted VALUES (5, NULL, 'two' || chr(10) || 'lines');
+----
+holds the field delimiter ',' or a line break
 
 query I
 SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_quoted/*.csv');
 ----
-1,"a,b",plain<nl>2,"say ""hi""",""<nl>3,"two<nl>lines",<nl>4, padded ,""""<nl>
+1,plain,plain<nl>2,say "hi",<nl>3,"quoted",\N<nl>4, padded ,"<nl>
 
 query IIII
-SELECT id, replace(name, chr(10), '<nl>'), note, note IS NULL FROM my_datalake.default.formats_csv_quoted ORDER BY id;
+SELECT id, name, note, note IS NULL FROM my_datalake.default.formats_csv_quoted ORDER BY id;
 ----
-1	a,b	plain	false
+1	plain	plain	false
 2	say "hi"	(empty)	false
-3	two<nl>lines	NULL	true
+3	"quoted"	NULL	true
 4	 padded 	"	false
 
 #---------------------------------------------------------------------------
@@ -171,11 +192,12 @@ org.apache.hadoop.hive.serde2.OpenCSVSerde	,	'	\	csv
 statement ok
 INSERT INTO my_datalake.default.formats_csv_squote VALUES (1, 'it''s'), (2, 'a,b'), (3, 'say "hi"'), (4, 'back\slash');
 
-# '"' is a plain character now, the quote inside a quoted value is escaped with '\'
+# every value is quoted, as Hive's OpenCSVSerde writes: an escape character is then escaped too, where unquoted
+# OpenCSVSerde would drop it (opencsv only honors an escape character before a quote or another escape)
 query I
 SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_squote/*.csv');
 ----
-1,'it\'s'<nl>2,'a,b'<nl>3,say "hi"<nl>4,back\slash<nl>
+'1','it\'s'<nl>'2','a,b'<nl>'3','say "hi"'<nl>'4','back\\slash'<nl>
 
 query II
 SELECT id, name FROM my_datalake.default.formats_csv_squote ORDER BY id;
@@ -201,7 +223,7 @@ INSERT INTO my_datalake.default.formats_csv_dquote VALUES (1, 'x|y'), (2, 'say "
 query I
 SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_dquote/*.csv');
 ----
-1|"x|y"<nl>2|"say ""hi"""<nl>
+"1"|"x|y"<nl>"2"|"say ""hi"""<nl>
 
 query II
 SELECT id, name FROM my_datalake.default.formats_csv_dquote ORDER BY id;
@@ -229,13 +251,13 @@ statement ok
 DETACH my_datalake;
 
 query III
-SELECT id, name, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_pipe', format := 'csv', delim := '|',
+SELECT id, name, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_pipe', format := 'csv', delim := '|', quote := '',
     schema := {id: 'INTEGER', name: 'VARCHAR', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
 ORDER BY id;
 ----
 1	a,b	2016-05-14
-2	x|y	2016-05-14
+2	x"y	2016-05-14
 3	c	2016-05-15
 
 query II
@@ -244,7 +266,7 @@ SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats
 ORDER BY id;
 ----
 1	a
-2	b;c
+2	b,c
 
 query II
 SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_squote', format := 'csv', quote := '''', escape := '\',
@@ -280,3 +302,33 @@ DROP TABLE my_datalake.default.formats_csv_squote;
 
 statement ok
 DROP TABLE my_datalake.default.formats_csv_dquote;
+
+# CREATE TABLE AS writes its files in the dialect the new table records
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_ctas WITH (format = 'csv') AS SELECT 1 AS id, 'a' AS name;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_ctas_pipe WITH (format = 'csv', delimiter = '|') AS SELECT 1 AS id, 'a' AS name;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_ctas_quoted WITH (format = 'csv', quote = '"') AS SELECT 1 AS id, 'a,b' AS name;
+
+foreach table formats_csv_ctas formats_csv_ctas_pipe
+
+query II
+SELECT id, name FROM my_datalake.default.{table};
+----
+1	a
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop
+
+query II
+SELECT id, name FROM my_datalake.default.formats_csv_ctas_quoted;
+----
+1	a,b
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_ctas_quoted;

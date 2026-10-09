@@ -127,12 +127,12 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_
 ----
 2
 
-# NULL is an empty field
+# NULL is \N, the default serialization.null.format of LazySimpleSerDe
 query I
 SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_plain/*.csv') ORDER BY 1;
 ----
-1,a,10.50,true,2016-05-14<nl>2,b,,false,<nl>
-3,c,0.01,,2016-05-15<nl>
+1,a,10.50,true,2016-05-14<nl>2,b,\N,false,\N<nl>
+3,c,0.01,\N,2016-05-15<nl>
 
 query IIIII
 SELECT id, name, amount, ok, d FROM my_datalake.default.formats_csv_plain ORDER BY id;
@@ -164,7 +164,7 @@ AA5	7	2015
 AA6	1	2020
 
 query IIIII
-SELECT id, name, amount, ok, d FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_plain', format := 'csv',
+SELECT id, name, amount, ok, d FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_plain', format := 'csv', nullstr := '\N',
     schema := {id: 'INTEGER', name: 'VARCHAR', amount: 'DECIMAL(10, 2)', ok: 'BOOLEAN', d: 'DATE'})
 ORDER BY id;
 ----

@@ -387,9 +387,21 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	    options.location.empty() ? glue_catalog.GetTableLocation(database_info, table_name) : options.location;
 	table.parameters = options.parameters;
 	table.file_format = options.format;
-	table.csv_delimiter = options.csv_delimiter;
-	table.csv_quote = options.csv_quote;
-	table.csv_escape = options.csv_escape;
+	if (table.file_format == HiveFileFormat::CSV) {
+		// with a quote or escape character OpenCSVSerde (which quotes), without both LazySimpleSerDe (which does not)
+		if (options.csv_quote.empty() && options.csv_escape.empty()) {
+			table.serde_library = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe";
+			table.serde_parameters["field.delim"] = options.csv_delimiter;
+			table.serde_parameters["serialization.format"] = options.csv_delimiter;
+		} else {
+			// the escape character defaults to the quote character, like DuckDB's COPY
+			string quote = options.csv_quote.empty() ? "\"" : options.csv_quote;
+			table.serde_library = "org.apache.hadoop.hive.serde2.OpenCSVSerde";
+			table.serde_parameters["separatorChar"] = options.csv_delimiter;
+			table.serde_parameters["quoteChar"] = quote;
+			table.serde_parameters["escapeChar"] = options.csv_escape.empty() ? quote : options.csv_escape;
+		}
+	}
 	table.bucket_columns = options.bucket_columns;
 	table.number_of_buckets = options.number_of_buckets;
 	table.sort_columns = options.sort_columns;

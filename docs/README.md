@@ -26,10 +26,32 @@ Attach options:
 ## Reading
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
-LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is
-1, delimiter from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per
+LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position) and JsonSerDe with `read_json` (one object per
 line, keys by name) and AvroSerDe with `read_avro` (columns by name) from the avro extension, which is loaded on
-demand. Other SerDes (ORC, Ion, ...) are not supported.
+demand. Other SerDes (ORC, Ion, ...) are not supported. Text tables are read the way their SerDe reads them:
+
+- LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
+  is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
+  quoted.
+- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
+  doubled quotes Hive writes). An empty field is an empty string; there is no NULL.
+- Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
+  NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
+  `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
+- `skip.header.line.count` lines are skipped at the start of every file.
+- Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
+  delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
+  line break.
+- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
+  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
+  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
+  NULL string. Writes need a single-byte delimiter.
+- As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
+  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
+  their own. `hive_scan()` uses plain `read_csv` rules.
+
+Breaking change: csv tables written by earlier versions of this extension store NULL as an empty field and may quote
+fields. To read such a table as before, set `serialization.null.format` to `''` and switch its SerDe to OpenCSVSerde.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
@@ -90,8 +112,9 @@ their codec themselves.
   table, Hive's `CLUSTERED BY (...) SORTED BY (...) INTO n BUCKETS`: bucket and sort columns are columns of the table
   that are not partition keys, and `BucketColumns` needs a positive `NumberOfBuckets`. The setting is off by default
   because DuckDB does not write to such a table (see below).
-- `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per partition
-  touched, partition columns are not stored in the files) and register new partition directories in Glue with
+- `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per partition touched,
+  partition columns are not stored in the files; text files use the table's delimiter and NULL
+  string, `\N` for LazySimpleSerDe unless `serialization.null.format` says otherwise, and at most one header line) and register new partition directories in Glue with
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
   into a partition whose location is not below the table location fails; the rows of other partitions can still be
@@ -160,7 +183,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 
 - `schema` (required): a struct of column name to DuckDB type name, data columns and partition columns.
 - `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true`, `delim := '|'`,
-  `quote := '"'` and `escape := '\'` describe the files; csv columns are matched by position, json keys by name.
+  `quote := '"'`, `escape := '\'` and `nullstr := '\N'` describe the files (an empty field is NULL unless `nullstr`
+  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name.
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is

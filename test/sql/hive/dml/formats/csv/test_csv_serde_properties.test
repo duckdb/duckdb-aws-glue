@@ -1,0 +1,545 @@
+# name: test/sql/hive/dml/formats/csv/test_csv_serde_properties.test
+# description: text tables are read and written the way their SerDe properties say: delimiters, NULL format, headers
+# group: [csv]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fixture tables (scripts/docker-compose.yml) share their location between runs: every run rewrites the file
+
+#---------------------------------------------------------------------------
+# LazySimpleSerDe without SerDe properties ("ROW FORMAT DELIMITED"): fields are separated by '\001' and NULL is \N;
+# an empty field of a string column is an empty string
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1' || chr(1) || 'a' || chr(1) || '1.5'),
+    ('2' || chr(1) || '\N' || chr(1) || '\N'),
+    ('3' || chr(1) || '' || chr(1) || '4.5')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_default/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query IIII
+SELECT id, name, name IS NULL, amount FROM my_datalake.default.fixture_text_default ORDER BY id;
+----
+1	a	false	1.5
+2	NULL	true	NULL
+3	(empty)	false	4.5
+
+query II
+SELECT id, name FROM my_datalake.default.fixture_text_default WHERE amount > 1 ORDER BY id;
+----
+1	a
+3	(empty)
+
+# as in Hive, a value that does not parse as its column type is NULL, an empty numeric field too; a line with fewer
+# fields than columns leaves the trailing columns NULL and fields beyond the last column are ignored
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('x' || chr(1) || 'bad' || chr(1) || ''),
+    ('4'),
+    ('5' || chr(1) || 'e' || chr(1) || '6.5' || chr(1) || 'extra')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_default/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query III
+SELECT id, name, amount FROM my_datalake.default.fixture_text_default ORDER BY id NULLS FIRST;
+----
+NULL	bad	NULL
+4	NULL	NULL
+5	e	6.5
+
+# filters compare the converted values, not the text: 10 > 5 although '10' < '5'
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('10' || chr(1) || 'a' || chr(1) || '1'),
+    ('5' || chr(1) || 'b' || chr(1) || 'z')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_default/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, amount FROM my_datalake.default.fixture_text_default WHERE id > 6;
+----
+10	1.0
+
+query I
+SELECT id FROM my_datalake.default.fixture_text_default WHERE amount IS NULL;
+----
+5
+
+#---------------------------------------------------------------------------
+# a delimiter given as a number is a byte code: serialization.format '9' (without field.delim) is a tab
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1' || chr(9) || 'a,b' || chr(9) || '2.5'),
+    ('2' || chr(9) || 'c' || chr(9) || '\N')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_numeric_delim/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query III
+SELECT id, name, amount FROM my_datalake.default.fixture_text_numeric_delim ORDER BY id;
+----
+1	a,b	2.5
+2	c	NULL
+
+#---------------------------------------------------------------------------
+# serialization.null.format 'NA': 'NA' is NULL, \N is a plain string
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,NA,NA'),
+    ('2,\N,3.5')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_null_format/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query IIII
+SELECT id, name, name IS NULL, amount FROM my_datalake.default.fixture_text_null_format ORDER BY id;
+----
+1	NULL	true	NULL
+2	\N	false	3.5
+
+#---------------------------------------------------------------------------
+# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse fails the scan
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,"a,b",1.5'),
+    ('2,c,2')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query III
+SELECT id, name, amount FROM my_datalake.default.fixture_text_opencsv ORDER BY id;
+----
+1	a,b	1.5
+2	c	2.0
+
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,a,oops')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# as in Hive, where every OpenCSVSerde column is a string, a value that does not parse as its column type is NULL
+query I
+SELECT amount FROM my_datalake.default.fixture_text_opencsv;
+----
+NULL
+
+# as OpenCSVSerde does: missing trailing fields are NULL and fields beyond the last column are ignored
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,"a,b"'),
+    ('2,c,2.5,"x,y",extra')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query III
+SELECT id, name, amount FROM my_datalake.default.fixture_text_opencsv ORDER BY id;
+----
+1	a,b	NULL
+2	c	2.5
+
+#---------------------------------------------------------------------------
+# skip.header.line.count: every file starts with that many lines, which are skipped
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.formats_csv_two_headers;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.formats_csv_footer;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_two_headers (id INTEGER, name VARCHAR) WITH (format = 'csv', 'skip.header.line.count' = '2');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('generated by a job'), ('id,name'), ('1,a'), ('2,b')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_two_headers/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('generated by a job'), ('id,name'), ('3,c')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_two_headers/more.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, name FROM my_datalake.default.formats_csv_two_headers ORDER BY id;
+----
+1	a
+2	b
+3	c
+
+# DuckDB writes at most one header line
+statement error
+INSERT INTO my_datalake.default.formats_csv_two_headers VALUES (4, 'd');
+----
+its files start with 2 header lines
+
+#---------------------------------------------------------------------------
+# skip.footer.line.count: reading and writing are refused rather than returning the footer lines as rows
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_footer (id INTEGER, name VARCHAR) WITH (format = 'csv', 'skip.footer.line.count' = '1');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_footer;
+----
+has 'skip.footer.line.count' set, which DuckDB can not read or write
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_footer VALUES (1, 'a');
+----
+has 'skip.footer.line.count' set, which DuckDB can not read or write
+
+#---------------------------------------------------------------------------
+# tables this extension writes; a table property overrides the SerDe property of the same name
+#---------------------------------------------------------------------------
+foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+# field.delim '1' is the byte \001
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_byte_delim (id INTEGER, name VARCHAR) WITH (format = 'csv', 'field.delim' = '1');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_byte_delim VALUES (1, 'a,b'), (2, NULL);
+
+query I
+SELECT replace(replace(content, chr(1), '<01>'), chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_byte_delim/*.csv');
+----
+1<01>a,b<nl>2<01>\N<nl>
+
+query III
+SELECT id, name, name IS NULL FROM my_datalake.default.formats_csv_byte_delim ORDER BY id;
+----
+1	a,b	false
+2	NULL	true
+
+# serialization.null.format '': NULL is an empty field. LazySimpleSerDe does not quote, so an empty string would be
+# an empty field too and read back as NULL: it can not be written
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_empty_null (id INTEGER, name VARCHAR, amount DOUBLE) WITH (format = 'csv', 'serialization.null.format' = '');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_empty_null VALUES (1, NULL, NULL), (2, 'b', 2.5);
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_empty_null VALUES (3, '', 3.5);
+----
+or is the table's NULL string ''
+
+query I
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_empty_null/*.csv');
+----
+1,,<nl>2,b,2.5<nl>
+
+query IIII
+SELECT id, name, name IS NULL, amount FROM my_datalake.default.formats_csv_empty_null ORDER BY id;
+----
+1	NULL	true	NULL
+2	b	false	2.5
+
+# a string that is the NULL string would read back as NULL: it can not be written
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_backslash_n (id INTEGER, name VARCHAR) WITH (format = 'csv');
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_backslash_n VALUES (1, '\N'), (2, NULL);
+----
+or is the table's NULL string '\N'
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_backslash_n VALUES (1, 'x\Ny'), (2, NULL);
+
+query III
+SELECT id, name, name IS NULL FROM my_datalake.default.formats_csv_backslash_n ORDER BY id;
+----
+1	x\Ny	false
+2	NULL	true
+
+# OpenCSVSerde has no NULL: NULL is written as an empty field, which reads back as an empty string, as in Hive
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_opencsv (id INTEGER, name VARCHAR) WITH (format = 'csv', quote = '"');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_opencsv VALUES (1, 'a,b'), (2, NULL), (3, '');
+
+query I
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv/*.csv');
+----
+"1","a,b"<nl>"2",<nl>"3",""<nl>
+
+query III
+SELECT id, name, name IS NULL FROM my_datalake.default.formats_csv_opencsv ORDER BY id;
+----
+1	a,b	false
+2	(empty)	false
+3	(empty)	false
+
+# a separator of more than one byte can be read, but not written
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_wide (id INTEGER, name VARCHAR) WITH (format = 'csv', quote = '"');
+
+# a table property overrides the SerDe property of the same name
+statement ok
+ALTER TABLE my_datalake.default.formats_csv_wide SET ('separatorChar' = '¦');
+
+statement ok
+COPY (SELECT '1¦x' AS line) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_wide/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, name FROM my_datalake.default.formats_csv_wide;
+----
+1	x
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_wide VALUES (2, 'y');
+----
+DuckDB writes single-byte field delimiters only
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_wide;
+
+# nested columns are stored with collection delimiters, which DuckDB can not read or write
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_nested (id INTEGER, tags VARCHAR[]) WITH (format = 'csv');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_nested;
+----
+has the nested column 'tags' (array<string>)
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_nested VALUES (1, ['a']);
+----
+has the nested column 'tags' (array<string>)
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_nested;
+
+# leading zeros do not count towards a line count's digits
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_zeros (id INTEGER) WITH (format = 'csv', 'skip.header.line.count' = '0000000000000000000001');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('header'), ('7')) t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_zeros/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query I
+SELECT id FROM my_datalake.default.formats_csv_zeros;
+----
+7
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_zeros;
+
+# INSERT into a table with a header line: the file starts with the column names
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_header_ctas (id INTEGER, name VARCHAR) WITH (format = 'csv', 'skip.header.line.count' = '1');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_header_ctas VALUES (1, 'a');
+
+query II
+SELECT id, name FROM my_datalake.default.formats_csv_header_ctas;
+----
+1	a
+
+# properties DuckDB can not read with are refused
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'field.delim' = '-1');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+only ASCII delimiters other than NUL and line breaks are supported
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'field.delim' = 'é');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+only ASCII delimiters other than NUL and line breaks are supported
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'field.delim' = '0');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+only ASCII delimiters other than NUL and line breaks are supported
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'escape.delim' = '\');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+has 'escape.delim' set, which DuckDB can not read or write
+
+statement error
+INSERT INTO my_datalake.default.formats_csv_bad VALUES (1);
+----
+has 'escape.delim' set, which DuckDB can not read or write
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'skip.header.line.count' = '99999999999999999999');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+has an invalid 'skip.header.line.count'
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+# more properties DuckDB can not read with; each is refused with the table named
+foreach property 'field.delim'='10' 'field.delim'='N' 'serialization.encoding'='GBK' 'serialization.last.column.takes.rest'='true'
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER, name VARCHAR) WITH (format = 'csv', {property});
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+Hive table 'default.formats_csv_bad'
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+endloop
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER, name VARCHAR) WITH (format = 'csv', quote = '"', 'quoteChar' = 'é');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+has a quoteChar or escapeChar of more than one byte
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+# SerDe property keys are case-sensitive, as in Hive: 'Field.Delim' is not the delimiter
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER, name VARCHAR) WITH (format = 'csv', 'Field.Delim' = '|');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_bad VALUES (1, 'a|b');
+
+query II
+SELECT id, name FROM my_datalake.default.formats_csv_bad;
+----
+1	a|b
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+# a line count must be a non-negative number
+foreach count -1 abc
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'skip.header.line.count' = '{count}');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+has an invalid 'skip.header.line.count'
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+endloop
+
+# a byte code may carry a sign: '+9' is a tab
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_signed_delim (id INTEGER, name VARCHAR) WITH (format = 'csv', 'field.delim' = '+9');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_signed_delim VALUES (1, 'a');
+
+query I
+SELECT replace(replace(content, chr(9), '<tab>'), chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_signed_delim/*.csv');
+----
+1<tab>a<nl>
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_signed_delim;
+
+# Hive skips header and footer lines in JSON tables too; DuckDB's JSON reader and writer can not, so both are refused
+foreach property skip.header.line.count skip.footer.line.count
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.formats_json_lines;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_json_lines (id INTEGER) WITH (format = 'json', '{property}' = '1');
+
+statement error
+SELECT * FROM my_datalake.default.formats_json_lines;
+----
+which DuckDB can not read or write
+
+statement error
+INSERT INTO my_datalake.default.formats_json_lines VALUES (1);
+----
+which DuckDB can not read or write
+
+statement ok
+DROP TABLE my_datalake.default.formats_json_lines;
+
+endloop
+
+foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_header_ctas
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop
+
+#---------------------------------------------------------------------------
+# hive_scan: an empty field is NULL, as in read_csv, unless nullstr says otherwise; quote does not change that
+#---------------------------------------------------------------------------
+statement ok
+DETACH my_datalake;
+
+query IIII
+SELECT id, name, name IS NULL, amount FROM hive_scan('{DEFAULT_S3_LOCATION}/fixture/fixture_text_null_format', format := 'csv',
+    schema := {id: 'INTEGER', name: 'VARCHAR', amount: 'VARCHAR'})
+ORDER BY id;
+----
+1	NA	false	NA
+2	\N	false	3.5
+
+query IIII
+SELECT id, name, name IS NULL, amount FROM hive_scan('{DEFAULT_S3_LOCATION}/fixture/fixture_text_null_format', format := 'csv', quote := '"',
+    schema := {id: 'INTEGER', name: 'VARCHAR', amount: 'VARCHAR'})
+ORDER BY id;
+----
+1	NA	false	NA
+2	\N	false	3.5
+
+query IIII
+SELECT id, name, name IS NULL, amount FROM hive_scan('{DEFAULT_S3_LOCATION}/fixture/fixture_text_null_format', format := 'csv', nullstr := 'NA',
+    schema := {id: 'INTEGER', name: 'VARCHAR', amount: 'DOUBLE'})
+ORDER BY id;
+----
+1	NULL	true	NULL
+2	\N	false	3.5

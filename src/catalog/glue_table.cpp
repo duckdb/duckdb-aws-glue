@@ -86,10 +86,12 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->table = this;
 	scan_info->root_location = latest_info.location;
 	scan_info->file_format = latest_info.GetFileFormat();
-	scan_info->delimiter = latest_info.GetFieldDelimiter();
-	scan_info->quote = latest_info.GetQuoteCharacter();
-	scan_info->escape = latest_info.GetEscapeCharacter();
-	scan_info->header = latest_info.HasHeader();
+	if (IsTextFileFormat(scan_info->file_format)) {
+		latest_info.CheckTextSerdeSupported(scan_info->file_format);
+	}
+	if (scan_info->file_format == HiveFileFormat::CSV) {
+		scan_info->csv_options = latest_info.GetCSVOptions();
+	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

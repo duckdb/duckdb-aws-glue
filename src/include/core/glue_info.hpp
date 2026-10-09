@@ -2,10 +2,14 @@
 
 #include "duckdb/common/enums/file_compression_type.hpp"
 #include "duckdb/common/string.hpp"
+#include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
 namespace duckdb {
+
+class Serializer;
+class Deserializer;
 
 //! The (open) table format a Glue table is stored in, derived from the table parameters
 enum class GlueTableFormat : uint8_t { ICEBERG, DELTA, HUDI, HIVE, UNKNOWN };
@@ -44,6 +48,22 @@ bool IsTextFileFormat(HiveFileFormat format);
 //! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
 
+//! How the files of a csv table are read
+struct HiveCSVOptions {
+	string delimiter = ",";
+	string quote = "\"";
+	string escape = "\"";
+	//! The header lines every file starts with
+	idx_t skip_lines = 0;
+	string null_string;
+	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
+	bool serde_fields = false;
+
+public:
+	void Serialize(Serializer &serializer) const;
+	static HiveCSVOptions Deserialize(Deserializer &deserializer);
+};
+
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
 //! VIRTUAL_VIEW, GOVERNED, whatever a writer sets), so anything else is OTHER and the raw value is kept alongside.
 enum class GlueTableType : uint8_t { EXTERNAL_TABLE, VIRTUAL_VIEW, OTHER };
@@ -80,12 +100,6 @@ struct GlueTableInfo {
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
-	//! The CSV dialect to create a csv table with (CreateHiveTable); for a fetched table use GetFieldDelimiter(),
-	//! GetQuoteCharacter() and GetEscapeCharacter(). With a quote or escape character the table gets OpenCSVSerde
-	//! (which quotes), without both LazySimpleSerDe (which does not)
-	string csv_delimiter = ",";
-	string csv_quote;
-	string csv_escape;
 
 public:
 	bool IsView() const {
@@ -101,17 +115,16 @@ public:
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
 	string GetParameter(const string &key) const;
-	//! Look up a SerDe parameter (case-insensitive key), returns empty string if missing
-	string GetSerdeParameter(const string &key) const;
 	bool IsBucketed() const;
 	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
-	//! The field delimiter of a CSV table (field.delim / separatorChar), ',' when the SerDe does not say
+	bool IsOpenCSVSerde() const;
+	//! A property of the table as Hive hands it to the SerDe: a table parameter, else a SerDe parameter
+	bool TryGetProperty(const string &key, string &result) const;
+	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
 	string GetFieldDelimiter() const;
-	//! Whether the data files of a CSV table start with a header line (skip.header.line.count)
-	bool HasHeader() const;
 	//! The codec to write a csv / json table's files with (write.compression, else compressionType), uncompressed when
 	//! the table names none; throws for a codec DuckDB can not write. Files are read with the codec their extension
 	//! says, whatever the table records.
@@ -121,10 +134,24 @@ public:
 	string GetCodec(HiveFileFormat format) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
-	//! The quote character of a CSV table (quoteChar of OpenCSVSerde), '"' when the SerDe does not say
+	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
+	string GetNullFormat() const;
+	//! skip.header.line.count, 0 without
+	idx_t GetHeaderLineCount() const;
+	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
+	void CheckTextSerdeSupported(HiveFileFormat format) const;
+	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote
 	string GetQuoteCharacter() const;
-	//! The escape character of a CSV table (escapeChar of OpenCSVSerde), else the quote character
+	//! OpenCSVSerde's escapeChar, else its quote character; empty for LazySimpleSerDe
 	string GetEscapeCharacter() const;
+	//! How the files of a csv table are read
+	HiveCSVOptions GetCSVOptions() const;
+
+private:
+	//! A non-negative integer property, 0 when not set
+	idx_t GetCountProperty(const string &key) const;
+	//! An OpenCSVSerde character property (its first character), 'fallback' when not set
+	string GetOpenCSVCharacter(const string &key, const string &fallback) const;
 };
 
 //! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB

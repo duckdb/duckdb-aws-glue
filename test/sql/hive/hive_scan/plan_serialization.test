@@ -25,6 +25,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.ps_lines;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.ps_text;
+
+statement ok
 CREATE TABLE my_datalake.default.ps_orders (id INTEGER, amount DECIMAL(10,2), dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
@@ -36,6 +39,15 @@ SELECT 1 AS id, 'start' AS kind UNION ALL SELECT 2, 'stop';
 
 statement ok
 CREATE TABLE my_datalake.default.ps_lines WITH (format = 'json') AS SELECT 7 AS n, {'a': 1} AS s;
+
+# a header line, a NULL string, a quote that is a plain character, a short row and a value that does not parse
+statement ok
+CREATE TABLE my_datalake.default.ps_text (id INTEGER, name VARCHAR, amount DOUBLE)
+WITH (format = 'csv', 'skip.header.line.count' = '1', 'serialization.null.format' = 'NA');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('id,name,amount'), ('1,"a",1.5'), ('2,NA,x'), ('3,c')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_text/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
 # with the verifier on, every plan below is serialized, deserialized and run as deserialized
 statement ok
@@ -79,6 +91,14 @@ SELECT id FROM my_datalake.default.ps_events WHERE id + 1 > 2;
 ----
 2
 
+# a text table keeps its SerDe's rules
+query IIII
+SELECT id, name, name IS NULL, amount FROM my_datalake.default.ps_text ORDER BY id;
+----
+1	"a"	false	1.5
+2	NULL	true	NULL
+3	c	false	NULL
+
 query II
 SELECT n, s.a FROM my_datalake.default.ps_lines;
 ----
@@ -115,6 +135,9 @@ SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_orde
 
 statement ok
 SET debug_verify_serializer = false;
+
+statement ok
+DROP TABLE my_datalake.default.ps_text;
 
 statement ok
 DROP TABLE my_datalake.default.ps_lines;

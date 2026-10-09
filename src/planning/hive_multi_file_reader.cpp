@@ -8,13 +8,16 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
+#include "duckdb/common/multi_file/table_function_multi_file.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -531,10 +534,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(109, "partition_keys", info.partition_keys);
 	serializer.WriteProperty(110, "columns", info.names);
 	serializer.WriteProperty(111, "column_types", info.types);
-	serializer.WriteProperty(112, "delimiter", info.delimiter);
-	serializer.WriteProperty(113, "quote", info.quote);
-	serializer.WriteProperty(114, "escape", info.escape);
-	serializer.WriteProperty(115, "header", info.header);
+	serializer.WriteProperty(112, "csv_options", info.csv_options);
 }
 
 //! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
@@ -552,17 +552,16 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	info->partition_keys = deserializer.ReadProperty<vector<string>>(109, "partition_keys");
 	info->names = deserializer.ReadProperty<vector<Identifier>>(110, "columns");
 	info->types = deserializer.ReadProperty<vector<LogicalType>>(111, "column_types");
-	info->delimiter = deserializer.ReadProperty<string>(112, "delimiter");
-	info->quote = deserializer.ReadProperty<string>(113, "quote");
-	info->escape = deserializer.ReadProperty<string>(114, "escape");
-	info->header = deserializer.ReadProperty<bool>(115, "header");
+	info->csv_options = deserializer.ReadProperty<HiveCSVOptions>(112, "csv_options");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
 	}
+	vector<GluePartitionInfo> partition_infos;
 	for (idx_t i = 0; i < partitions.size(); i++) {
-		info->partitions.push_back({std::move(partitions[i]), std::move(locations[i])});
+		partition_infos.push_back({std::move(partitions[i]), std::move(locations[i])});
 	}
+	info->SetPartitions(std::move(partition_infos));
 	unique_ptr<FunctionData> bind_data;
 	function = BoundTableFunction(BindHiveScan(context, std::move(info), bind_data));
 	return bind_data;
@@ -587,7 +586,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	child_list_t<Value> data_columns;
 	for (idx_t i = 0; i < scan_info->names.size(); i++) {
 		if (scan_info->GetPartitionKeyIndex(scan_info->names[i].GetIdentifierName()) == DConstants::INVALID_INDEX) {
-			data_columns.emplace_back(scan_info->names[i], Value(scan_info->types[i].ToString()));
+			// with SerDe fields every column is read as text; InitializeReader converts it to the column's type
+			auto type = scan_info->csv_options.serde_fields ? LogicalType::VARCHAR : scan_info->types[i];
+			data_columns.emplace_back(scan_info->names[i], Value(type.ToString()));
 		}
 	}
 	named_argument_map_t param_map;
@@ -602,12 +603,19 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		function_name = "read_csv";
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["auto_detect"] = Value::BOOLEAN(false);
-		param_map["header"] = Value::BOOLEAN(scan_info->header);
-		param_map["delim"] = Value(scan_info->delimiter);
-		param_map["quote"] = Value(scan_info->quote);
-		param_map["escape"] = Value(scan_info->escape);
+		param_map["header"] = Value::BOOLEAN(false);
+		param_map["skip"] = Value::BIGINT(NumericCast<int64_t>(scan_info->csv_options.skip_lines));
+		param_map["delim"] = Value(scan_info->csv_options.delimiter);
+		param_map["quote"] = Value(scan_info->csv_options.quote);
+		param_map["escape"] = Value(scan_info->csv_options.escape);
+		param_map["nullstr"] = Value(scan_info->csv_options.null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
+		if (scan_info->csv_options.serde_fields) {
+			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
+			param_map["null_padding"] = Value::BOOLEAN(true);
+			param_map["strict_mode"] = Value::BOOLEAN(false);
+		}
 		break;
 	case HiveFileFormat::JSON:
 		// one JSON object per line, keys matched to the columns by name
@@ -623,6 +631,14 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		break;
 	}
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
+	if (scan_info->csv_options.serde_fields) {
+		// read_csv would convert the text itself, strictly: have the column mapping cast it, so InitializeReader can
+		// make the casts TRY_CASTs
+		auto &info = scan_function.function_info->Cast<TableFunctionMultiFileInfo>();
+		auto settings = info.settings;
+		settings.supports_cast_map = false;
+		scan_function.function_info = make_shared_ptr<TableFunctionMultiFileInfo>(info.function, std::move(settings));
+	}
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
 	// the format reader serializes its file list, which would expand this lazy list (listing S3) while the
@@ -940,6 +956,41 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	// the filename / file_index virtual columns
 	MultiFileReader::FinalizeBind(reader_data, file_options, options, global_columns, global_column_ids, context,
 	                              global_state);
+}
+
+//! Make the cast of a field's text to its column's type a TRY_CAST
+static void MakeTryCast(ClientContext &context, unique_ptr<Expression> &expr) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (BoundCastExpression::IsTryCast(cast) ||
+	    BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	auto target_type = cast.GetReturnType();
+	auto child = std::move(BoundCastExpression::ChildMutable(cast));
+	expr = BoundCastExpression::AddCastToType(context, std::move(child), target_type, true);
+}
+
+ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
+                                                           const MultiFileBindData &bind_data,
+                                                           const vector<MultiFileColumnDefinition> &global_columns,
+                                                           const vector<ColumnIndex> &global_column_ids,
+                                                           optional_ptr<TableFilterSet> table_filters,
+                                                           ClientContext &context, MultiFileGlobalState &gstate) {
+	auto result = MultiFileReader::InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
+	                                                table_filters, context, gstate);
+	if (!ScanInfo().csv_options.serde_fields) {
+		return result;
+	}
+	if (!reader_data.reader->expression_map.empty()) {
+		throw InternalException("Hive text table '%s': a filter was pushed into read_csv", ScanInfo().Describe());
+	}
+	for (auto &expr : reader_data.expressions) {
+		MakeTryCast(context, expr);
+	}
+	return result;
 }
 
 } // namespace duckdb

@@ -1,8 +1,13 @@
 #include "core/glue_info.hpp"
+#include "core/helpers.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/common/limits.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
 
 namespace duckdb {
 
@@ -65,15 +70,6 @@ HiveFileFormat HiveFileFormatFromString(const string &format) {
 	throw BinderException("Unknown Hive file format '%s', expected 'parquet', 'csv', 'json' or 'avro'", format);
 }
 
-string GlueTableInfo::GetSerdeParameter(const string &key) const {
-	for (auto &entry : serde_parameters) {
-		if (StringUtil::CIEquals(entry.first, key)) {
-			return entry.second;
-		}
-	}
-	return string();
-}
-
 bool GlueTableInfo::IsBucketed() const {
 	// NumberOfBuckets is -1 or 0 for unbucketed tables but can also be unset on bucketed ones
 	return !bucket_columns.empty();
@@ -125,20 +121,129 @@ HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	                              database_name, name, serde_library);
 }
 
-string GlueTableInfo::GetFieldDelimiter() const {
-	// LazySimpleSerDe: field.delim, OpenCSVSerde: separatorChar
-	auto delimiter = GetSerdeParameter("field.delim");
-	if (delimiter.empty()) {
-		delimiter = GetSerdeParameter("separatorChar");
-	}
-	if (delimiter.empty()) {
-		return ",";
-	}
-	return delimiter;
+bool GlueTableInfo::IsOpenCSVSerde() const {
+	return StringUtil::Contains(StringUtil::Lower(serde_library), "opencsvserde");
 }
 
-bool GlueTableInfo::HasHeader() const {
-	return GetParameter("skip.header.line.count") == "1";
+bool GlueTableInfo::TryGetProperty(const string &key, string &result) const {
+	// as Hive: the table's parameters override the SerDe's, and keys are case-sensitive
+	for (auto properties : {&parameters, &serde_parameters}) {
+		auto entry = properties->find(key);
+		if (entry != properties->end()) {
+			result = entry->second;
+			return true;
+		}
+	}
+	return false;
+}
+
+string GlueTableInfo::GetOpenCSVCharacter(const string &key, const string &fallback) const {
+	string value;
+	if (!TryGetProperty(key, value) || value.empty()) {
+		return fallback;
+	}
+	string character;
+	if (!TryFirstCharacter(value, character)) {
+		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected text", database_name,
+		                            name, key, value);
+	}
+	return character;
+}
+
+//! Hive's LazyUtils.getByte: a byte code from -128 to 127 ('1' is '\001'), else the first character
+static string LazySimpleSeparator(const GlueTableInfo &table, const string &value) {
+	if (value.empty()) {
+		return "\x01";
+	}
+	int64_t number;
+	auto separator = TryParseInteger(value, -128, 127, number) ? static_cast<uint8_t>(number & 0xFF)
+	                                                           : static_cast<uint8_t>(value[0]);
+	if (separator == 0 || separator == '\n' || separator == '\r' || separator >= 0x80) {
+		throw NotImplementedException("Hive table '%s.%s' has the field delimiter '%s', a byte DuckDB can not split "
+		                              "fields on; only ASCII delimiters other than NUL and line breaks are supported",
+		                              table.database_name, table.name, value);
+	}
+	return string(1, static_cast<char>(separator));
+}
+
+string GlueTableInfo::GetFieldDelimiter() const {
+	if (IsOpenCSVSerde()) {
+		return GetOpenCSVCharacter("separatorChar", ",");
+	}
+	string delimiter;
+	if (!TryGetProperty("field.delim", delimiter)) {
+		TryGetProperty("serialization.format", delimiter);
+	}
+	return LazySimpleSeparator(*this, delimiter);
+}
+
+string GlueTableInfo::GetNullFormat() const {
+	if (IsOpenCSVSerde()) {
+		return string();
+	}
+	string null_format;
+	return TryGetProperty("serialization.null.format", null_format) ? null_format : "\\N";
+}
+
+idx_t GlueTableInfo::GetCountProperty(const string &key) const {
+	string value;
+	if (!TryGetProperty(key, value) || value.empty()) {
+		return 0;
+	}
+	int64_t count;
+	if (!TryParseInteger(value, 0, NumericLimits<int32_t>::Maximum(), count)) {
+		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected a non-negative number",
+		                            database_name, name, key, value);
+	}
+	return NumericCast<idx_t>(count);
+}
+
+idx_t GlueTableInfo::GetHeaderLineCount() const {
+	return GetCountProperty("skip.header.line.count");
+}
+
+void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
+	D_ASSERT(IsTextFileFormat(format));
+	auto refuse = [&](const string &what) {
+		throw NotImplementedException("Hive table '%s.%s' %s, which DuckDB can not read or write", database_name, name,
+		                              what);
+	};
+	if (GetCountProperty("skip.footer.line.count") > 0) {
+		refuse("has 'skip.footer.line.count' set");
+	}
+	if (format == HiveFileFormat::JSON) {
+		if (GetHeaderLineCount() > 0) {
+			refuse("has 'skip.header.line.count' set on JSON files");
+		}
+		return;
+	}
+	for (auto &column : columns) {
+		if (column.type.find('<') != string::npos) {
+			refuse(StringUtil::Format("has the nested column '%s' (%s), stored with collection delimiters", column.name,
+			                          column.type));
+		}
+	}
+	if (IsOpenCSVSerde()) {
+		if (GetQuoteCharacter().size() > 1 || GetEscapeCharacter().size() > 1) {
+			refuse("has a quoteChar or escapeChar of more than one byte");
+		}
+		return;
+	}
+	string value;
+	if (TryGetProperty("escape.delim", value)) {
+		refuse("has 'escape.delim' set");
+	}
+	if (TryGetProperty("serialization.encoding", value) && !StringUtil::CIEquals(value, "UTF-8") &&
+	    !StringUtil::CIEquals(value, "UTF8")) {
+		refuse(StringUtil::Format("has the 'serialization.encoding' '%s' (DuckDB reads UTF-8)", value));
+	}
+	if (TryGetProperty("serialization.last.column.takes.rest", value) && StringUtil::CIEquals(value, "true")) {
+		refuse("has 'serialization.last.column.takes.rest' set");
+	}
+	if (StringUtil::Contains(GetNullFormat(), GetFieldDelimiter())) {
+		refuse(StringUtil::Format("has the field delimiter '%s' in its NULL string '%s'", GetFieldDelimiter(),
+		                          GetNullFormat()));
+	}
 }
 
 FileCompressionType GlueTableInfo::GetTextCompression() const {
@@ -191,21 +296,24 @@ string GlueTableInfo::GetCompressionLevel() const {
 }
 
 string GlueTableInfo::GetQuoteCharacter() const {
-	// OpenCSVSerde: quoteChar. LazySimpleSerDe does not quote at all, but DuckDB writes (and reads) quoted fields
-	// with the '"' it defaults to, which is also OpenCSVSerde's default
-	auto quote = GetSerdeParameter("quoteChar");
-	if (quote.empty()) {
-		return "\"";
-	}
-	return quote;
+	// LazySimpleSerDe does not quote
+	return IsOpenCSVSerde() ? GetOpenCSVCharacter("quoteChar", "\"") : string();
 }
 
 string GlueTableInfo::GetEscapeCharacter() const {
-	auto escape = GetSerdeParameter("escapeChar");
-	if (escape.empty()) {
-		return GetQuoteCharacter();
-	}
-	return escape;
+	return IsOpenCSVSerde() ? GetOpenCSVCharacter("escapeChar", GetQuoteCharacter()) : string();
+}
+
+HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
+	HiveCSVOptions options;
+	options.delimiter = GetFieldDelimiter();
+	options.quote = GetQuoteCharacter();
+	options.escape = GetEscapeCharacter();
+	options.skip_lines = GetHeaderLineCount();
+	// OpenCSVSerde has no NULL: "\n" matches no unquoted field
+	options.null_string = IsOpenCSVSerde() ? "\n" : GetNullFormat();
+	options.serde_fields = true;
+	return options;
 }
 
 GlueTableFormat GlueTableInfo::GetFormat() const {
@@ -269,6 +377,26 @@ string GlueTableInfo::GetMetadataLocation() const {
 bool GlueTableInfo::IsFormatParameter(const string &key) {
 	return StringUtil::CIEquals(key, "table_type") || StringUtil::CIEquals(key, "spark.sql.sources.provider") ||
 	       StringUtil::CIEquals(key, "metadata_location");
+}
+
+void HiveCSVOptions::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty(100, "delimiter", delimiter);
+	serializer.WriteProperty(101, "quote", quote);
+	serializer.WriteProperty(102, "escape", escape);
+	serializer.WriteProperty(103, "skip_lines", skip_lines);
+	serializer.WriteProperty(104, "null_string", null_string);
+	serializer.WriteProperty(105, "serde_fields", serde_fields);
+}
+
+HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
+	HiveCSVOptions result;
+	result.delimiter = deserializer.ReadProperty<string>(100, "delimiter");
+	result.quote = deserializer.ReadProperty<string>(101, "quote");
+	result.escape = deserializer.ReadProperty<string>(102, "escape");
+	result.skip_lines = deserializer.ReadProperty<idx_t>(103, "skip_lines");
+	result.null_string = deserializer.ReadProperty<string>(104, "null_string");
+	result.serde_fields = deserializer.ReadProperty<bool>(105, "serde_fields");
+	return result;
 }
 
 } // namespace duckdb
