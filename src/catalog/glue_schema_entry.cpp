@@ -718,6 +718,11 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 			}
 			throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
 		}
+		if (current.GetFileFormat() == HiveFileFormat::CSV) {
+			throw CatalogException("Can not drop column \"%s\" from table \"%s\": DROP COLUMN is not "
+			                       "supported for csv (text) tables",
+			                       name, table_name);
+		}
 		// Glue keeps BucketColumns and SortColumns as they are, naming a column the table no longer has
 		for (auto &bucket_column : current.bucket_columns) {
 			if (StringUtil::CIEquals(bucket_column, name)) {
