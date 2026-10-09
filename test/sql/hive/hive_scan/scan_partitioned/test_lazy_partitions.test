@@ -152,7 +152,7 @@ SELECT count(*) FROM lp_view;
 query II
 EXPLAIN SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = '2016-05-15';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*
+physical_plan	<REGEX>:.*HIVE_SCAN.*
 
 # hive_scan with an explicit partition list never asks Glue
 statement ok

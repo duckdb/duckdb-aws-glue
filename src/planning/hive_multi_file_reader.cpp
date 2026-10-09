@@ -560,9 +560,11 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
 	}
+	vector<GluePartitionInfo> partition_infos;
 	for (idx_t i = 0; i < partitions.size(); i++) {
-		info->partitions.push_back({std::move(partitions[i]), std::move(locations[i])});
+		partition_infos.push_back({std::move(partitions[i]), std::move(locations[i])});
 	}
+	info->SetPartitions(std::move(partition_infos));
 	unique_ptr<FunctionData> bind_data;
 	function = BoundTableFunction(BindHiveScan(context, std::move(info), bind_data));
 	return bind_data;
