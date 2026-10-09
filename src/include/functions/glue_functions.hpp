@@ -38,6 +38,8 @@ TableFunction GetGlueSetTableLocationFunction();
 //! ALTER TABLE ... REPLACE COLUMNS, replaces all data columns of the table; the partition keys are kept, the bucketing
 //! and sort columns must be given
 TableFunction GetGlueReplaceColumnsFunction();
+//! glue_change_column: rename, retype, comment and move one data column of a Hive table (Hive's CHANGE COLUMN)
+TableFunction GetGlueChangeColumnFunction();
 //! glue_alter_table(table, [{action, if_not_exists, if_exists, partition, new_partition, location}, ...]): the
 //! partition DDL of one ALTER TABLE statement (what the glue_hive_ddl grammar extension turns the SQL into).
 //! 'partition' and 'new_partition' are lists of {key, value}; the actions are validated against Glue before any

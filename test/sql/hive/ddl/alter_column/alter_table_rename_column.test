@@ -1,0 +1,143 @@
+# name: test/sql/hive/ddl/alter_column/alter_table_rename_column.test
+# description: ALTER TABLE RENAME COLUMN on a Hive table registered in Glue
+# group: [alter_column]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table rename_col_csv rename_col_parquet rename_col_bucketed
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+#---------------------------------------------------------------------------
+# csv files are read by position, so renaming a column keeps its data
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rename_col_csv (col1 VARCHAR, col2 INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.rename_col_csv VALUES ('Ada', 1815, '2024-01-01');
+
+statement ok
+COMMENT ON COLUMN my_datalake.default.rename_col_csv.col1 IS 'first name';
+
+statement ok
+ALTER TABLE my_datalake.default.rename_col_csv RENAME COLUMN col1 TO first_name;
+
+statement ok
+ALTER TABLE my_datalake.default.rename_col_csv RENAME COLUMN COL2 TO born;
+
+query III
+SELECT column_name, data_type, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'rename_col_csv' ORDER BY column_index;
+----
+first_name	VARCHAR	first name
+born	INTEGER	NULL
+dt	VARCHAR	NULL
+
+# a rename that only changes the case is a rename
+statement ok
+ALTER TABLE my_datalake.default.rename_col_csv RENAME COLUMN born TO Born;
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'rename_col_csv' AND column_name ILIKE 'born';
+----
+Born
+
+statement ok
+ALTER TABLE my_datalake.default.rename_col_csv RENAME COLUMN Born TO born;
+
+query III
+SELECT first_name, born, dt FROM my_datalake.default.rename_col_csv;
+----
+Ada	1815	2024-01-01
+
+# errors: nothing is changed
+statement error
+ALTER TABLE my_datalake.default.rename_col_csv RENAME COLUMN nope TO other;
+----
+does not have a column with name "nope"
+
+statement error
+ALTER TABLE my_datalake.default.rename_col_csv RENAME COLUMN first_name TO BORN;
+----
+Column with name "BORN" already exists
+
+statement error
+ALTER TABLE my_datalake.default.rename_col_csv RENAME COLUMN first_name TO dt;
+----
+Column with name "dt" already exists
+
+statement error
+ALTER TABLE my_datalake.default.rename_col_csv RENAME COLUMN dt TO day;
+----
+is a partition key of table "rename_col_csv" and can not be renamed
+
+query I
+SELECT first_name FROM my_datalake.default.rename_col_csv;
+----
+Ada
+
+#---------------------------------------------------------------------------
+# parquet columns are matched by name, a rename would lose the existing data
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rename_col_parquet (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.rename_col_parquet VALUES (1, 'Ada');
+
+statement error
+ALTER TABLE my_datalake.default.rename_col_parquet RENAME COLUMN name TO first_name;
+----
+its data files are matched to the columns by name
+
+query II
+SELECT id, name FROM my_datalake.default.rename_col_parquet;
+----
+1	Ada
+
+# a SerDe the extension can not read is refused
+statement error
+ALTER TABLE my_datalake.default.fixture_orc RENAME COLUMN amount TO total;
+----
+uses SerDe 'org.apache.hadoop.hive.ql.io.orc.OrcSerde'
+
+#---------------------------------------------------------------------------
+# bucketing and sort columns are named in the table definition
+#---------------------------------------------------------------------------
+statement ok
+SET glue_create_bucketed_tables = true;
+
+statement ok
+CREATE TABLE my_datalake.default.rename_col_bucketed (id INTEGER, name VARCHAR) WITH (
+    format = 'csv', BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'name', 'SortOrder': 1}]);
+
+statement error
+ALTER TABLE my_datalake.default.rename_col_bucketed RENAME COLUMN id TO key;
+----
+is a bucket column of table "rename_col_bucketed" and can not be renamed
+
+statement error
+ALTER TABLE my_datalake.default.rename_col_bucketed RENAME COLUMN name TO label;
+----
+is a sort column of table "rename_col_bucketed" and can not be renamed
+
+foreach table rename_col_csv rename_col_parquet rename_col_bucketed
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

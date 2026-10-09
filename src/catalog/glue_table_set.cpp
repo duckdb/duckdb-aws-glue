@@ -23,12 +23,19 @@ unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
 		return GlueView::FromTableInfo(catalog, schema, table);
 	}
 	CreateTableInfo info(schema, Identifier(table.name));
+	auto add_column = [&](const GlueColumn &column) {
+		ColumnDefinition definition(Identifier(column.name), GlueTypes::ToLogicalType(column.type));
+		if (!column.comment.empty()) {
+			definition.SetComment(Value(column.comment));
+		}
+		info.columns.AddColumn(std::move(definition));
+	};
 	for (auto &column : table.columns) {
-		info.columns.AddColumn(ColumnDefinition(Identifier(column.name), GlueTypes::ToLogicalType(column.type)));
+		add_column(column);
 	}
 	// Hive tables store their partition columns separately, they are regular (trailing) columns for a scan
 	for (auto &column : table.partition_keys) {
-		info.columns.AddColumn(ColumnDefinition(Identifier(column.name), GlueTypes::ToLogicalType(column.type)));
+		add_column(column);
 	}
 	auto entry = make_uniq<GlueTable>(catalog, schema, info, table);
 	SetTableTypeTag(*entry);

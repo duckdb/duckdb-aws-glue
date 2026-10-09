@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
+#include "duckdb/common/optional.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
 
 #include "core/glue_info.hpp"
@@ -27,6 +28,22 @@ struct GlueCreateTableOptions {
 	vector<GlueColumn> sort_columns;
 	//! Every other option is stored as a table parameter in Glue
 	unordered_map<string, string> parameters;
+};
+
+//! Where a changed column goes: where it is, to the front, or after another column
+enum class GlueColumnPosition : uint8_t { UNCHANGED, FIRST, AFTER };
+
+//! A change to one data column of a Hive table; what is not set stays as it is
+struct GlueColumnChange {
+	//! The column to change
+	string name;
+	optional<string> new_name;
+	optional<LogicalType> new_type;
+	//! An empty comment removes the comment
+	optional<string> comment;
+	GlueColumnPosition position = GlueColumnPosition::UNCHANGED;
+	//! The column to move it after, for GlueColumnPosition::AFTER
+	string after;
 };
 
 //! A Glue database, exposed as a DuckDB schema
@@ -70,10 +87,14 @@ public:
 	static GlueCreateTableOptions ParseCreateTableOptions(ClientContext &context, const CreateTableInfo &create_info);
 	//! BucketColumns, NumberOfBuckets or SortColumns (case-insensitive)
 	static bool IsBucketingOption(const string &key);
-	//! Type changes Hive can read back from the existing parquet files: widening only
+	//! Type changes Hive can read back from the existing files: widening only
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
 	//! Replace the cached entry of an altered table with what Glue stored
 	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
+	//! Change one data column of a Hive table in Glue and refresh the entry; the caller has checked that the table is
+	//! a Hive table. A change the existing data files would read differently is refused: renaming a column of files
+	//! matched to the columns by name, and moving a column of files read by position.
+	GlueTable &ChangeColumn(ClientContext &context, const string &table_name, const GlueColumnChange &change);
 
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,

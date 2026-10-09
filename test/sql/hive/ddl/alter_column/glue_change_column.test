@@ -1,0 +1,264 @@
+# name: test/sql/hive/ddl/alter_column/glue_change_column.test
+# description: glue_change_column renames, retypes, comments and moves one data column of a Hive table, as Hive's CHANGE COLUMN
+# group: [alter_column]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table change_col change_col_csv change_col_sorted change_col_bucketed change_col_case
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+#---------------------------------------------------------------------------
+# parquet: files are matched by name, so a column can be retyped, commented and moved
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.change_col (id INTEGER, amount FLOAT, note VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.change_col VALUES (1, 9.5, 'a', '2024-01-01');
+
+# all three in one call; it returns the data columns as they are afterwards
+query I
+SELECT columns FROM glue_change_column('my_datalake.default.change_col', 'amount', 'amount', 'DOUBLE', comment := 'in USD', first := true);
+----
+[{'name': amount, 'type': double, 'comment': in USD}, {'name': id, 'type': int, 'comment': NULL}, {'name': note, 'type': string, 'comment': NULL}]
+
+# the data follows: the moved and widened column still reads its values
+query III
+SELECT amount, id, note FROM my_datalake.default.change_col;
+----
+9.5	1	a
+
+# the comment stays unless a new one is given
+statement ok
+CALL glue_change_column('my_datalake.default.change_col', 'amount', 'amount', 'DOUBLE', after := 'note');
+
+query III
+SELECT name, type, comment FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.change_col'));
+----
+id	int	NULL
+note	string	NULL
+amount	double	in USD
+
+# a change that changes nothing succeeds (and does not write to Glue)
+statement ok
+CALL glue_change_column('my_datalake.default.change_col', 'amount', 'amount', 'DOUBLE', comment := 'in USD', after := 'note');
+
+# NULL removes the comment, as for COMMENT ON COLUMN
+statement ok
+CALL glue_change_column('my_datalake.default.change_col', 'amount', 'amount', 'DOUBLE', comment := NULL);
+
+query I
+SELECT comment FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.change_col')) WHERE name = 'amount';
+----
+NULL
+
+# Hive's type names, and moving a column to where it already is
+statement ok
+CALL glue_change_column('my_datalake.default.change_col', 'id', 'id', 'bigint', after := 'note');
+
+statement ok
+CALL glue_change_column('my_datalake.default.change_col', 'id', 'id', 'bigint', first := true);
+
+statement ok
+CALL glue_change_column('my_datalake.default.change_col', 'note', 'note', 'string', after := 'id');
+
+query II
+SELECT name, type FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.change_col'));
+----
+id	bigint
+note	string
+amount	double
+
+# the partition keys stay last
+query I
+SELECT list(column_name ORDER BY ordinal_position) FROM information_schema.columns WHERE table_catalog = 'my_datalake' AND table_name = 'change_col';
+----
+[id, note, amount, dt]
+
+#---------------------------------------------------------------------------
+# csv: files are read by position, so a column can be renamed and commented, but not moved
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.change_col_csv (id INTEGER, name VARCHAR) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.change_col_csv VALUES (1, 'a');
+
+statement ok
+CALL glue_change_column('my_datalake.default.change_col_csv', 'name', 'label', 'VARCHAR', comment := 'renamed');
+
+query II
+SELECT id, label FROM my_datalake.default.change_col_csv;
+----
+1	a
+
+# a rename that only changes the case is a rename
+statement ok
+CALL glue_change_column('my_datalake.default.change_col_csv', 'label', 'Label', 'VARCHAR');
+
+query I
+SELECT name FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.change_col_csv')) WHERE name ILIKE 'label';
+----
+Label
+
+statement ok
+CALL glue_change_column('my_datalake.default.change_col_csv', 'Label', 'label', 'VARCHAR');
+
+query II
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'change_col_csv' ORDER BY column_index;
+----
+id	NULL
+label	renamed
+
+#---------------------------------------------------------------------------
+# changes the existing files would read differently are refused
+#---------------------------------------------------------------------------
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'note', 'memo', 'VARCHAR');
+----
+Can not rename column "note" of table "change_col": its data files are matched to the columns by name
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col_csv', 'label', 'label', 'VARCHAR', first := true);
+----
+Can not move column "label" of table "change_col_csv": its data files are read by position
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'id', 'id', 'INTEGER');
+----
+Can not change column "id" of table "change_col" from BIGINT to INTEGER
+
+# the type is checked as given, as for ALTER COLUMN TYPE: Glue stores UINTEGER as bigint, but it is no widening
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'id', 'id', 'UINTEGER');
+----
+Can not change column "id" of table "change_col" from BIGINT to UINTEGER
+
+statement error
+ALTER TABLE my_datalake.default.change_col ALTER COLUMN id TYPE UINTEGER;
+----
+Can not change column "id" of table "change_col" from BIGINT to UINTEGER
+
+#---------------------------------------------------------------------------
+# other errors
+#---------------------------------------------------------------------------
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'dt', 'dt', 'VARCHAR', first := true);
+----
+Column "dt" is a partition key of table "change_col" and can not be moved
+
+# a partition key changed to what it is changes nothing
+statement ok
+CALL glue_change_column('my_datalake.default.change_col', 'dt', 'dt', 'VARCHAR');
+
+# the type of the partition key stays, so the error is about the comment
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'dt', 'dt', 'VARCHAR', comment := 'day');
+----
+Comments on the partition keys of Glue tables are not supported yet
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'dt', 'dt', 'BIGINT');
+----
+Column "dt" is a partition key of table "change_col" and its type can not be changed
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col_csv', 'id', 'id', 'VARCHAR', comment := 'x', first := true, after := 'label');
+----
+a column goes either first or after another column, not both
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'nope', 'nope', 'VARCHAR');
+----
+Table "change_col" does not have a column with name "nope"
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col_csv', 'label', 'id', 'VARCHAR');
+----
+Column with name "id" already exists in table "change_col_csv"
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'amount', 'amount', 'DOUBLE', after := 'nope');
+----
+Table "change_col" does not have another column with name "nope" to move "amount" after
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col', 'amount', 'amount', 'DOUBLE', after := 'amount');
+----
+Table "change_col" does not have another column with name "amount" to move "amount" after
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col', NULL, 'x', 'VARCHAR');
+----
+the column names and the type must not be NULL
+
+# a refused change leaves the table as it was
+query II
+SELECT name, type FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.change_col'));
+----
+id	bigint
+note	string
+amount	double
+
+statement ok
+SET glue_create_bucketed_tables = true;
+
+statement ok
+CREATE TABLE my_datalake.default.change_col_sorted (id INTEGER, v VARCHAR) WITH (format = 'csv', BucketColumns = ['id'], NumberOfBuckets = 4);
+
+statement error
+CALL glue_change_column('my_datalake.default.change_col_sorted', 'id', 'key', 'INTEGER');
+----
+Column "id" is a bucket column of table "change_col_sorted" and can not be renamed
+
+# keeping the name is fine
+statement ok
+CALL glue_change_column('my_datalake.default.change_col_sorted', 'id', 'id', 'BIGINT', comment := 'the bucket key');
+
+# naming the column in another case than Glue stores it is no rename
+statement ok
+CREATE TABLE my_datalake.default.change_col_case ("Amount" FLOAT);
+
+statement ok
+CALL glue_change_column('my_datalake.default.change_col_case', 'amount', 'amount', 'FLOAT', comment := 'kept name');
+
+query II
+SELECT name, comment FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.change_col_case'));
+----
+Amount	kept name
+
+# a bucket column can be moved: Glue names it, not its position
+statement ok
+CREATE TABLE my_datalake.default.change_col_bucketed (id INTEGER, v VARCHAR) WITH (BucketColumns = ['id'], NumberOfBuckets = 4);
+
+statement ok
+CALL glue_change_column('my_datalake.default.change_col_bucketed', 'id', 'id', 'INTEGER', after := 'v');
+
+query I
+SELECT list(name) FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.change_col_bucketed'));
+----
+[v, id]
+
+foreach table change_col change_col_csv change_col_sorted change_col_bucketed change_col_case
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop
