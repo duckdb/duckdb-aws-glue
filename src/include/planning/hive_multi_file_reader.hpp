@@ -65,7 +65,9 @@ private:
 //! only the partitions a query reads are ever listed. When at least 'hive_partition_listing_threshold' of those
 //! partitions live below the table root, the root is listed once (recursively, one request per 1000 keys on S3) and
 //! the files are matched to their partitions by prefix; otherwise, and for partitions elsewhere, every partition is
-//! one listing of its location. An unpartitioned table is one listing of the root location.
+//! one listing of its location. An unpartitioned table is one listing of the root location. A directory is listed once
+//! per query (scans and the sample share the listing); with glue_cache_listings the listings of Glue tables are kept
+//! for later statements of the connection as well.
 class HiveMultiFileList : public LazyMultiFileList {
 public:
 	//! 'partition_indexes' are the partitions to read

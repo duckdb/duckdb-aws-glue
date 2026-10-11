@@ -20,10 +20,13 @@ class GlueTransactionCache {
 public:
 	//! The current transaction's cache, or null when no catalog transaction is active (ATTACH, bare mutations)
 	static optional_ptr<GlueTransactionCache> Of(ClientContext &context, Catalog &catalog);
+	//! Clears the connection's directory listings too
 	static void Invalidate(ClientContext &context, Catalog &catalog);
 	//! DETACH erases the catalog's entry from the detaching connection's cache state; the attach-identity
 	//! keying remains the safety net for connection states a DETACH cannot reach
 	static void OnDetach(ClientContext &context, Catalog &catalog);
+	//! Whether glue_metadata_cache_scope is 'connection'
+	static bool ConnectionScoped(ClientContext &context);
 	//! Clear the cache when the enclosing Glue mutation returns or throws
 	struct InvalidateOnExit {
 		InvalidateOnExit(ClientContext &context, Catalog &catalog) : context(context), catalog(catalog) {
