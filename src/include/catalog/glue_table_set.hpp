@@ -12,6 +12,8 @@
 namespace duckdb {
 class GlueCatalog;
 class GlueSchemaEntry;
+struct GovernedCatalogEntry;
+class GovernedGlueTableLoader;
 class GlueTransactionCache;
 
 //! The set of tables of a single Glue database, lazily loaded from Glue
@@ -34,6 +36,9 @@ public:
 
 private:
 	void LoadEntries(ClientContext &context);
+	//! The table as loaded in this transaction, loaded now by 'loader' if needed; nullptr if none exists
+	optional_ptr<GovernedCatalogEntry> GetGovernedEntry(ClientContext &context, GovernedGlueTableLoader &loader,
+	                                                    const string &name);
 	//! One first-page GetTables warming the metadata cache, instead of a GetTable per table. Only warms the
 	//! cache: entries stay per referenced table and Scan still enumerates, so neither outlives the page's truth.
 	void BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache);

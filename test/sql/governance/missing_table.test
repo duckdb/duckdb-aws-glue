@@ -1,0 +1,35 @@
+# name: test/sql/governance/missing_table.test
+# description: a table the loader does not return does not exist, and Glue is not asked for it
+# group: [governance]
+
+require httpfs
+
+require glue
+
+require glue_test_loader
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement error
+SELECT * FROM gov.default.governance_missing;
+----
+<REGEX>:Catalog Error.*governance_missing does not exist.*
+
+query I
+SELECT count(*) > 0 FROM glue_test_loader_requests() WHERE table_name = 'governance_missing';
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetTable';
+----
+0

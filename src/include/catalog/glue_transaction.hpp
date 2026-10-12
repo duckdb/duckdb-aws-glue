@@ -1,5 +1,7 @@
 #pragma once
 
+#include "duckdb/catalog/catalog_entry.hpp"
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -12,6 +14,14 @@
 
 namespace duckdb {
 class GlueCatalog;
+
+//! A table loaded through the registered GovernedGlueTableLoader. It holds the entry built from its Glue Table JSON,
+//! owned until the transaction ends, and the entry the catalog returns for the table to DDL and queries alike, which is
+//! that entry or a view over it
+struct GovernedCatalogEntry {
+	unique_ptr<CatalogEntry> table;
+	reference<CatalogEntry> governed_entry;
+};
 
 enum class GlueTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -168,6 +178,9 @@ public:
 
 public:
 	GlueCatalog &glue_catalog;
+	//! The tables loaded through the registered GovernedGlueTableLoader in this transaction: database name -> table
+	//! name -> table
+	case_insensitive_map_t<case_insensitive_map_t<GovernedCatalogEntry>> governed_entries;
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
 	//! (so a prepared statement's two binds share it).
 	shared_ptr<GlueTransactionCache> cache;

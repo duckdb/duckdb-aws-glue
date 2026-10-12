@@ -250,6 +250,17 @@ this connection's cache: a write through it, a rollback, or DETACH.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
 - `ALTER VIEW ... RENAME` and `COMMENT ON VIEW` are not supported.
 
+## Governance
+
+Another extension can register a `GovernedGlueTableLoader`. Once one is registered, a table looked up by name in any
+Glue catalog is loaded by the loader instead of `GetTable`; with more than one registered, the lookup fails. The loader
+loads the Glue table, makes its data readable for the transaction and returns what to bind for it: the table or a view
+over it. A loaded table is kept by the transaction, never across transactions, and is scanned as loaded.
+
+Listings (`SHOW TABLES`, `duckdb_tables()`, `duckdb_columns()`) and the `glue_*` functions do not go through the
+loader. They call Glue (`GetTables`, `GetTable`, `GetPartitions`) with the catalog's secret, as without a governed table
+loader, so they show a table as Glue reports it to the caller. That can differ from what a query on the table binds to.
+
 ## Reading without a catalog: hive_scan
 
 The same scan is available as a table function, for parquet Hive tables that are not (or not yet) registered in

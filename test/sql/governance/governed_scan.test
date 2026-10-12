@@ -1,0 +1,28 @@
+# name: test/sql/governance/governed_scan.test
+# description: a table built from the loader's Glue Table JSON is scanned as loaded, without asking Glue for it
+# group: [governance]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require glue_test_loader
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+COPY (SELECT 42 AS i) TO '{TEST_DIR}/governed_scan' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+# the table does not exist in Glue
+statement ok
+PRAGMA glue_test_loader_stage('governed_scan', '{"Name": "governed_scan", "DatabaseName": "default", "TableType": "EXTERNAL_TABLE", "StorageDescriptor": {"Columns": [{"Name": "i", "Type": "int"}], "Location": "{TEST_DIR}/governed_scan", "SerdeInfo": {"SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"}}}');
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT i FROM gov.default.governed_scan;
+----
+42
