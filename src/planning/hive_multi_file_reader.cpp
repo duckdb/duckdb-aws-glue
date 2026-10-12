@@ -1,6 +1,5 @@
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_stats.hpp"
-
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
@@ -14,8 +13,14 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -26,6 +31,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "core/glue_types.hpp"
+#include "api/glue_api.hpp"
 
 namespace duckdb {
 
@@ -61,11 +67,46 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 		if (partition_keys.empty() || catalog_name.empty()) {
 			// unpartitioned, or a hive_scan that was given none
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
+		} else if (!partition_expression.empty()) {
+			try {
+				partitions = GetTablePartitions(context, *this, partition_expression);
+			} catch (std::exception &ex) {
+				ErrorData error(ex);
+				if (!GlueAPI::IsPartitionExpressionRejected(error)) {
+					throw;
+				}
+				// Glue couldn't use the expression, e.g. a partition value it can't compare with the literal. That's
+				// fine, we apply the filters to the partition values ourselves anyway. Anything else (throttling, a
+				// timeout) fails the scan, since retrying without the expression would only fetch more.
+				DUCKDB_LOG_WARNING(context, "Glue could not filter the partitions of '%s' with '%s', listing all: %s",
+				                   Describe(), partition_expression, error.RawMessage());
+				partition_expression.clear();
+				partitions = GetTablePartitions(context, *this);
+			}
 		} else {
 			partitions = GetTablePartitions(context, *this);
 		}
 	}
 	return partitions;
+}
+
+void HiveScanInfo::SetPartitionExpression(string expression) const {
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	if (!partitions) {
+		partition_expression = std::move(expression);
+	}
+}
+
+bool HiveScanInfo::PartitionsFiltered() const {
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	return partitions && !partition_expression.empty();
+}
+
+shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::AllPartitions(ClientContext &context) const {
+	if (!PartitionsFiltered()) {
+		return Partitions(context);
+	}
+	return GetTablePartitions(context, *this);
 }
 
 bool HiveScanInfo::PartitionsLoaded() const {
@@ -197,11 +238,15 @@ void HiveMultiFileList::PlanListings() const {
 	}
 }
 
+//! What partition_by_location stores for a partition this scan didn't fetch because Glue's filter left it out
+static constexpr idx_t UNFETCHED_PARTITION = DConstants::INVALID_INDEX - 1;
+
 void HiveMultiFileList::BuildPartitionLocations() const {
 	if (partition_locations_built) {
 		return;
 	}
 	partition_locations_built = true;
+	all_partition_locations = !scan_info->PartitionsFiltered();
 	auto partitions = scan_info->Partitions(client_context);
 	for (idx_t i = 0; i < partitions->size(); i++) {
 		auto location = (*partitions)[i].location;
@@ -234,6 +279,46 @@ optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t m
 	return optional_idx();
 }
 
+void HiveMultiFileList::ResolveNestedLocations(const vector<OpenFileInfo> &files, idx_t min_directory_size) const {
+	if (all_partition_locations) {
+		return;
+	}
+	auto partitions = scan_info->Partitions(client_context);
+	bool nested = false;
+	for (auto &file : files) {
+		auto owner = OwningPartition(file.path, min_directory_size);
+		if (!owner.IsValid() || owner.GetIndex() == UNFETCHED_PARTITION) {
+			continue;
+		}
+		auto location = (*partitions)[owner.GetIndex()].location;
+		StringUtil::RTrim(location, "/");
+		if (file.path.find('/', location.size() + 1) != string::npos) {
+			nested = true;
+			break;
+		}
+	}
+	if (!nested) {
+		return;
+	}
+	// same order and rules as BuildPartitionLocations, but over every partition; we still don't read the unfetched ones
+	unordered_map<string, idx_t> fetched;
+	for (idx_t i = 0; i < partitions->size(); i++) {
+		fetched.emplace(StringUtil::Join((*partitions)[i].values, "\x1f"), i);
+	}
+	unordered_map<string, idx_t> locations;
+	for (auto &partition : *scan_info->AllPartitions(client_context)) {
+		auto location = partition.location;
+		StringUtil::RTrim(location, "/");
+		if (location.empty()) {
+			continue;
+		}
+		auto entry = fetched.find(StringUtil::Join(partition.values, "\x1f"));
+		locations.emplace(std::move(location), entry == fetched.end() ? UNFETCHED_PARTITION : entry->second);
+	}
+	partition_by_location = std::move(locations);
+	all_partition_locations = true;
+}
+
 void HiveMultiFileList::ListPartition(idx_t partition_index) const {
 	auto partitions = scan_info->Partitions(client_context);
 	auto &partition = (*partitions)[partition_index];
@@ -248,6 +333,7 @@ void HiveMultiFileList::ListPartition(idx_t partition_index) const {
 	vector<OpenFileInfo> partition_files;
 	ListDataFiles(client_context, location, partition_files);
 	BuildPartitionLocations();
+	ResolveNestedLocations(partition_files, location.size());
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : partition_files) {
 		// skip files of another partition registered at a location nested inside this one
@@ -292,11 +378,15 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 	BuildPartitionLocations();
 	auto root_prefix = root + "/";
-	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	vector<OpenFileInfo> data_files;
 	for (auto &file : files) {
-		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
-			continue;
+		if (StringUtil::StartsWith(file.path, root_prefix) && !IsHiddenPath(file.path.substr(root_prefix.size()))) {
+			data_files.push_back(file);
 		}
+	}
+	ResolveNestedLocations(data_files, root.size() + 1);
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto &file : data_files) {
 		auto partition_index = OwningPartition(file.path, root.size() + 1);
 		if (!partition_index.IsValid() || !reading.count(partition_index.GetIndex())) {
 			continue;
@@ -387,6 +477,7 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	ListDataFiles(client_context, location, listed);
 	// as ListPartition keeps them: not the files of a partition registered at a location nested inside this one
 	BuildPartitionLocations();
+	ResolveNestedLocations(listed, location.size());
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : listed) {
 		auto owner = OwningPartition(file.path, location.size());
@@ -440,7 +531,10 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartition(const vector<idx_t> 
 			sampled_prefix += "/";
 			in_sampled = true;
 		}
-		if (sampled.IsValid() && owner == sampled) {
+		// When Glue filtered the partitions we don't know where the others live, so a file below the sampled
+		// partition's directory might belong to one nested there. The sample sticks to files directly in it.
+		bool attributable = all_partition_locations || file.path.find('/', sampled_prefix.size()) == string::npos;
+		if (sampled.IsValid() && owner == sampled && attributable) {
 			scan_info->file_partitions[file.path] = sampled.GetIndex();
 			files.push_back(file);
 		}
@@ -813,6 +907,202 @@ static void AddPruningFiltersToExtraInfo(ExtraOperatorInfo &extra_info, const ve
 	}
 }
 
+//===--------------------------------------------------------------------===//
+// Partition filters for Glue
+//===--------------------------------------------------------------------===//
+//! The longest expression GetPartitions accepts
+static constexpr idx_t GLUE_MAX_PARTITION_EXPRESSION_LENGTH = 2048;
+
+//! The partition key that 'expr' refers to, if it's a column of this scan and the key's name doesn't need quoting
+static optional_ptr<const string> PartitionKeyOf(const Expression &expr, TableIndex table_index,
+                                                 const vector<PartitionKeyProjection> &projections,
+                                                 const HiveScanInfo &info) {
+	if (expr.GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
+		return nullptr;
+	}
+	auto &colref = expr.Cast<BoundColumnRefExpression>();
+	if (colref.Binding().table_index != table_index) {
+		return nullptr;
+	}
+	for (auto &projection : projections) {
+		if (projection.projected_column_index != colref.Binding().column_index.GetIndex()) {
+			continue;
+		}
+		auto &key = info.partition_keys[projection.partition_key_index];
+		for (auto c : key) {
+			if (!StringUtil::CharacterIsAlphaNumeric(c) && c != '_') {
+				return nullptr;
+			}
+		}
+		return &key;
+	}
+	return nullptr;
+}
+
+//! Writes the literal if Glue compares it the same way DuckDB does: an integer, or a string that needs no escaping.
+//! Ranges ('ordered') also need ASCII, since that's the only case where Glue (UTF-16) and DuckDB (UTF-8) sort alike.
+static bool TryGlueLiteral(const Expression &expr, const LogicalType &key_type, bool ordered, string &result) {
+	if (expr.GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+		return false;
+	}
+	auto &value = expr.Cast<BoundConstantExpression>().GetValue();
+	if (value.IsNull() || value.type() != key_type) {
+		return false;
+	}
+	switch (key_type.id()) {
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+		result = value.ToString();
+		return true;
+	case LogicalTypeId::VARCHAR: {
+		auto &str = StringValue::Get(value);
+		for (auto c : str) {
+			auto byte = static_cast<uint8_t>(c);
+			if (c == '\'' || c == '\\' || byte < 0x20 || (ordered && byte >= 0x80)) {
+				return false;
+			}
+		}
+		result = "'" + str + "'";
+		return true;
+	}
+	default:
+		return false;
+	}
+}
+
+static const char *GlueComparisonOperator(ExpressionType type) {
+	switch (type) {
+	case ExpressionType::COMPARE_EQUAL:
+		return "=";
+	case ExpressionType::COMPARE_NOTEQUAL:
+		return "<>";
+	case ExpressionType::COMPARE_LESSTHAN:
+		return "<";
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		return "<=";
+	case ExpressionType::COMPARE_GREATERTHAN:
+		return ">";
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		return ">=";
+	default:
+		return nullptr;
+	}
+}
+
+//! Writes 'filter' as a Glue partition filter that keeps at least the partitions DuckDB would keep. Returns false if
+//! there's no way to write it.
+static bool TryGlueFilter(const Expression &filter, TableIndex table_index,
+                          const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info, string &result) {
+	auto type = filter.GetExpressionType();
+	if (type == ExpressionType::CONJUNCTION_AND || type == ExpressionType::CONJUNCTION_OR) {
+		// for AND, any child we can write already narrows things down; for OR, we need every child
+		vector<string> parts;
+		for (auto &child : filter.Cast<BoundConjunctionExpression>().GetChildren()) {
+			string part;
+			if (TryGlueFilter(*child, table_index, projections, info, part)) {
+				parts.push_back("(" + part + ")");
+			} else if (type == ExpressionType::CONJUNCTION_OR) {
+				return false;
+			}
+		}
+		if (parts.empty()) {
+			return false;
+		}
+		result = StringUtil::Join(parts, type == ExpressionType::CONJUNCTION_AND ? " AND " : " OR ");
+		return true;
+	}
+	if (type == ExpressionType::COMPARE_IN) {
+		auto &children = filter.Cast<BoundOperatorExpression>().GetChildren();
+		auto key = PartitionKeyOf(*children[0], table_index, projections, info);
+		if (!key) {
+			return false;
+		}
+		vector<string> literals;
+		for (idx_t i = 1; i < children.size(); i++) {
+			string literal;
+			if (!TryGlueLiteral(*children[i], children[0]->GetReturnType(), false, literal)) {
+				return false;
+			}
+			literals.push_back(literal);
+		}
+		result = *key + " IN (" + StringUtil::Join(literals, ", ") + ")";
+		return true;
+	}
+	if (type == ExpressionType::COMPARE_BETWEEN) {
+		auto &between = filter.Cast<BoundFunctionExpression>();
+		if (!BoundBetweenExpression::HasValidBindData(between)) {
+			return false;
+		}
+		auto &input = BoundBetweenExpression::Input(between);
+		auto key = PartitionKeyOf(input, table_index, projections, info);
+		string lower, upper;
+		if (!key || !TryGlueLiteral(BoundBetweenExpression::LowerBound(between), input.GetReturnType(), true, lower) ||
+		    !TryGlueLiteral(BoundBetweenExpression::UpperBound(between), input.GetReturnType(), true, upper)) {
+			return false;
+		}
+		result = *key + " " + GlueComparisonOperator(BoundBetweenExpression::LowerComparisonType(between)) + " " +
+		         lower + " AND " + *key + " " +
+		         GlueComparisonOperator(BoundBetweenExpression::UpperComparisonType(between)) + " " + upper;
+		return true;
+	}
+	if (!BoundComparisonExpression::IsComparison(filter)) {
+		return false;
+	}
+	auto &comparison = filter.Cast<BoundFunctionExpression>();
+	auto op = GlueComparisonOperator(type);
+	if (!op) {
+		return false;
+	}
+	auto flipped_op = GlueComparisonOperator(FlipComparisonExpression(type));
+	auto &left = BoundComparisonExpression::Left(comparison);
+	auto &right = BoundComparisonExpression::Right(comparison);
+	bool ordered = type != ExpressionType::COMPARE_EQUAL && type != ExpressionType::COMPARE_NOTEQUAL;
+	string literal;
+	auto key = PartitionKeyOf(left, table_index, projections, info);
+	if (key && TryGlueLiteral(right, left.GetReturnType(), ordered, literal)) {
+		result = *key + " " + op + " " + literal;
+		return true;
+	}
+	key = PartitionKeyOf(right, table_index, projections, info);
+	if (key && TryGlueLiteral(left, right.GetReturnType(), ordered, literal)) {
+		result = *key + " " + flipped_op + " " + literal;
+		return true;
+	}
+	return false;
+}
+
+//! Builds a GetPartitions expression from the filters Glue can handle (empty if there are none) and puts the indexes
+//! of the filters it used in 'used_filters'
+static string GluePartitionExpression(const HiveScanInfo &info, TableIndex table_index,
+                                      const vector<PartitionKeyProjection> &projections,
+                                      const vector<unique_ptr<Expression>> &filters,
+                                      unordered_set<idx_t> &used_filters) {
+	vector<string> parts;
+	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
+		string part;
+		if (TryGlueFilter(*filters[filter_index], table_index, projections, info, part)) {
+			parts.push_back("(" + part + ")");
+			used_filters.insert(filter_index);
+		}
+	}
+	auto expression = StringUtil::Join(parts, " AND ");
+	if (expression.size() > GLUE_MAX_PARTITION_EXPRESSION_LENGTH) {
+		used_filters.clear();
+		return string();
+	}
+	return expression;
+}
+
+static bool GluePartitionFilterPushdownEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("glue_partition_filter_pushdown", setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return true;
+}
+
 unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
                                                                      const MultiFileOptions &options,
                                                                      MultiFilePushdownInfo &pushdown_info,
@@ -828,11 +1118,15 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// A filter that can be evaluated with the partition values alone decides whether the partition is read at all,
 	// before its directory is listed. The filters themselves are kept: on the rows that remain they are cheap, the
 	// partition columns are constants.
-	// first use of the partitions: loaded here, with the filters known
+	// this is the first time the partitions are needed, and we know the filters now, so Glue can do the filtering
 	auto &hive_list = files.Cast<HiveMultiFileList>();
+	unordered_set<idx_t> pruning_filters;
+	if (!info.PartitionsLoaded() && GluePartitionFilterPushdownEnabled(context)) {
+		info.SetPartitionExpression(
+		    GluePartitionExpression(info, pushdown_info.table_index, projections, filters, pruning_filters));
+	}
 	auto candidates = hive_list.PartitionIndexes();
 	auto partitions = info.Partitions(context);
-	unordered_set<idx_t> pruning_filters;
 	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
 	                             filters, pruning_filters);
 	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);

@@ -106,7 +106,7 @@ FROM glue_calls();
 GetPartitions	1
 GetTable	1
 
-# Every scan of the table in a query shares one fetch, each with its own pruning
+# Every scan of the table in a query shares one fetch per Glue filter: here two, as the scans filter differently
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -118,7 +118,7 @@ SELECT a.dt, b.dt, a.amount + b.amount FROM my_datalake.default.lp_orders a JOIN
 query I
 SELECT n FROM glue_calls() WHERE api = 'GetPartitions';
 ----
-1
+2
 
 # The results are unchanged: pruning, partition values and the prepared statement all see the partitions
 

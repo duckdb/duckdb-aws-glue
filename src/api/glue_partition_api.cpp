@@ -204,6 +204,13 @@ void GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, cons
 	}
 }
 
+//! Tags the exception we throw when Glue refuses a GetPartitions expression (see IsPartitionExpressionRejected)
+static constexpr const char *PARTITION_EXPRESSION_REJECTED = "glue_partition_expression_rejected";
+
+bool GlueAPI::IsPartitionExpressionRejected(const ErrorData &error) {
+	return error.Type() == ExceptionType::INVALID_INPUT && error.ExtraInfo().count(PARTITION_EXPRESSION_REJECTED);
+}
+
 //! The partitions Glue returns per request. 1000 is the maximum the API allows.
 static constexpr int GLUE_PARTITIONS_PAGE_SIZE = 1000;
 //! The requests to run at the same time when the catalog is AWS and the setting leaves the choice open
@@ -214,8 +221,8 @@ static constexpr idx_t GLUE_MAX_PARTITION_SEGMENTS = 10;
 //! One chain of GetPartitions requests: pages through the partitions of segment 'segment_number' (the whole table
 //! when 'total_segments' is 1) and appends them to 'result'
 static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
-                                  const string &database_name, const string &table_name, int segment_number,
-                                  int total_segments, vector<GluePartitionInfo> &result) {
+                                  const string &database_name, const string &table_name, const string &expression,
+                                  int segment_number, int total_segments, vector<GluePartitionInfo> &result) {
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetPartitionsRequest request;
@@ -232,12 +239,25 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 			segment.SetTotalSegments(total_segments);
 			request.SetSegment(segment);
 		}
+		if (!expression.empty()) {
+			request.SetExpression(expression);
+		}
 		if (!next_token.empty()) {
 			request.SetNextToken(next_token);
 		}
 		auto outcome = client.GetPartitions(request);
 		if (!outcome.IsSuccess()) {
-			ThrowGlueError(outcome, StringUtil::Format("GetPartitions '%s.%s'", database_name, table_name));
+			auto error_type = outcome.GetError().GetErrorType();
+			if (!expression.empty() && (error_type == Aws::Glue::GlueErrors::INVALID_INPUT ||
+			                            error_type == Aws::Glue::GlueErrors::INVALID_STATE)) {
+				throw InvalidInputException(
+				    {{PARTITION_EXPRESSION_REJECTED, "true"}},
+				    StringUtil::Format("Glue GetPartitions '%s.%s' refused the expression '%s': %s (%s)", database_name,
+				                       table_name, expression, ToStdString(outcome.GetError().GetMessage()),
+				                       ToStdString(outcome.GetError().GetExceptionName())));
+			}
+			ThrowGlueError(outcome, StringUtil::Format("GetPartitions '%s.%s'%s", database_name, table_name,
+			                                           expression.empty() ? "" : " (" + expression + ")"));
 		}
 		auto &partitions = outcome.GetResult();
 		for (auto &partition : partitions.GetPartitions()) {
@@ -271,14 +291,15 @@ static int GetPartitionSegmentCount(ClientContext &context, const GlueCatalog &c
 }
 
 vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCatalog &catalog,
-                                                 const string &database_name, const string &table_name) {
+                                                 const string &database_name, const string &table_name,
+                                                 const string &expression) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	auto total_segments = GetPartitionSegmentCount(context, catalog);
 	vector<vector<GluePartitionInfo>> segment_results(NumericCast<idx_t>(total_segments));
 
 	if (total_segments == 1) {
-		FetchPartitionSegment(*client, catalog, database_name, table_name, 0, 1, segment_results[0]);
+		FetchPartitionSegment(*client, catalog, database_name, table_name, expression, 0, 1, segment_results[0]);
 	} else {
 		// The segments do not overlap, so their requests can run at the same time. Every worker sets the context
 		// scope itself: it is thread local, and without it the requests would use the database level HTTP settings
@@ -289,15 +310,16 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 			workers.emplace_back([&, segment]() {
 				GlueHttpClientContextScope worker_scope(context);
 				try {
-					FetchPartitionSegment(*client, catalog, database_name, table_name, segment, total_segments,
-					                      segment_results[NumericCast<idx_t>(segment)]);
+					FetchPartitionSegment(*client, catalog, database_name, table_name, expression, segment,
+					                      total_segments, segment_results[NumericCast<idx_t>(segment)]);
 				} catch (std::exception &ex) {
 					errors[NumericCast<idx_t>(segment)] = ErrorData(ex);
 				}
 			});
 		}
 		try {
-			FetchPartitionSegment(*client, catalog, database_name, table_name, 0, total_segments, segment_results[0]);
+			FetchPartitionSegment(*client, catalog, database_name, table_name, expression, 0, total_segments,
+			                      segment_results[0]);
 		} catch (std::exception &ex) {
 			errors[0] = ErrorData(ex);
 		}

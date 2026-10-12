@@ -90,7 +90,7 @@ SELECT count(*) FROM my_datalake.default.deg_one WHERE dt = 'no-such-partition';
 query II
 EXPLAIN SELECT * FROM my_datalake.default.deg_one WHERE dt = 'no-such-partition';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 0/1.*~0 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 0/0.*~0 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.deg_none;

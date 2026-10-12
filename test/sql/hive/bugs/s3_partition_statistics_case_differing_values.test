@@ -110,30 +110,30 @@ EXPLAIN SELECT country, count(*) FROM my_datalake.default.vol_ctrl GROUP BY coun
 ----
 physical_plan	<REGEX>:.*Hash Group By.*~2 rows.*
 
-# Each predicate on the plan, where "Scanning Files: 1/2" is the direct evidence that pruning kept the
-# one partition the filter names. An equality is always true of the partition left, so the estimate is
+# Each predicate on the plan, where "Scanning Files: 1/..." is the direct evidence that pruning kept the
+# one partition the filter names (out of those Glue returned for the filter). An equality is always true of the partition left, so the estimate is
 # its 300 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'US';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~300 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/1.*~300 rows.*
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'us';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~300 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/1.*~300 rows.*
 
 # the two range bounds: a folded bound would keep both partitions or neither. VARCHAR statistics never
 # prove a range always true, so these take the flat 0.2 of the 300 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country > 'US';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~60 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/1.*~60 rows.*
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country < 'us';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*~60 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/1.*~60 rows.*
 
 # spanning both: nothing is pruned, 600 rows through the same 0.2
 query II
@@ -145,7 +145,7 @@ physical_plan	<REGEX>:.*Hive Scan.*~120 rows.*
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'Us';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 0/2.*~0 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 0/0.*~0 rows.*
 
 query I
 SELECT count(*) FROM my_datalake.default.vol_case WHERE country = 'Us';

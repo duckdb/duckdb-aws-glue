@@ -125,14 +125,16 @@ shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const stri
 	return GetQueryCache(context)->GetDirectoryListing(context, DirectoryKey(directory));
 }
 
-shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {
-	auto entry = GetQueryCache(context)->GetPartitions(TableKey(info));
+shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info,
+                                                               const string &expression) {
+	// keyed by expression too, so a scan never gets partitions that were filtered for a different scan of the table
+	auto entry = GetQueryCache(context)->GetPartitions(TableKey(info) + "\n" + expression);
 	// per table, so the Glue calls for different tables do not wait on each other
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->partitions) {
 		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
 		entry->partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
-		    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
+		    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name, expression));
 	}
 	return entry->partitions;
 }

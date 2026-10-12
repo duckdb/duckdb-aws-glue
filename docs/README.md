@@ -205,8 +205,8 @@ may be partially qualified; it is resolved like in a query.
 
 Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
 Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so
-`DESCRIBE`, `CREATE VIEW` and `PREPARE` make no `GetPartitions` call; every scan of the table in a query shares one
-fetch. The pages are asked for in parallel with Glue's Segment API:
+`DESCRIBE`, `CREATE VIEW` and `PREPARE` make no `GetPartitions` call; every scan of the table in a query with the same
+partition filters shares one fetch. The pages are asked for in parallel with Glue's Segment API:
 `glue_get_partitions_segments` requests run at the same time, each over a segment of the partitions that does not
 overlap with the others. `0`, the default, uses 8 requests against AWS and 1 against a Glue compatible server given
 with `ENDPOINT` (moto ignores `Segment` and answers every segment with the whole table, so the partitions a segment
@@ -215,6 +215,15 @@ partition would otherwise repeat, which is not used: only the partition values a
 
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
+
+Filters on the partition columns that Glue can evaluate are given to `GetPartitions` as its `Expression`, so Glue
+returns only the partitions they match: comparisons (`=`, `<>`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `IN`) of a string or
+integer partition key with a constant, combined with `AND` and `OR`. String ranges are given only for ASCII literals,
+where Glue and DuckDB order strings the same. Other filters are applied to the partition values Glue returns, as
+before, and an expression Glue refuses falls back to fetching all partitions. A file found below a partition's
+location but not directly in it may belong to a partition nested there that Glue did not return; the scan then
+fetches the locations of all partitions once, so files belong to the same partition either way. `SET
+glue_partition_filter_pushdown = false` asks Glue for all partitions again.
 
 ## Inspecting tables
 

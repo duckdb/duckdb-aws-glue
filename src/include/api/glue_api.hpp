@@ -2,6 +2,7 @@
 
 #include "core/glue_info.hpp"
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/pair.hpp"
 
 #include <memory>
@@ -81,9 +82,14 @@ public:
 	static void RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            const string &table_name, const vector<string> &values,
 	                            const vector<string> &new_values);
-	//! List the partitions of a Hive table (GetPartitions, all pages)
+	//! Lists the partitions of a Hive table (GetPartitions, every page). Pass an 'expression' in Glue's partition
+	//! filter syntax, e.g. "dt = '2024-01-01'", to get only the partitions it matches.
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
-	                                               const string &database_name, const string &table_name);
+	                                               const string &database_name, const string &table_name,
+	                                               const string &expression = string());
+	//! True when Glue refused the GetPartitions expression itself, e.g. it couldn't compare a partition value with the
+	//! literal. False when the request just failed (throttling, a timeout, access denied).
+	static bool IsPartitionExpressionRejected(const ErrorData &error);
 	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped.
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<GluePartitionInput> &partitions);

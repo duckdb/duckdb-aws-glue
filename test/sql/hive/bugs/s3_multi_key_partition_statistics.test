@@ -70,32 +70,32 @@ physical_plan	<REGEX>:.*Hive Scan.*~600 rows.*
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mkey WHERE dt = 'd1';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 3/6.*~300 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 3/3.*~300 rows.*
 
 # SECOND key: 2 of 6, holding 200. An off-by-one in the key index would prune the wrong ones
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mkey WHERE country = 'c2';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/6.*~200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/2.*~200 rows.*
 
 # BOTH keys: down to the one partition they intersect in, holding 100
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mkey WHERE dt = 'd1' AND country = 'c2';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/6.*~100 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/1.*~100 rows.*
 
 # the other key's value: nothing survives, and 0 needs no selectivity to be right
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mkey WHERE country = 'd1';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 0/6.*~0 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 0/0.*~0 rows.*
 
 # an IN IS pushed into the scan but it arrives as an OPTIONAL
 # filter, and the 0.2 is only applied when a non-optional filter is present.
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mkey WHERE country IN ('c0','c1');
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 4/6.*~400 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 4/4.*~400 rows.*
 
 # three distinct countries, so three groups -- exact, because the partition values are the complete set
 query II

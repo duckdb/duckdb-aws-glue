@@ -101,13 +101,13 @@ physical_plan	<REGEX>:.*Hive Scan.*~4,000 rows.*
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale20 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 10/20.*~2,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 10/10.*~2,000 rows.*
 
 # one partition: the equality is always true of the partition left, so the estimate is exactly its 200 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale20 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/20.*~200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/1.*~200 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.scale20;
@@ -164,13 +164,13 @@ physical_plan	<REGEX>:.*Hive Scan.*~4,000 rows.*
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale200 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 10/200.*~200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 10/10.*~200 rows.*
 
 # and exactly its 20 rows at ten times the partitions
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale200 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/200.*~20 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/1.*~20 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.scale200;
@@ -243,13 +243,13 @@ physical_plan	<REGEX>:.*Hive Scan.*~4,000 rows.*
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 10/2000.*~20 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 10/10.*~20 rows.*
 
 # and its 2 rows at a hundred times
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale2000 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2000.*~2 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/1.*~2 rows.*
 
 # and raising the threshold above the partitions read takes the narrow branch again, at any table size --
 # which is what makes this a threshold problem rather than a listing problem

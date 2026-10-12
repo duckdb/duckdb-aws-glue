@@ -47,6 +47,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);
 
+	config.AddExtensionOption("glue_partition_filter_pushdown",
+	                          "Give the filters a query has on the partition columns of a Hive table to Glue, so that "
+	                          "GetPartitions returns only the partitions they match instead of all of them. Default "
+	                          "true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	config.AddExtensionOption("glue_network_calls_via_duckdb",
 	                          "Route the Glue API calls of the AWS SDK through DuckDB's HTTP layer (httpfs) instead "
 	                          "of the AWS SDK's own HTTP client, so they use DuckDB's proxy / certificate settings "
