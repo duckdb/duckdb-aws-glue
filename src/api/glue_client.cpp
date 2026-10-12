@@ -46,7 +46,7 @@ const string &GetCURLCertPath() {
 
 } // namespace
 
-std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context, GlueCatalog &catalog) {
+Aws::Auth::AWSCredentials GetClientCredentials(ClientContext &context, GlueCatalog &catalog) {
 	// Take the credentials from the DuckDB secret. The secret is looked up on every call so a refreshed
 	// (credential_chain / sts) secret is picked up automatically.
 	auto secret_entry = GlueCatalog::GetStorageSecret(context, catalog.options.secret_name);
@@ -62,12 +62,18 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 		    "Secret '%s' does not contain AWS credentials (key_id / secret), can not connect to Glue catalog '%s'",
 		    secret_entry->secret->GetName().GetIdentifierName(), catalog.options.name);
 	}
+	return Aws::Auth::AWSCredentials(key_id, secret, session_token);
+}
+
+std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context, GlueCatalog &catalog) {
+	auto credentials = GetClientCredentials(context, catalog);
 
 	auto &region = catalog.options.region;
 	// The HTTP transport is chosen when the SDK client is built, so a changed setting needs a new client
 	auto via_duckdb = GlueNetworkCallsViaDuckDB(DatabaseInstance::GetDatabase(context));
 	auto &endpoint = catalog.options.endpoint;
-	auto cache_key = key_id + "\x1f" + session_token + "\x1f" + region + "\x1f" + endpoint + "\x1f" +
+	auto cache_key = ToStdString(credentials.GetAWSAccessKeyId()) + "\x1f" +
+	                 ToStdString(credentials.GetSessionToken()) + "\x1f" + region + "\x1f" + endpoint + "\x1f" +
 	                 (via_duckdb ? "duckdb" : "sdk");
 
 	lock_guard<mutex> guard(catalog.client_lock);
@@ -100,7 +106,6 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	auto &db_config = DBConfig::GetConfig(context);
 	config.userAgent = db_config.UserAgent();
 
-	Aws::Auth::AWSCredentials credentials(key_id, secret, session_token);
 	auto provider = std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(credentials);
 	catalog.glue_client = std::make_shared<Aws::Glue::GlueClient>(provider, nullptr, config);
 	catalog.client_cache_key = cache_key;

@@ -62,8 +62,10 @@ GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 // Scan
 //===--------------------------------------------------------------------===//
 TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
-	// Ask Glue what kind of table this is right before scanning: only Hive (Glue native) tables can be read
-	auto latest_info = RefreshTableInfo(context);
+	// Ask Glue what kind of table this is right before scanning: only Hive (Glue native) tables can be read. A
+	// GOVERNANCE catalog scans its tables as loaded.
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	auto latest_info = glue_catalog.options.governance ? table_info : RefreshTableInfo(context);
 	switch (latest_info.GetFormat()) {
 	case GlueTableFormat::HIVE:
 		return GetHiveScanFunction(context, bind_data, latest_info);

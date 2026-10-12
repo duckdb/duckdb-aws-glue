@@ -47,3 +47,10 @@ install(
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+# The table loader the GOVERNANCE tests under test/sql/governance load with
+# 'require glue_test_loader'. Test-only, so linked into unittest alone, the way
+# DuckDB links debug_fs
+if(BUILD_UNITTESTS AND NOT CLANG_TIDY)
+  add_subdirectory(test/extension/glue_test_loader)
+endif()

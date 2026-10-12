@@ -1,0 +1,28 @@
+# name: test/sql/governance/missing_table.test
+# description: a table the loader does not return does not exist, even if Glue has it
+# group: [governance]
+
+require httpfs
+
+require glue
+
+require glue_test_loader
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+CREATE OR REPLACE VIEW my_datalake.default.governance_missing AS SELECT 1 AS i;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', GOVERNANCE true);
+
+statement error
+SELECT * FROM gov.default.governance_missing;
+----
+<REGEX>:Catalog Error.*governance_missing does not exist.*
+
+statement ok
+DROP VIEW my_datalake.default.governance_missing;

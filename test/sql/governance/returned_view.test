@@ -1,0 +1,32 @@
+# name: test/sql/governance/returned_view.test
+# description: the name binds to the entry the loader returns, here a view instead of the table it built
+# group: [governance]
+
+require httpfs
+
+require glue
+
+require glue_test_loader
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+PRAGMA glue_test_loader_stage('governance_view', '{"Name": "governance_view", "DatabaseName": "default", "TableType": "VIRTUAL_VIEW", "ViewOriginalText": "SELECT 1 AS i", "StorageDescriptor": {"Columns": [{"Name": "i", "Type": "int"}]}, "Parameters": {"duckdb_view": "true"}}', view = 'SELECT 42 AS answer');
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', GOVERNANCE true);
+
+query I
+SELECT answer FROM gov.default.governance_view;
+----
+42
+
+statement error
+DROP VIEW gov.default.governance_view;
+----
+"governance_view" is not a Glue view and can not be dropped
+
+statement error
+CREATE OR REPLACE VIEW gov.default.governance_view AS SELECT 1 AS i;
+----
+"governance_view" is not a Glue view and can not be replaced

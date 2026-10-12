@@ -28,6 +28,8 @@ struct GlueAttachOptions {
 	Identifier default_schema;
 	//! Run the ATTACH-time GetDatabases reachability probe (default true); false defers the first Glue call
 	bool verify_connection = true;
+	//! Load tables through the GovernedGlueTableLoader another extension registers
+	bool governance = false;
 };
 
 } // namespace duckdb

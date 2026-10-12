@@ -22,6 +22,7 @@ Attach options:
 | `DEFAULT_LOCATION` | optional S3 prefix for new databases and for tables created without an explicit location (takes precedence over the Glue database LocationUri) |
 | `DEFAULT_SCHEMA`   | Glue database to use as the default schema                                   |
 | `READ_ONLY`        | refuse everything that changes the catalog: DML, DDL and the mutating `glue_*` partition functions |
+| `GOVERNANCE`       | look tables up through the registered table loader, see [below](#governance) (default: false) |
 
 ## Reading
 
@@ -167,6 +168,17 @@ of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
 - `ALTER VIEW ... RENAME` and `COMMENT ON VIEW` are not supported.
+
+## Governance
+
+With `GOVERNANCE true`, a table looked up by name is loaded by another extension, which registers a
+`GovernedGlueTableLoader`; without one (or with more than one) the lookup fails. The loader loads the Glue table, makes
+its data readable for the transaction and returns what to bind for it: the table or a view over it. A loaded table is
+kept by the transaction, never across transactions, and is scanned as loaded.
+
+Listings (`SHOW TABLES`, `duckdb_tables()`, `duckdb_columns()`) and the `glue_*` functions do not go through the
+loader. They call Glue (`GetTables`, `GetTable`, `GetPartitions`) with the catalog's secret, as without `GOVERNANCE`,
+so they show a table as Glue reports it to the caller. That can differ from what a query on the table binds to.
 
 ## Reading without a catalog: hive_scan
 
