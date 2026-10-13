@@ -1,0 +1,22 @@
+# name: test/sql/governance/two_loaders.test
+# description: a catalog refuses to load tables when more than one loader is registered
+# group: [governance]
+
+require httpfs
+
+require glue
+
+require glue_test_loader
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+PRAGMA glue_test_loader_register;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', GOVERNANCE true);
+
+statement error
+SELECT * FROM gov.default.governance_any;
+----
+More than one extension registered a GovernedGlueTableLoader

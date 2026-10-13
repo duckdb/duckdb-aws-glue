@@ -1,0 +1,12 @@
+# name: test/sql/governance/attach_options.test
+# description: the ATTACH options of governed table lookups
+# group: [governance]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', GOVERNANCE true);

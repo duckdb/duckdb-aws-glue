@@ -1,0 +1,42 @@
+# name: test/sql/governance/transaction_cache.test
+# description: a transaction loads a table once, the next transaction loads it again
+# group: [governance]
+
+require httpfs
+
+require glue
+
+require glue_test_loader
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+PRAGMA glue_test_loader_stage('governance_cached', '{"Name": "governance_cached", "DatabaseName": "default", "TableType": "VIRTUAL_VIEW", "ViewOriginalText": "SELECT 1 AS i", "StorageDescriptor": {"Columns": [{"Name": "i", "Type": "int"}]}, "Parameters": {"duckdb_view": "true"}}');
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', GOVERNANCE true);
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM gov.default.governance_cached;
+
+statement ok
+SELECT * FROM gov.default.governance_cached;
+
+query I
+SELECT count(*) FROM glue_test_loader_requests();
+----
+1
+
+statement ok
+COMMIT;
+
+statement ok
+SELECT * FROM gov.default.governance_cached;
+
+query I
+SELECT count(*) FROM glue_test_loader_requests();
+----
+2

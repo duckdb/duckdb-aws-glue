@@ -12,6 +12,7 @@
 namespace duckdb {
 class GlueCatalog;
 class GlueSchemaEntry;
+struct GovernedCatalogEntry;
 
 //! The set of tables of a single Glue database, lazily loaded from Glue
 class GlueTableSet {
@@ -32,6 +33,8 @@ public:
 
 private:
 	void LoadEntries(ClientContext &context);
+	//! Under GOVERNANCE: the table as loaded in this transaction, loaded now if needed; nullptr if none exists
+	optional_ptr<GovernedCatalogEntry> GetGovernedEntry(ClientContext &context, const string &name);
 	static void SetTableTypeTag(GlueTable &entry);
 	//! Move an entry out of the set; the transaction manager keeps it alive while a running statement may use it.
 	//! Called with entry_lock held.

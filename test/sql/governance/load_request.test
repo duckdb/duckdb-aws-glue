@@ -1,0 +1,28 @@
+# name: test/sql/governance/load_request.test
+# description: the loader is asked for the table with the catalog's region and the credentials of its secret
+# group: [governance]
+
+require httpfs
+
+require glue
+
+require glue_test_loader
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+CREATE SECRET governance_secret (TYPE S3, KEY_ID 'test_key_id', SECRET 'test_secret', SESSION_TOKEN 'test_session_token', REGION 'us-east-1');
+
+statement ok
+PRAGMA glue_test_loader_stage('governance_request', '{"Name": "governance_request", "DatabaseName": "default", "TableType": "VIRTUAL_VIEW", "ViewOriginalText": "SELECT 1 AS i", "StorageDescriptor": {"Columns": [{"Name": "i", "Type": "int"}]}, "Parameters": {"duckdb_view": "true"}}');
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', SECRET governance_secret, GOVERNANCE true);
+
+statement ok
+SELECT * FROM gov.default.governance_request;
+
+query IIIIIIII
+SELECT * FROM glue_test_loader_requests();
+----
+gov	{GLUE_CATALOG_ID}	default	governance_request	us-east-1	test_key_id	test_secret	test_session_token

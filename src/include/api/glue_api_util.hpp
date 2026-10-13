@@ -4,6 +4,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "duckdb/common/exception.hpp"
 
+#include <aws/core/auth/AWSCredentials.h>
 #include <aws/glue/GlueClient.h>
 #include <aws/glue/GlueErrors.h>
 #include <aws/glue/model/Column.h>
@@ -51,5 +52,8 @@ void SetCatalogId(REQUEST &request, const GlueCatalog &catalog) {
 		request.SetCatalogId(catalog.options.catalog_id);
 	}
 }
+
+//! The credentials of the catalog's DuckDB secret
+Aws::Auth::AWSCredentials GetClientCredentials(ClientContext &context, GlueCatalog &catalog);
 
 } // namespace duckdb

@@ -1,0 +1,17 @@
+# name: test/sql/governance/no_loader.test
+# description: a catalog refuses to load tables when no loader is registered
+# group: [governance]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gov (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', GOVERNANCE true);
+
+statement error
+SELECT * FROM gov.default.governance_any;
+----
+Catalog "gov" is attached with GOVERNANCE true, but no extension registered a GovernedGlueTableLoader
