@@ -88,7 +88,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
   the listing. Avro tables are not measured, so planning them lists nothing.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
-  query scans the table.
+  query scans the table, and every query binds the definition it fetched: a table or view another client replaced
+  under the same name (other columns, partition keys, kind or view SQL) is read as that fetch found it, not as it
+  was first seen. Only `ALTER TABLE`, which asks Glue again right before it writes, fails with `Glue object
+  "db.table" changed since it was bound; retry the statement` when the definition changed in between.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
