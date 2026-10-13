@@ -96,6 +96,8 @@ public:
 	}
 	//! The table format and what it was derived from (GlueTableFormat::Detect)
 	GlueTableFormat GetFormat() const;
+	//! Whether another Glue definition has the same table/view kind, data columns and ordered partition keys
+	bool HasSameBinding(const GlueTableInfo &other) const;
 	//! The 'metadata_location' parameter of an Iceberg table (empty if not present)
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing

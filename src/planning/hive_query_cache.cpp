@@ -70,10 +70,27 @@ shared_ptr<HiveQueryCache> HiveQueryCache::Get(ClientContext &context) {
 }
 
 string HiveQueryCache::TableKey(const string &catalog, const string &database, const string &table) {
-	return catalog + "\x1f" + database + "\x1f" + table;
+	return catalog + "\x1f" + StringUtil::Lower(database) + "\x1f" + StringUtil::Lower(table);
+}
+
+void HiveQueryCache::QueryBegin(ClientContext &context) {
+	// a lookup outside a query sees no QueryEnd, what it cached must not seed this query
+	Clear();
 }
 
 void HiveQueryCache::QueryEnd(ClientContext &context) {
+	Clear();
+}
+
+void HiveQueryCache::TransactionCommit(MetaTransaction &transaction, ClientContext &context) {
+	Clear();
+}
+
+void HiveQueryCache::TransactionRollback(MetaTransaction &transaction, ClientContext &context) {
+	Clear();
+}
+
+void HiveQueryCache::Clear() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	glue_tables.clear();
 	samples.clear();
@@ -113,6 +130,34 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 		listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
 	}
 	return listing;
+}
+
+shared_ptr<const GlueTableInfo> GetQueryTableInfo(ClientContext &context, GlueCatalog &catalog, const string &database,
+                                                  const string &table) {
+	bool asked_glue;
+	return GetQueryTableInfo(context, catalog, database, table, asked_glue);
+}
+
+shared_ptr<const GlueTableInfo> GetQueryTableInfo(ClientContext &context, GlueCatalog &catalog, const string &database,
+                                                  const string &table, bool &asked_glue) {
+	asked_glue = false;
+	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
+	    HiveQueryCache::TableKey(catalog.GetName().GetIdentifierName(), database, table));
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->table_info_loaded) {
+		auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+			asked_glue = true;
+			GlueTableInfo current;
+			if (!GlueAPI::GetTable(context, catalog, database, table, current)) {
+				return nullptr;
+			}
+			return make_shared_ptr<const GlueTableInfo>(std::move(current));
+		};
+		auto cache = GlueTransactionCache::Of(context, catalog);
+		entry->table_info = cache ? cache->GetTable(database, table, load) : load();
+		entry->table_info_loaded = true;
+	}
+	return entry->table_info;
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {

@@ -26,8 +26,8 @@ public:
 	//! None: the files of a Hive table have no row identifier
 	vector<column_t> GetRowIdColumns() const override;
 
-	//! Re-fetch the table definition from Glue
-	GlueTableInfo RefreshTableInfo(ClientContext &context) const;
+	//! The query's snapshot of this table, fetched once per query: the one the lookup reconciled the entry with
+	GlueTableInfo GetTableInfoForQuery(ClientContext &context) const;
 
 private:
 	//! Scan a Hive table with read_parquet over the files of the partitions Glue lists (or the table location for an
