@@ -16,7 +16,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
     with:
-      duckdb_version: 2658ef961f670f932eac08a451bc57acb47f0148 # 2026-10-12 pin
+      duckdb_version: c5c5adc80da2491e6c5ecbb8d07f84301207dc17 # v2.0-cyanoptera 2026-10-13 pin
       ci_tools_version: 969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
       exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw'
       extension_name: glue
@@ -25,7 +25,7 @@ jobs:
     name: Code Quality Check
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
     with:
-      duckdb_version: 2658ef961f670f932eac08a451bc57acb47f0148 # 2026-10-12 pin
+      duckdb_version: c5c5adc80da2491e6c5ecbb8d07f84301207dc17 # v2.0-cyanoptera 2026-10-13 pin
       ci_tools_version: 969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
       extension_name: glue
       format_checks: 'format'
