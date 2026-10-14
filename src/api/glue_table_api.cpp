@@ -80,7 +80,7 @@ bool GlueAPI::GetAnyTableName(ClientContext &context, GlueCatalog &catalog, cons
 }
 
 bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                       const string &table_name, GlueTableInfo &result, string *raw_json) {
+                       const string &table_name, GlueTableInfo &result, string *raw_json, bool keep_fetched) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetTableRequest request;
@@ -98,6 +98,9 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 	result = ToTableInfo(table);
 	if (raw_json) {
 		*raw_json = ToStdString(table.Jsonize().View().WriteReadable());
+	}
+	if (keep_fetched) {
+		result.fetched = make_shared_ptr<GlueFetchedTable>(table);
 	}
 	return true;
 }
@@ -229,7 +232,8 @@ static Aws::Glue::Model::TableInput ToViewTableInput(const GlueViewInfo &view) {
 
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
                             const string &database_name, const string &table_name,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify);
+                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify,
+                            const GlueTableInfo *prefetched);
 
 void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
 	CheckWritable(catalog, "CreateView");
@@ -250,39 +254,50 @@ void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const Glu
 	}
 }
 
-void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
+void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view,
+                         const GlueTableInfo *prefetched) {
 	CheckWritable(catalog, "UpdateView");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	// CREATE OR REPLACE keeps what is not the definition: the description, owner and parameters other engines or
 	// users set stay, the SQL, the columns and our own parameters are replaced
-	UpdateGlueTable(client, catalog, view.database_name, view.name, [&](Aws::Glue::Model::TableInput &table_input) {
-		SetViewDefinition(table_input, view);
-		auto parameters = table_input.GetParameters();
-		SetViewParameters(parameters, view);
-		table_input.SetParameters(parameters);
-	});
+	UpdateGlueTable(
+	    client, catalog, view.database_name, view.name,
+	    [&](Aws::Glue::Model::TableInput &table_input) {
+		    SetViewDefinition(table_input, view);
+		    auto parameters = table_input.GetParameters();
+		    SetViewParameters(parameters, view);
+		    table_input.SetParameters(parameters);
+	    },
+	    prefetched);
 }
 
 //! UpdateTable replaces the whole definition: fetch the current one, let 'modify' change the TableInput built from
-//! it, and send it back
+//! it, and send it back. The current definition is 'prefetched' when it carries one, else fetched.
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
                             const string &database_name, const string &table_name,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
-	// UpdateTable replaces the whole definition, so start from the current one and change only the columns
-	Aws::Glue::Model::GetTableRequest get_request;
-	SetCatalogId(get_request, catalog);
-	get_request.SetDatabaseName(database_name);
-	get_request.SetName(table_name);
-	auto get_outcome = client->GetTable(get_request);
-	if (!get_outcome.IsSuccess()) {
-		if (IsEntityNotFound(get_outcome)) {
-			throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
-			                       database_name);
+                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify,
+                            const GlueTableInfo *prefetched) {
+	Aws::Glue::Model::GetTableOutcome get_outcome;
+	const Aws::Glue::Model::Table *table_p;
+	if (prefetched && prefetched->fetched) {
+		table_p = &prefetched->fetched->raw;
+	} else {
+		Aws::Glue::Model::GetTableRequest get_request;
+		SetCatalogId(get_request, catalog);
+		get_request.SetDatabaseName(database_name);
+		get_request.SetName(table_name);
+		get_outcome = client->GetTable(get_request);
+		if (!get_outcome.IsSuccess()) {
+			if (IsEntityNotFound(get_outcome)) {
+				throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
+				                       database_name);
+			}
+			ThrowGlueError(get_outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
 		}
-		ThrowGlueError(get_outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
+		table_p = &get_outcome.GetResult().GetTable();
 	}
-	auto &table = get_outcome.GetResult().GetTable();
+	auto &table = *table_p;
 
 	Aws::Glue::Model::TableInput table_input;
 	table_input.SetName(table.GetName());
@@ -333,45 +348,55 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 }
 
 void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                 const string &table_name, const vector<GlueColumn> &columns) {
+                                 const string &table_name, const vector<GlueColumn> &columns,
+                                 const GlueTableInfo *prefetched) {
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
-		auto storage_descriptor = table_input.GetStorageDescriptor();
-		storage_descriptor.SetColumns(ToAwsColumns(columns));
-		table_input.SetStorageDescriptor(storage_descriptor);
-	});
+	UpdateGlueTable(
+	    client, catalog, database_name, table_name,
+	    [&](Aws::Glue::Model::TableInput &table_input) {
+		    auto storage_descriptor = table_input.GetStorageDescriptor();
+		    storage_descriptor.SetColumns(ToAwsColumns(columns));
+		    table_input.SetStorageDescriptor(storage_descriptor);
+	    },
+	    prefetched);
 }
 
 void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                               const string &table_name, const string &location) {
+                               const string &table_name, const string &location, const GlueTableInfo *prefetched) {
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
-		auto storage_descriptor = table_input.GetStorageDescriptor();
-		storage_descriptor.SetLocation(location);
-		table_input.SetStorageDescriptor(storage_descriptor);
-	});
+	UpdateGlueTable(
+	    client, catalog, database_name, table_name,
+	    [&](Aws::Glue::Model::TableInput &table_input) {
+		    auto storage_descriptor = table_input.GetStorageDescriptor();
+		    storage_descriptor.SetLocation(location);
+		    table_input.SetStorageDescriptor(storage_descriptor);
+	    },
+	    prefetched);
 }
 
 void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                     const string &table_name, const vector<pair<string, string>> &set,
-                                    const vector<string> &unset) {
+                                    const vector<string> &unset, const GlueTableInfo *prefetched) {
 	// Reached only through ALTER TABLE, which the binder refuses on a read-only attach before it gets here.
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
-		auto parameters = table_input.GetParameters();
-		for (auto &key : unset) {
-			parameters.erase(key);
-		}
-		for (auto &entry : set) {
-			parameters[entry.first] = entry.second;
-		}
-		table_input.SetParameters(parameters);
-	});
+	UpdateGlueTable(
+	    client, catalog, database_name, table_name,
+	    [&](Aws::Glue::Model::TableInput &table_input) {
+		    auto parameters = table_input.GetParameters();
+		    for (auto &key : unset) {
+			    parameters.erase(key);
+		    }
+		    for (auto &entry : set) {
+			    parameters[entry.first] = entry.second;
+		    }
+		    table_input.SetParameters(parameters);
+	    },
+	    prefetched);
 }
 
 void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,

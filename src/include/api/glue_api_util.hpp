@@ -8,9 +8,22 @@
 #include <aws/glue/GlueErrors.h>
 #include <aws/glue/model/Column.h>
 #include <aws/glue/model/Database.h>
+#include <aws/glue/model/Partition.h>
 #include <aws/glue/model/Table.h>
 
 namespace duckdb {
+
+//! The opaque handles core/glue_info.hpp declares
+struct GlueFetchedTable {
+	explicit GlueFetchedTable(Aws::Glue::Model::Table raw_p) : raw(std::move(raw_p)) {
+	}
+	Aws::Glue::Model::Table raw;
+};
+struct GlueFetchedPartition {
+	explicit GlueFetchedPartition(Aws::Glue::Model::Partition raw_p) : raw(std::move(raw_p)) {
+	}
+	Aws::Glue::Model::Partition raw;
+};
 
 string ToStdString(const Aws::String &input);
 unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> &input);

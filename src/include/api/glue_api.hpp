@@ -34,9 +34,10 @@ public:
 	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            string &table_name);
 	//! Fetch a single table, returns false if it does not exist. 'raw_json' (optional) receives the Glue Table
-	//! object of the response as JSON.
+	//! object of the response as JSON. 'keep_fetched' also stores the Table in 'result.fetched'.
 	static bool GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                     const string &table_name, GlueTableInfo &result, string *raw_json = nullptr);
+	                     const string &table_name, GlueTableInfo &result, string *raw_json = nullptr,
+	                     bool keep_fetched = false);
 
 	//! Create a database, throws a CatalogException if it already exists
 	static void CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database);
@@ -49,44 +50,55 @@ public:
 	static void CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);
 	static void CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
 	//! Replace the definition of an existing view (CREATE OR REPLACE VIEW)
-	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
+	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view,
+	                       const GlueTableInfo *prefetched = nullptr);
 	//! Replace the (data) columns of a table, keeping everything else of its Glue definition as is. Used for
 	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata.
 	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                               const string &table_name, const vector<GlueColumn> &columns);
+	                               const string &table_name, const vector<GlueColumn> &columns,
+	                               const GlueTableInfo *prefetched = nullptr);
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
 	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                             const string &table_name, const string &location);
+	                             const string &table_name, const string &location,
+	                             const GlueTableInfo *prefetched = nullptr);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
 	//! table format is derived from (GlueTableInfo::IsFormatParameter) are refused.
 	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<pair<string, string>> &set,
-	                                  const vector<string> &unset);
+	                                  const vector<string> &unset, const GlueTableInfo *prefetched = nullptr);
 	//! Point a partition at another location, throws a CatalogException if the partition does not exist
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                 const string &table_name, const vector<string> &values, const string &location);
-	//! Fetch a single partition by its values, returns false if it does not exist
+	                                 const string &table_name, const vector<string> &values, const string &location,
+	                                 const GluePartitionInfo *prefetched = nullptr);
+	//! Fetch a single partition by its values, returns false if it does not exist. 'keep_fetched' also stores the
+	//! Partition in 'result.fetched'.
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result);
+	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result,
+	                         bool keep_fetched = false);
 	//! Register one partition of a Hive table. Returns false if it already exists and 'if_not_exists' is set, throws
 	//! a CatalogException if it already exists otherwise.
 	static bool CreatePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                            const string &table_name, const GluePartitionInput &partition, bool if_not_exists);
+	                            const string &table_name, const GluePartitionInput &partition, bool if_not_exists,
+	                            const GlueTableInfo *prefetched = nullptr);
 	//! Unregister a partition (the data files are left in place), returns false if it does not exist
 	static bool DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            const string &table_name, const vector<string> &values);
 	//! Change the values of a partition, keeping its location and everything else (UpdatePartition). Throws a
-	//! CatalogException if the partition does not exist or a partition with the new values already exists.
-	static void RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                            const string &table_name, const vector<string> &values,
-	                            const vector<string> &new_values);
+	//! CatalogException if the partition does not exist or a partition with the new values already exists. Returns
+	//! the partition's location, which the rename keeps. 'new_values_confirmed_free' skips the check that no
+	//! partition has the new values, for a caller that made it.
+	static string RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                              const string &table_name, const vector<string> &values,
+	                              const vector<string> &new_values, const GluePartitionInfo *prefetched = nullptr,
+	                              bool new_values_confirmed_free = false);
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
 	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped.
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                  const string &table_name, const vector<GluePartitionInput> &partitions);
+	                                  const string &table_name, const vector<GluePartitionInput> &partitions,
+	                                  const GlueTableInfo *prefetched = nullptr);
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
