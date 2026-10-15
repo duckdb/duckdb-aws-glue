@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/glue_format.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -34,6 +35,8 @@ public:
 		Catalog &catalog;
 	};
 
+	//! The definition of an Iceberg table is returned but never kept: the iceberg extension writes those records
+	//! (DROP, ALTER through ICEBERG_CATALOG, from any alias of the same Glue catalog) and this cache does not see it
 	shared_ptr<const GlueTableInfo> GetTable(const string &database_name, const string &table_name,
 	                                         const std::function<shared_ptr<const GlueTableInfo>()> &load) {
 		shared_ptr<CacheEntry<GlueTableInfo>> entry;
@@ -41,7 +44,10 @@ public:
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			entry = FindEntry(tables, database_name + "\n" + table_name);
 		}
-		return Resolve(*entry, load);
+		std::function<bool(const GlueTableInfo &)> keep = [](const GlueTableInfo &info) {
+			return info.GetFormat().format != GlueFormat::ICEBERG;
+		};
+		return Resolve(*entry, load, keep);
 	}
 	shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(const string &database_name, const string &table_name,
@@ -82,13 +88,18 @@ private:
 		return slot;
 	}
 	template <class T>
-	static shared_ptr<const T> Resolve(CacheEntry<T> &entry, const std::function<shared_ptr<const T>()> &load) {
+	static shared_ptr<const T> Resolve(CacheEntry<T> &entry, const std::function<shared_ptr<const T>()> &load,
+	                                   const std::function<bool(const T &)> &keep = nullptr) {
 		annotated_lock_guard<annotated_mutex> guard(entry.load_lock);
 		if (entry.value) {
 			return entry.value;
 		}
-		entry.value = load();
-		return entry.value;
+		auto value = load();
+		if (value && keep && !keep(*value)) {
+			return value;
+		}
+		entry.value = value;
+		return value;
 	}
 
 	annotated_mutex lock;
@@ -140,6 +151,29 @@ private:
 
 	annotated_mutex lock;
 	unordered_map<string, CatalogCache> caches DUCKDB_GUARDED_BY(lock);
+};
+
+//! The tables the connection's current transaction handed to the Iceberg catalog (ICEBERG_CATALOG). Their Glue
+//! records change when the Iceberg catalog commits, which this extension's own invalidation never sees; the marks
+//! are published to the Glue catalog only once the whole transaction has committed (every catalog's commit included,
+//! whatever their order), and dropped on rollback.
+class GlueRedirectState : public ClientContextState {
+public:
+	static GlueRedirectState &Get(ClientContext &context);
+
+	void Pending(GlueCatalog &catalog, const string &database_name, const string &table_name);
+	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override;
+	void TransactionRollback(MetaTransaction &transaction, ClientContext &context) override;
+
+private:
+	struct PendingMark {
+		//! The attach identity, so a catalog re-attached under the same alias is not marked with the old one's tables
+		Identifier catalog_name;
+		idx_t attach_oid;
+		string database_name;
+		string table_name;
+	};
+	vector<PendingMark> pending;
 };
 
 //! Glue has no transactional semantics in this extension: every DDL statement is executed against the Glue API

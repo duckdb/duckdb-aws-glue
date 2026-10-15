@@ -956,6 +956,24 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (!CatalogTypeIsSupported(type)) {
 		return;
 	}
+	// tables committed transactions handed to the Iceberg catalog may have been dropped or altered through it, which
+	// this catalog's own DDL paths never saw: check them against Glue before listing. A mark is cleared only by a
+	// check that fetched the definition itself: a failed Glue call, or a definition (or its absence) this query or
+	// transaction fetched before the mark was set, leaves it for the next listing
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	for (auto &marked : glue_catalog.RedirectedTables(database_info.name)) {
+		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(marked.first)));
+		bool fetched_now;
+		auto entry = tables.GetEntry(context, lookup, fetched_now);
+		if (entry) {
+			bool reconcile_fetched;
+			ReconcileWithSnapshot(context, *entry, reconcile_fetched);
+			fetched_now = fetched_now || reconcile_fetched;
+		}
+		if (fetched_now) {
+			glue_catalog.RedirectChecked(database_info.name, marked.first, marked.second);
+		}
+	}
 	tables.Scan(context, callback);
 }
 
@@ -977,9 +995,15 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction trans
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::ReconcileWithSnapshot(ClientContext &context, CatalogEntry &entry) {
+	bool fetched_now;
+	return ReconcileWithSnapshot(context, entry, fetched_now);
+}
+
+optional_ptr<CatalogEntry> GlueSchemaEntry::ReconcileWithSnapshot(ClientContext &context, CatalogEntry &entry,
+                                                                  bool &fetched_now) {
 	// the name Glue knows, the lookup name may differ in case
 	auto table_name = entry.name.GetIdentifierName();
-	auto current = GetQueryTableInfo(context, catalog.Cast<GlueCatalog>(), database_info.name, table_name);
+	auto current = GetQueryTableInfo(context, catalog.Cast<GlueCatalog>(), database_info.name, table_name, fetched_now);
 	if (!current) {
 		tables.RemoveEntry(table_name);
 		return nullptr;

@@ -50,6 +50,17 @@ public:
 		return false;
 	}
 	optional<Identifier> GetDefaultSchema() const override;
+	//! Redirect Iceberg tables to the attached Iceberg catalog named by the ICEBERG_CATALOG option (see
+	//! GlueAttachOptions)
+	bool TryRedirectEntry(ClientContext &context, TableCatalogEntry &entry, const EntryLookupInfo &lookup_info,
+	                      QualifiedName &target) override;
+	//! A committed transaction handed this table to the Iceberg catalog, which may have dropped or altered its Glue
+	//! record: the next listing of the database checks it against Glue again (GlueSchemaEntry::Scan)
+	void MarkRedirected(const string &database_name, const string &table_name);
+	//! The tables of a database to check, with the mark they carry
+	vector<pair<string, idx_t>> RedirectedTables(const string &database_name);
+	//! A table was checked: drop its mark unless a later commit marked it again
+	void RedirectChecked(const string &database_name, const string &table_name, idx_t mark);
 	//! Allow CREATE TABLE ... PARTITIONED BY (...) WITH (location = '...', <property> = '...'); the options are
 	//! validated in GlueSchemaEntry::CreateTable
 	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
@@ -106,6 +117,10 @@ private:
 
 private:
 	GlueSchemaSet schemas;
+	mutex redirect_lock;
+	//! database -> table -> mark (a sequence number, so a check only clears the mark it saw)
+	case_insensitive_map_t<case_insensitive_map_t<idx_t>> redirected;
+	idx_t redirect_mark = 0;
 };
 
 } // namespace duckdb

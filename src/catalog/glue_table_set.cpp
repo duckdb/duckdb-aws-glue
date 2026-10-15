@@ -84,7 +84,14 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 }
 
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
+	bool fetched_now;
+	return GetEntry(context, lookup, fetched_now);
+}
+
+optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup,
+                                                  bool &fetched_now) {
 	auto &name = lookup.GetEntryName();
+	fetched_now = false;
 	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
 	// is started before entry_lock is taken, the order RetireEntry takes the locks in
 	Transaction::Get(context, catalog);
@@ -94,7 +101,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		return entry->second.get();
 	}
 	// not cached: use the query snapshot, shared with LookupEntry and the scan bind
-	auto table = GetQueryTableInfo(context, catalog, schema.database_info.name, name);
+	auto table = GetQueryTableInfo(context, catalog, schema.database_info.name, name, fetched_now);
 	if (!table) {
 		return nullptr;
 	}

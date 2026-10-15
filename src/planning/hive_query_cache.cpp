@@ -76,11 +76,20 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 
 shared_ptr<const GlueTableInfo> GetQueryTableInfo(ClientContext &context, GlueCatalog &catalog, const string &database,
                                                   const string &table) {
+	bool fetched_now;
+	return GetQueryTableInfo(context, catalog, database, table, fetched_now);
+}
+
+shared_ptr<const GlueTableInfo> GetQueryTableInfo(ClientContext &context, GlueCatalog &catalog, const string &database,
+                                                  const string &table, bool &fetched_now) {
 	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
 	    HiveQueryCache::TableKey(catalog.GetName().GetIdentifierName(), database, table));
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	// set by the load below, not by the statement cache miss: the transaction cache may answer without Glue
+	fetched_now = false;
 	if (!entry->table_info_loaded) {
 		auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+			fetched_now = true;
 			GlueTableInfo current;
 			if (!GlueAPI::GetTable(context, catalog, database, table, current)) {
 				return nullptr;

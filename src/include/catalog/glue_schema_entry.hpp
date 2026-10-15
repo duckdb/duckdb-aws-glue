@@ -81,7 +81,9 @@ public:
 private:
 	//! 'entry' if 'current' still has the schema it was built from, else its cached replacement
 	CatalogEntry &ReconcileEntry(CatalogEntry &entry, const GlueTableInfo &current);
-	//! 'entry' reconciled with the query's snapshot of it; null (and evicted) if Glue no longer has it
+	//! 'entry' reconciled with the query's snapshot of it; null (and evicted) if Glue no longer has it. 'fetched_now'
+	//! tells whether the snapshot was fetched from Glue by this call rather than reused from a cache
+	optional_ptr<CatalogEntry> ReconcileWithSnapshot(ClientContext &context, CatalogEntry &entry, bool &fetched_now);
 	optional_ptr<CatalogEntry> ReconcileWithSnapshot(ClientContext &context, CatalogEntry &entry);
 	CatalogEntry &ReplaceCachedEntry(const GlueTableInfo &table_info);
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,

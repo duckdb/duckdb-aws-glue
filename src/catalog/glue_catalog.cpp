@@ -22,6 +22,7 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "core/glue_format.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -92,6 +93,52 @@ optional<Identifier> GlueCatalog::GetDefaultSchema() const {
 		return nullopt;
 	}
 	return options.default_schema;
+}
+
+bool GlueCatalog::TryRedirectEntry(ClientContext &context, TableCatalogEntry &entry, const EntryLookupInfo &lookup_info,
+                                   QualifiedName &target) {
+	if (options.iceberg_catalog.empty()) {
+		return false;
+	}
+	// the entry was reconciled with this statement's Glue snapshot by the lookup, format included (HasSameBinding)
+	auto &table = entry.Cast<GlueTable>();
+	if (table.table_info.GetFormat().format != GlueFormat::ICEBERG) {
+		return false;
+	}
+	// The Iceberg catalog fronts the same Glue Data Catalog, so the table has the same database and name there
+	GlueRedirectState::Get(context).Pending(*this, table.table_info.database_name, table.table_info.name);
+	target = QualifiedName(Identifier(options.iceberg_catalog), Identifier(table.table_info.database_name),
+	                       Identifier(table.table_info.name));
+	return true;
+}
+
+void GlueCatalog::MarkRedirected(const string &database_name, const string &table_name) {
+	lock_guard<mutex> guard(redirect_lock);
+	redirected[database_name][table_name] = ++redirect_mark;
+}
+
+vector<pair<string, idx_t>> GlueCatalog::RedirectedTables(const string &database_name) {
+	lock_guard<mutex> guard(redirect_lock);
+	vector<pair<string, idx_t>> result;
+	auto database = redirected.find(database_name);
+	if (database != redirected.end()) {
+		for (auto &table : database->second) {
+			result.emplace_back(table.first, table.second);
+		}
+	}
+	return result;
+}
+
+void GlueCatalog::RedirectChecked(const string &database_name, const string &table_name, idx_t mark) {
+	lock_guard<mutex> guard(redirect_lock);
+	auto database = redirected.find(database_name);
+	if (database == redirected.end()) {
+		return;
+	}
+	auto table = database->second.find(table_name);
+	if (table != database->second.end() && table->second == mark) {
+		database->second.erase(table);
+	}
 }
 
 //===--------------------------------------------------------------------===//

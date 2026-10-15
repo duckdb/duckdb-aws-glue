@@ -5,6 +5,7 @@
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 
 namespace duckdb {
@@ -44,6 +45,30 @@ void GlueTransaction::Commit() {
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
+}
+
+GlueRedirectState &GlueRedirectState::Get(ClientContext &context) {
+	return *context.registered_state->GetOrCreate<GlueRedirectState>("glue_redirect_marks");
+}
+
+void GlueRedirectState::Pending(GlueCatalog &catalog, const string &database_name, const string &table_name) {
+	pending.push_back(PendingMark {catalog.GetName(), catalog.GetAttached().oid, database_name, table_name});
+}
+
+void GlueRedirectState::TransactionCommit(MetaTransaction &transaction, ClientContext &context) {
+	// the transaction is over: resolve the catalog without one (and not through the finished MetaTransaction)
+	auto &manager = DatabaseManager::Get(context);
+	for (auto &mark : pending) {
+		auto database = manager.GetDatabase(mark.catalog_name);
+		if (database && database->oid == mark.attach_oid) {
+			database->GetCatalog().Cast<GlueCatalog>().MarkRedirected(mark.database_name, mark.table_name);
+		}
+	}
+	pending.clear();
+}
+
+void GlueRedirectState::TransactionRollback(MetaTransaction &transaction, ClientContext &context) {
+	pending.clear();
 }
 
 void GlueTransaction::Rollback() {

@@ -21,6 +21,9 @@ public:
 public:
 	//! The entry with this name whatever its type: callers check entry->type against what they need
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup);
+	//! As above; 'fetched_now' tells whether this call asked Glue for the definition (an entry already in the set,
+	//! or a definition the query or the transaction cache already had, does not)
+	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup, bool &fetched_now);
 	//! The entries of the given type (TABLE_ENTRY or VIEW_ENTRY)
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
 	//! Insert a (new) entry into the set, replacing any existing entry with the same name

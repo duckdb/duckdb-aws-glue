@@ -61,7 +61,10 @@ private:
 	unordered_map<string, shared_ptr<MultiFileList>> directory_listings DUCKDB_GUARDED_BY(lock);
 };
 
-//! The table definition in this query, loaded once; null means Glue did not have the table
+//! The table definition in this query, loaded once; null means Glue did not have the table. 'fetched_now' tells
+//! whether this call asked Glue for it, rather than reusing what the query or the transaction cache already had
+shared_ptr<const GlueTableInfo> GetQueryTableInfo(ClientContext &context, GlueCatalog &catalog, const string &database,
+                                                  const string &table, bool &fetched_now);
 shared_ptr<const GlueTableInfo> GetQueryTableInfo(ClientContext &context, GlueCatalog &catalog, const string &database,
                                                   const string &table);
 

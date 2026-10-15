@@ -1,0 +1,449 @@
+# name: test/sql/hive/redirect/iceberg_catalog_redirect.test
+# description: ICEBERG_CATALOG redirects Iceberg tables to the attached catalog that serves them (Catalog::TryRedirectEntry)
+# group: [redirect]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# The fixture registers 'fixture_iceberg' in Glue as an Iceberg table. Any attached catalog can stand in for the
+# iceberg extension here: the redirect resolves '<ICEBERG_CATALOG>.<database>.<table>', so a DuckDB database with
+# a table of that name shows what is read and written through the Glue name.
+statement ok
+ATTACH ':memory:' AS ice;
+
+statement ok
+CREATE SCHEMA ice.default;
+
+statement ok
+CREATE TABLE ice.default.fixture_iceberg (id INTEGER, amount DOUBLE);
+
+statement ok
+INSERT INTO ice.default.fixture_iceberg VALUES (1, 1.5), (2, 2.5);
+
+# without the option the table is listed but can not be read
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS plain (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query TT
+SELECT table_name, tags['table_type'] FROM duckdb_tables() WHERE database_name = 'plain' AND table_name = 'fixture_iceberg';
+----
+fixture_iceberg	ICEBERG
+
+statement error
+SELECT * FROM plain.default.fixture_iceberg;
+----
+can not be read yet
+
+# with the option every statement over the Glue name is served by the Iceberg catalog
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}', ICEBERG_CATALOG 'ice');
+
+query IR
+SELECT * FROM my_datalake.default.fixture_iceberg ORDER BY id;
+----
+1	1.5
+2	2.5
+
+statement ok
+INSERT INTO my_datalake.default.fixture_iceberg VALUES (3, 3.5);
+
+statement ok
+UPDATE my_datalake.default.fixture_iceberg SET amount = amount * 2 WHERE id = 1;
+
+statement ok
+DELETE FROM my_datalake.default.fixture_iceberg WHERE id = 2;
+
+query IR
+SELECT * FROM ice.default.fixture_iceberg ORDER BY id;
+----
+1	3.0
+3	3.5
+
+query T
+SELECT column_name FROM (DESCRIBE my_datalake.default.fixture_iceberg) ORDER BY column_name;
+----
+amount
+id
+
+statement ok
+USE my_datalake.default;
+
+query I
+SELECT count(*) FROM fixture_iceberg;
+----
+2
+
+# the glue_* functions are not redirected: they show the Glue record of the Iceberg table
+query TT
+SELECT table_name, table_type FROM glue_get_table_response('fixture_iceberg');
+----
+fixture_iceberg	ICEBERG
+
+statement ok
+USE memory;
+
+# the Glue catalog keeps listing the table under its own name
+query TT
+SELECT table_name, tags['table_type'] FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'fixture_iceberg';
+----
+fixture_iceberg	ICEBERG
+
+# Hive tables are not redirected: a Hive fixture table binds through this extension (there is no such table in
+# 'ice', so a redirect would fail), with the columns Glue reports
+query TT
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.fixture_no_input_format) ORDER BY column_name;
+----
+amount	DOUBLE
+id	INTEGER
+
+# a redirect whose target does not exist names the redirect
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS lost (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', ICEBERG_CATALOG 'nowhere');
+
+statement error
+SELECT * FROM lost.default.fixture_iceberg;
+----
+is redirected to catalog "nowhere", which is not attached
+
+statement ok
+ATTACH ':memory:' AS empty_ice;
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS lost2 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', ICEBERG_CATALOG 'empty_ice');
+
+statement error
+SELECT * FROM lost2.default.fixture_iceberg;
+----
+which does not exist
+
+statement error
+DROP TABLE IF EXISTS lost2.default.fixture_iceberg;
+----
+which does not exist
+
+# CREATE is never redirected: on an Iceberg table's name IF NOT EXISTS sees the Glue record and does nothing
+statement ok
+CREATE TABLE IF NOT EXISTS lost2.default.fixture_iceberg (id INTEGER);
+
+query T
+SELECT tags['table_type'] FROM duckdb_tables() WHERE database_name = 'lost2' AND table_name = 'fixture_iceberg';
+----
+ICEBERG
+
+# a READ_ONLY Glue catalog reads through the redirect and refuses every write through its name
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS ro (TYPE glue, READ_ONLY, ENDPOINT '{GLUE_ENDPOINT}', ICEBERG_CATALOG 'ice');
+
+query I
+SELECT count(*) FROM ro.default.fixture_iceberg;
+----
+2
+
+statement error
+INSERT INTO ro.default.fixture_iceberg VALUES (9, 9.0);
+----
+Cannot execute statement of type "INSERT" on database "ro" which is attached in read-only mode!
+
+statement error
+DELETE FROM ro.default.fixture_iceberg;
+----
+Cannot execute statement of type "DELETE" on database "ro" which is attached in read-only mode!
+
+statement error
+DROP TABLE ro.default.fixture_iceberg;
+----
+Cannot execute statement of type "DROP" on database "ro" which is attached in read-only mode!
+
+query I
+SELECT count(*) FROM ice.default.fixture_iceberg;
+----
+2
+
+# the option must name another attached catalog
+statement error
+ATTACH '{GLUE_CATALOG_ID}' AS bad (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', ICEBERG_CATALOG '');
+----
+must name another attached catalog
+
+statement error
+ATTACH '{GLUE_CATALOG_ID}' AS bad (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', ICEBERG_CATALOG 'bad');
+----
+must name another attached catalog
+
+# the definition of an Iceberg table is not kept in the connection-scoped metadata cache, through any alias or entry
+# point: the Iceberg catalog writes that record, so every statement fetches it again; a Hive table's is served from
+# the cache
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok
+SELECT count(*) FROM my_datalake.default.fixture_iceberg;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SELECT count(*) FROM my_datalake.default.fixture_iceberg;
+
+query I
+SELECT glue_calls('GetTable') > 0;
+----
+true
+
+statement ok
+SELECT column_name FROM (DESCRIBE my_datalake.default.fixture_no_input_format);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SELECT column_name FROM (DESCRIBE my_datalake.default.fixture_no_input_format);
+
+query I
+SELECT glue_calls('GetTable');
+----
+0
+
+# glue_get_table_response() always fetches and warms the cache for the binds that follow; not for an Iceberg table,
+# also through an alias without ICEBERG_CATALOG
+statement ok
+SELECT table_name FROM glue_get_table_response('plain.default.fixture_iceberg');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+DESCRIBE plain.default.fixture_iceberg;
+----
+can not be read yet
+
+query I
+SELECT glue_calls('GetTable') > 0;
+----
+true
+
+statement ok
+SELECT table_name FROM glue_get_table_response('plain.default.fixture_no_input_format');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SELECT column_name FROM (DESCRIBE plain.default.fixture_no_input_format);
+
+query I
+SELECT glue_calls('GetTable');
+----
+0
+
+# a listing checks the tables that were redirected since the previous listing against Glue (a DROP through the
+# redirect removes the Glue record, which this catalog's own DDL paths never see), and only those
+statement ok
+SELECT count(*) FROM my_datalake.default.fixture_iceberg;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake';
+
+query I
+SELECT glue_calls('GetTable') > 0;
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake';
+
+query I
+SELECT glue_calls('GetTable');
+----
+0
+
+# the re-check waits for the redirecting transaction to commit: the Iceberg catalog writes the Glue record at COMMIT
+statement ok
+BEGIN
+
+statement ok
+DROP TABLE my_datalake.default.fixture_iceberg
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable')
+----
+0
+
+statement ok
+COMMIT
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable') > 0
+----
+true
+
+# two connections redirect the same table: the commit of either marks it, whatever the other still has open
+statement ok
+CREATE TABLE ice.default.fixture_iceberg (id INTEGER, amount DOUBLE)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+SELECT count(*) FROM my_datalake.default.fixture_iceberg
+
+statement ok con2
+BEGIN
+
+statement ok con2
+SELECT count(*) FROM my_datalake.default.fixture_iceberg
+
+statement ok con1
+COMMIT
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok con2
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable') > 0
+----
+true
+
+statement ok con2
+COMMIT
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok con2
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable') > 0
+----
+true
+
+# a connection that never touched the table lists it: nothing to re-check until the redirecting transaction commits
+statement ok con1
+BEGIN
+
+statement ok con1
+DROP TABLE my_datalake.default.fixture_iceberg
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok con3
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable')
+----
+0
+
+statement ok con1
+COMMIT
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok con3
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable') > 0
+----
+true
+
+# the mark is published after every catalog committed, whatever order the transaction touched them in: here the
+# Iceberg target is used before the redirect, so the Glue catalog would commit first
+statement ok
+CREATE TABLE ice.default.fixture_iceberg (id INTEGER, amount DOUBLE)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+SELECT count(*) FROM ice.default.fixture_iceberg
+
+statement ok con1
+DROP TABLE my_datalake.default.fixture_iceberg
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok con3
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable')
+----
+0
+
+statement ok con1
+COMMIT
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok con3
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable') > 0
+----
+true
+
+# a rolled-back transaction marks nothing
+statement ok
+CREATE TABLE ice.default.fixture_iceberg (id INTEGER, amount DOUBLE)
+
+statement ok con1
+BEGIN
+
+statement ok con1
+DROP TABLE my_datalake.default.fixture_iceberg
+
+statement ok con1
+ROLLBACK
+
+statement ok
+CALL truncate_duckdb_logs()
+
+statement ok con3
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake'
+
+query I
+SELECT glue_calls('GetTable')
+----
+0
