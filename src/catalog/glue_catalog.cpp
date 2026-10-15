@@ -22,6 +22,7 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "core/glue_format.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -92,6 +93,22 @@ optional<Identifier> GlueCatalog::GetDefaultSchema() const {
 		return nullopt;
 	}
 	return options.default_schema;
+}
+
+bool GlueCatalog::TryRedirectEntry(ClientContext &context, TableCatalogEntry &entry, const EntryLookupInfo &lookup_info,
+                                   QualifiedName &target) {
+	if (options.iceberg_catalog.empty()) {
+		return false;
+	}
+	// the entry was reconciled with this statement's Glue snapshot by the lookup, format included (HasSameBinding)
+	auto &table = entry.Cast<GlueTable>();
+	if (table.table_info.GetFormat().format != GlueFormat::ICEBERG) {
+		return false;
+	}
+	// The Iceberg catalog fronts the same Glue Data Catalog, so the table has the same database and name there
+	target = QualifiedName(Identifier(options.iceberg_catalog), Identifier(table.table_info.database_name),
+	                       Identifier(table.table_info.name));
+	return true;
 }
 
 //===--------------------------------------------------------------------===//

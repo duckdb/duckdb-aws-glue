@@ -2,8 +2,9 @@
 
 **Experimental** extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
 SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Tables of other
-formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or
-written.
+formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but are not read or
+written by this extension itself: Iceberg tables can be redirected to an attached Iceberg catalog (see
+[Iceberg tables](#iceberg-tables)), the others can not be read.
 
 Use DDL/DML statements in this extension in production at your own risk. There is no guarantee that all incompatibilities between DuckDB and Trino/Spark engines writing to hive tables in glue have been discovered.
 
@@ -23,14 +24,16 @@ Attach options:
 | `ENDPOINT`         | Glue endpoint override, e.g. `http://localhost:5000` for a local moto server (default: AWS) |
 | `DEFAULT_LOCATION` | optional S3 prefix for new databases and for tables created without an explicit location (takes precedence over the Glue database LocationUri) |
 | `DEFAULT_SCHEMA`   | Glue database to use as the default schema                                   |
-| `READ_ONLY`        | refuse everything that changes the catalog: DML, DDL and the mutating `glue_*` partition functions |
+| `READ_ONLY`        | refuse everything that changes the catalog: DML, DDL and the mutating `glue_*` partition functions, also on Iceberg tables redirected through this catalog |
+| `ICEBERG_CATALOG`  | name of an attached Iceberg catalog fronting the same Glue Data Catalog; Iceberg tables are redirected to it (see [Iceberg tables](#iceberg-tables)) |
 
 ## Reading
 
 A table's format is read from its parameters (`table_type`, `spark.sql.sources.provider`, `metadata_location`) and
 otherwise from its InputFormat: Hudi tables (`HoodieParquetInputFormat`, ...) and symlink manifest tables
 (`SymlinkTextInputFormat`, e.g. a Delta `_symlink_format_manifest`) register a Parquet or text SerDe, so only the
-InputFormat tells them apart from a Hive table. They are listed but not read or written, like Iceberg and Delta.
+InputFormat tells them apart from a Hive table. They are listed but not read or written, like Delta; Iceberg tables
+are read and written through an attached Iceberg catalog when `ICEBERG_CATALOG` is set (see below).
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
@@ -179,9 +182,10 @@ their codec themselves.
   (Glue type names). The data files are not rewritten: parquet, json and avro files are matched by name (a renamed
   column reads as NULL), csv files by position, so a csv table keeps its number of columns, each may only be widened
   and giving it a new name renames it.
-- `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
-  a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
-  `CASCADE` is given.
+- `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3 (an Iceberg table dropped
+  through `ICEBERG_CATALOG` is dropped by the iceberg extension, which purges its files on a Glue endpoint). Glue
+  deletes all tables of a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has
+  tables or views unless `CASCADE` is given.
 
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
@@ -281,6 +285,45 @@ partition would otherwise repeat, which is not used: only the partition values a
 
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
+
+## Iceberg tables
+
+Glue lists Iceberg tables next to Hive tables, but reading one takes the iceberg extension, which talks to the same
+Glue Data Catalog through its Iceberg REST endpoint. Attach that catalog too and name it in `ICEBERG_CATALOG`:
+
+```sql
+ATTACH '<account_id>' AS my_datalake_iceberg (TYPE ICEBERG, ENDPOINT_TYPE 'glue');
+ATTACH '<account_id>' AS my_datalake (TYPE GLUE, ICEBERG_CATALOG 'my_datalake_iceberg');
+
+SELECT * FROM my_datalake.default.orders;            -- an Iceberg table: read by the iceberg extension
+INSERT INTO my_datalake.default.orders VALUES (...);  -- written by it too
+SELECT * FROM my_datalake.default.clicks;            -- a Hive table: read by this extension
+```
+
+A statement that names an Iceberg table of `my_datalake` is redirected by DuckDB to the table of the same database
+and name in `my_datalake_iceberg` (`Catalog::TryRedirectEntry`) and binds, plans and commits against that entry:
+`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `DROP TABLE`, `ALTER TABLE`, `COMMENT ON`, `DESCRIBE`, `COPY ... FROM` and
+unqualified names after `USE my_datalake.default`, each as far as the iceberg extension supports it. Hive tables are
+never redirected. `SHOW TABLES`, `duckdb_tables()` and `information_schema` keep listing the table under
+`my_datalake`, with `tags['table_type'] = 'ICEBERG'` and the columns Glue records; `DESCRIBE` reports the Iceberg
+schema.
+
+What stays as it is:
+
+- Without `ICEBERG_CATALOG`, an Iceberg table is listed but reading it fails with the usual "can not be read" error.
+- A redirect whose target does not exist (the catalog is not attached, or does not know the table) fails with a
+  `Catalog Error` that names the redirect, also for `DROP TABLE IF EXISTS`. It is a configuration error, not a
+  missing table: fix the option, or detach and re-attach without it to work on the Glue record itself.
+- `CREATE TABLE` in `my_datalake` always creates a Hive table and is never redirected; `CREATE TABLE IF NOT EXISTS`
+  on an Iceberg table's name is a no-op. Create Iceberg tables in the Iceberg catalog.
+- `READ_ONLY` on `my_datalake` refuses writes through its names, redirected or not.
+- This extension refuses `BEGIN` blocks that write Hive tables (Glue has no transactions). A transaction that writes
+  only Iceberg tables through the Glue name is the iceberg extension's, and DuckDB lets a transaction write to one
+  attached database only.
+- A table whose format changes in Glue (a Hive table replaced by an Iceberg table of the same name, or the reverse)
+  is rebuilt on the next statement that names it, so the redirect follows the current format.
+- `glue_get_table_response()` is not redirected and keeps showing the Glue record of an Iceberg table; the `glue_*`
+  partition functions keep refusing it, as they refuse every table that is not a Hive table.
 
 ## Inspecting tables
 

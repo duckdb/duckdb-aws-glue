@@ -366,7 +366,8 @@ bool GlueTableInfo::HasSameBinding(const GlueTableInfo &other) const {
 		return false;
 	}
 	if (!IsView()) {
-		return SameBindingColumns(columns, other.columns, true) &&
+		// the format decides which reader binds the table, and whether it is redirected (ICEBERG_CATALOG)
+		return GetFormat().format == other.GetFormat().format && SameBindingColumns(columns, other.columns, true) &&
 		       SameBindingColumns(partition_keys, other.partition_keys, true);
 	}
 	// a view's columns are only the alias list of its SQL, their types play no part in binding it
