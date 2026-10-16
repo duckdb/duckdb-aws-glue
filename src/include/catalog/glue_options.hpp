@@ -28,6 +28,11 @@ struct GlueAttachOptions {
 	Identifier default_schema;
 	//! Run the ATTACH-time GetDatabases reachability probe (default true); false defers the first Glue call
 	bool verify_connection = true;
+	//! Name of an attached Iceberg catalog (TYPE ICEBERG) fronting the same Glue Data Catalog. When set, a lookup of
+	//! an Iceberg table in this catalog is redirected to '<iceberg_catalog>.<database>.<table>'
+	//! (Catalog::TryRedirectEntry), so the iceberg extension binds, scans and writes it. Empty: Iceberg tables are
+	//! listed but can not be read.
+	string iceberg_catalog;
 };
 
 } // namespace duckdb

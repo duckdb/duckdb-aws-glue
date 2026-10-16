@@ -26,6 +26,7 @@
 #include "catalog/glue_view.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
@@ -449,6 +450,9 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 
 	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)));
 	auto existing = tables.GetEntry(context, lookup);
+	if (existing) {
+		existing = ReconcileWithSnapshot(context, *existing);
+	}
 	CheckEntryType(existing, CatalogType::TABLE_ENTRY, table_name, "create");
 	if (existing) {
 		switch (base.on_conflict) {
@@ -493,6 +497,9 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 
 	EntryLookupInfo lookup(CatalogType::VIEW_ENTRY, QualifiedName(Identifier(view_name)));
 	auto existing = tables.GetEntry(context, lookup);
+	if (existing) {
+		existing = ReconcileWithSnapshot(context, *existing);
+	}
 	CheckEntryType(existing, CatalogType::VIEW_ENTRY, view_name, "create");
 	if (existing) {
 		switch (info.on_conflict) {
@@ -698,6 +705,13 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
 	}
+	GlueTableInfo current;
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+		tables.RemoveEntry(table_name);
+		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
+		                       database_info.name);
+	}
+	CheckBinding(*entry, current);
 	if (entry->type == CatalogType::VIEW_ENTRY) {
 		if (info.type == AlterType::ALTER_VIEW) {
 			throw NotImplementedException(
@@ -709,12 +723,11 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		}
 		throw BinderException("\"%s\" is a view", table_name);
 	}
-	auto &glue_table = entry->Cast<GlueTable>();
-	auto format = glue_table.table_info.GetFormat();
+	auto format = current.GetFormat();
 	if (!format.IsHive()) {
 		throw NotImplementedException("ALTER TABLE is only supported for Hive tables in a Glue catalog, '%s' is a %s "
 		                              "table",
-		                              table_name, format.Describe(glue_table.table_info));
+		                              table_name, format.Describe(current));
 	}
 	if (info.type == AlterType::SET_COLUMN_COMMENT) {
 		SetColumnComment(context, table_name, info.Cast<SetColumnCommentInfo>());
@@ -731,11 +744,6 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	}
 
 	// Work on the current Glue definition, not the cached one
-	GlueTableInfo current;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
-		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
-		                       database_info.name);
-	}
 	auto find_column = [](vector<GlueColumn> &columns, const string &name) -> optional_ptr<GlueColumn> {
 		for (auto &column : columns) {
 			if (StringUtil::CIEquals(column.name, name)) {
@@ -865,13 +873,42 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	RefreshTable(context, table_name);
 }
 
+static const GlueTableInfo &CachedTableInfo(const CatalogEntry &entry) {
+	if (entry.type == CatalogType::VIEW_ENTRY) {
+		return entry.Cast<GlueView>().table_info;
+	}
+	D_ASSERT(entry.type == CatalogType::TABLE_ENTRY);
+	return entry.Cast<GlueTable>().table_info;
+}
+
+CatalogEntry &GlueSchemaEntry::ReconcileEntry(CatalogEntry &entry, const GlueTableInfo &current) {
+	if (CachedTableInfo(entry).HasSameBinding(current)) {
+		return entry;
+	}
+	return ReplaceCachedEntry(current);
+}
+
+void GlueSchemaEntry::CheckBinding(CatalogEntry &entry, const GlueTableInfo &current) {
+	if (&ReconcileEntry(entry, current) == &entry) {
+		return;
+	}
+	throw CatalogException("Glue object \"%s.%s\" changed since it was bound; retry the statement",
+	                       current.database_name, current.name);
+}
+
+CatalogEntry &GlueSchemaEntry::ReplaceCachedEntry(const GlueTableInfo &table_info) {
+	auto entry = tables.CreateEntry(tables.CreateEntry(table_info));
+	D_ASSERT(entry);
+	return *entry;
+}
+
 GlueTable &GlueSchemaEntry::RefreshTable(ClientContext &context, const string &table_name) {
 	GlueTableInfo updated;
 	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), database_info.name, table_name, updated)) {
 		throw CatalogException("Table \"%s.%s\" was altered but could not be fetched afterwards", database_info.name,
 		                       table_name);
 	}
-	return tables.CreateEntry(tables.CreateEntry(updated))->Cast<GlueTable>();
+	return ReplaceCachedEntry(updated).Cast<GlueTable>();
 }
 
 void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
@@ -891,6 +928,17 @@ void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		throw CatalogException("%s with name \"%s\" does not exist in Glue database \"%s\"",
 		                       info.type == CatalogType::VIEW_ENTRY ? "View" : "Table", table_name, database_info.name);
 	}
+	// what Glue holds right now, not the query snapshot: the kind and owner decide whether DROP may delete it
+	GlueTableInfo current;
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+		tables.RemoveEntry(table_name);
+		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
+			return;
+		}
+		throw CatalogException("%s with name \"%s\" does not exist in Glue database \"%s\"",
+		                       info.type == CatalogType::VIEW_ENTRY ? "View" : "Table", table_name, database_info.name);
+	}
+	existing = &ReconcileEntry(*existing, current);
 	CheckEntryType(existing, info.type, table_name, "drop");
 	if (existing->type == CatalogType::VIEW_ENTRY && !existing->Cast<GlueView>().IsDuckDBView()) {
 		throw CatalogException("Glue view \"%s\" was not written by DuckDB; drop it from the engine that wrote it",
@@ -921,7 +969,22 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction trans
 		return nullptr;
 	}
 	auto &context = transaction.GetContext();
-	return tables.GetEntry(context, lookup_info);
+	auto entry = tables.GetEntry(context, lookup_info);
+	if (!entry) {
+		return nullptr;
+	}
+	return ReconcileWithSnapshot(context, *entry);
+}
+
+optional_ptr<CatalogEntry> GlueSchemaEntry::ReconcileWithSnapshot(ClientContext &context, CatalogEntry &entry) {
+	// the name Glue knows, the lookup name may differ in case
+	auto table_name = entry.name.GetIdentifierName();
+	auto current = GetQueryTableInfo(context, catalog.Cast<GlueCatalog>(), database_info.name, table_name);
+	if (!current) {
+		tables.RemoveEntry(table_name);
+		return nullptr;
+	}
+	return &ReconcileEntry(entry, *current);
 }
 
 } // namespace duckdb

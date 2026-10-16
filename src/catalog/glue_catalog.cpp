@@ -22,6 +22,7 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "core/glue_format.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -92,6 +93,22 @@ optional<Identifier> GlueCatalog::GetDefaultSchema() const {
 		return nullopt;
 	}
 	return options.default_schema;
+}
+
+bool GlueCatalog::TryRedirectEntry(ClientContext &context, TableCatalogEntry &entry, const EntryLookupInfo &lookup_info,
+                                   QualifiedName &target) {
+	if (options.iceberg_catalog.empty()) {
+		return false;
+	}
+	// the entry was reconciled with this statement's Glue snapshot by the lookup, format included (HasSameBinding)
+	auto &table = entry.Cast<GlueTable>();
+	if (table.table_info.GetFormat().format != GlueFormat::ICEBERG) {
+		return false;
+	}
+	// The Iceberg catalog fronts the same Glue Data Catalog, so the table has the same database and name there
+	target = QualifiedName(Identifier(options.iceberg_catalog), Identifier(table.table_info.database_name),
+	                       Identifier(table.table_info.name));
+	return true;
 }
 
 //===--------------------------------------------------------------------===//
@@ -289,7 +306,9 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
                                            GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();
 	// another engine may have converted the table since the entry was cached
-	table_info = glue_table.RefreshTableInfo(context);
+	table_info = glue_table.GetTableInfoForQuery(context);
+	// the lookup reconciled this entry with the same query snapshot; a guard for a caller that bypassed it
+	glue_table.schema.Cast<GlueSchemaEntry>().CheckBinding(glue_table, table_info);
 	auto format = table_info.GetFormat();
 	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "
@@ -313,11 +332,11 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
 	}
 	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
 	// keys DuckDB writes
-	if (glue_table.table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
+	if (table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses the OpenX JSON SerDe "
 		                              "'%s', DuckDB writes JSON tables only with the Hive JsonSerDe "
 		                              "(org.apache.hive.hcatalog.data.JsonSerDe)",
-		                              statement, table.name.GetIdentifierName(), glue_table.table_info.serde_library);
+		                              statement, table.name.GetIdentifierName(), table_info.serde_library);
 	}
 	return glue_table;
 }

@@ -7,6 +7,8 @@
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
 
+#include "core/glue_types.hpp"
+
 namespace duckdb {
 
 string GlueTableInfo::GetParameter(const string &key) const {
@@ -340,6 +342,40 @@ GlueTableType GlueTableTypeFromString(const string &type) {
 GlueTableFormat GlueTableInfo::GetFormat() const {
 	auto &info = *this;
 	return GlueTableFormat::Detect(info);
+}
+
+static bool SameBindingColumns(const vector<GlueColumn> &left, const vector<GlueColumn> &right, bool compare_types) {
+	if (left.size() != right.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < left.size(); i++) {
+		if (left[i].name != right[i].name) {
+			return false;
+		}
+		// another engine may spell the same type differently (int, integer)
+		if (compare_types && left[i].type != right[i].type &&
+		    GlueTypes::ToLogicalType(left[i].type) != GlueTypes::ToLogicalType(right[i].type)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool GlueTableInfo::HasSameBinding(const GlueTableInfo &other) const {
+	if (table_type != other.table_type) {
+		return false;
+	}
+	if (!IsView()) {
+		// the format decides which reader binds the table, and whether it is redirected (ICEBERG_CATALOG)
+		return GetFormat().format == other.GetFormat().format && SameBindingColumns(columns, other.columns, true) &&
+		       SameBindingColumns(partition_keys, other.partition_keys, true);
+	}
+	// a view's columns are only the alias list of its SQL, their types play no part in binding it
+	return SameBindingColumns(columns, other.columns, false) && view_original_text == other.view_original_text &&
+	       view_expanded_text == other.view_expanded_text &&
+	       GetParameter("duckdb_view") == other.GetParameter("duckdb_view") &&
+	       GetParameter("duckdb_view_default_database") == other.GetParameter("duckdb_view_default_database") &&
+	       GetParameter("duckdb_view_secure") == other.GetParameter("duckdb_view_secure");
 }
 
 string GlueTableInfo::GetMetadataLocation() const {

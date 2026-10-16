@@ -50,6 +50,10 @@ public:
 		return false;
 	}
 	optional<Identifier> GetDefaultSchema() const override;
+	//! Redirect Iceberg tables to the attached Iceberg catalog named by the ICEBERG_CATALOG option (see
+	//! GlueAttachOptions)
+	bool TryRedirectEntry(ClientContext &context, TableCatalogEntry &entry, const EntryLookupInfo &lookup_info,
+	                      QualifiedName &target) override;
 	//! Allow CREATE TABLE ... PARTITIONED BY (...) WITH (location = '...', <property> = '...'); the options are
 	//! validated in GlueSchemaEntry::CreateTable
 	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
