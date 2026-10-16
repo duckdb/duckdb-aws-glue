@@ -79,7 +79,7 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   partitioning. When a query reads at least
   `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
   recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
-  partitions, and partitions at custom locations, are listed one directory each.
+  partitions, and partitions at custom locations, are listed one directory each, 16 at the same time.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the

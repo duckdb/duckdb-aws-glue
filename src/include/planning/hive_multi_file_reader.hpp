@@ -65,7 +65,7 @@ private:
 //! only the partitions a query reads are ever listed. When at least 'hive_partition_listing_threshold' of those
 //! partitions live below the table root, the root is listed once (recursively, one request per 1000 keys on S3) and
 //! the files are matched to their partitions by prefix; otherwise, and for partitions elsewhere, every partition is
-//! one listing of its location. An unpartitioned table is one listing of the root location.
+//! listed on its own, up to 16 at once. An unpartitioned table is just one listing of the root location.
 class HiveMultiFileList : public LazyMultiFileList {
 public:
 	//! 'partition_indexes' are the partitions to read
@@ -98,7 +98,8 @@ protected:
 	bool ExpandNextPath() const override;
 
 private:
-	//! A directory listing still to do: the table root (for the partitions below it) or one partition
+	//! A listing we still have to do: either the table root (covering the partitions under it) or a batch of
+	//! partitions that each get their own listing
 	struct ListingJob {
 		bool root;
 		vector<idx_t> partitions;
@@ -106,7 +107,8 @@ private:
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
 	void ListRoot(const vector<idx_t> &partitions) const;
-	void ListPartition(idx_t partition_index) const;
+	//! Lists the directories of 'partition_indexes' in parallel
+	void ListPartitions(const vector<idx_t> &partition_indexes) const;
 	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until
 	//! they hold one of 'partitions'
 	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;

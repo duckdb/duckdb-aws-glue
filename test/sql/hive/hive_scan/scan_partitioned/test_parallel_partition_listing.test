@@ -1,0 +1,120 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_parallel_partition_listing.test
+# description: Partitions that each get their own listing are listed 16 at a time, and each directory only once
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pl_events;
+
+statement ok
+CREATE TABLE my_datalake.default.pl_events (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+# 20 partitions under the table location, 100 rows each
+statement ok
+INSERT INTO my_datalake.default.pl_events SELECT i, 'd' || (i % 20) FROM range(2000) t(i);
+
+# 5 partitions stored outside the table location, 10 rows each
+loop i 0 5
+
+statement ok
+CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'c{i}'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c{i}');
+
+statement ok
+COPY (SELECT 10000 + {i} * 10 + j AS id FROM range(10) t(j))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c{i}/f.parquet';
+
+endloop
+
+# a partition that shares another one's location: its files should only be read once
+statement ok
+CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'shared'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c0');
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.pl_events');
+----
+26
+
+# the listed prefix is in the URL's query string, and HTTP logs redact that by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CREATE MACRO listings() AS TABLE
+    SELECT count(*) AS requests
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.url LIKE '%list-type=2%';
+
+# list every partition on its own: two batches, 16 and then 9
+statement ok
+SET hive_partition_listing_threshold = 1000;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query III
+SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.default.pl_events;
+----
+2050	2500225	25
+
+# one listing per directory: 20 under the table location, 5 outside it, and the shared one only once
+query I
+SELECT requests FROM listings();
+----
+25
+
+query II
+SELECT dt, count(*) FROM my_datalake.default.pl_events WHERE dt IN ('d3', 'c2', 'c4') GROUP BY dt ORDER BY dt;
+----
+c2	10
+c4	10
+d3	100
+
+query I
+SELECT max(id) FROM my_datalake.default.pl_events WHERE dt LIKE 'c%' OR dt = 'shared';
+----
+10049
+
+# above the threshold the table location is listed once, recursively, and the 5 outside partitions in one batch
+statement ok
+RESET hive_partition_listing_threshold;
+
+query III
+SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.default.pl_events;
+----
+2050	2500225	25
+
+# if a listing fails on a worker thread, the query should fail too
+statement ok
+CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'unreadable'},
+    location := 's3://pl-missing-bucket/unreadable');
+
+statement ok
+SET hive_partition_listing_threshold = 1000;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pl_events;
+----
+<REGEX>:.*(pl-missing-bucket|NoSuchBucket|404).*
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.pl_events;
