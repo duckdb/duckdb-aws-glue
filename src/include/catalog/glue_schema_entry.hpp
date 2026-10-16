@@ -73,10 +73,17 @@ public:
 	static bool IsBucketingOption(const string &key);
 	//! Type changes Hive can read back from the existing parquet files: widening only
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
+	//! Refresh the cached entry and fail if 'current' no longer has the schema this entry was bound with
+	void CheckBinding(CatalogEntry &entry, const GlueTableInfo &current);
 	//! Replace the cached entry of an altered table with what Glue stored
 	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
 
 private:
+	//! 'entry' if 'current' still has the schema it was built from, else its cached replacement
+	CatalogEntry &ReconcileEntry(CatalogEntry &entry, const GlueTableInfo &current);
+	//! 'entry' reconciled with the query's snapshot of it; null (and evicted) if Glue no longer has it
+	optional_ptr<CatalogEntry> ReconcileWithSnapshot(ClientContext &context, CatalogEntry &entry);
+	CatalogEntry &ReplaceCachedEntry(const GlueTableInfo &table_info);
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
 	                                               const GlueTableInfo *resolved_table_info);
 	static bool CatalogTypeIsSupported(CatalogType type);
