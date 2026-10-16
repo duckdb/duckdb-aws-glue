@@ -79,7 +79,14 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   partitioning. When a query reads at least
   `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
   recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
-  partitions, and partitions at custom locations, are listed one directory each.
+  partitions, and partitions at custom locations, are listed one directory each. A directory is listed once per
+  query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
+  false) the listing is kept for later statements of the connection as well, held and cleared like the metadata
+  cache (`glue_metadata_cache_scope`, writes through the extension, rollback) — so files added any other way
+  (another writer, `COPY TO` the table location) appear only after the next clear. Files removed any other way
+  (compaction, an overwrite, dropping and recreating the table at the same location) are worse than unseen: scans
+  under the cached listing fail trying to open the dead paths, or read the superseded files, until the next clear.
+  It suits hosts that run one query per connection.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the
@@ -189,7 +196,8 @@ of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue
 Within a DuckDB transaction
 (`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
 inside those partitions are listed at each scan. So a partition added outside the transaction becomes visible only after the transaction ends, while
-a file added to an existing partition is seen at once.
+a file added to an existing partition is seen by the next query (the scans of one query share a listing) — or, under
+`glue_cache_listings`, after the next cache clear.
 
 With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the connection's later transactions. It is
 per connection — two connections never share one — so another connection's write stays unseen until something clears

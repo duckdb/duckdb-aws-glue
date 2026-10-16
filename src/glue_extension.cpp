@@ -74,6 +74,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "effect on the next transaction.",
 	                          LogicalType::VARCHAR, Value("transaction"));
 
+	config.AddExtensionOption(
+	    "glue_cache_listings",
+	    "Keep the S3 listing of a Glue table's directory for later statements of the connection "
+	    "(within one statement every scan and the cardinality sample share a listing already). "
+	    "Kept like the metadata cache (glue_metadata_cache_scope) and cleared by the same writes; "
+	    "files added any other way (another writer, COPY TO the table location) are not seen "
+	    "until then. Files removed any other way (compaction, an overwrite, dropping and recreating "
+	    "the table at the same location) make scans under the cached listing fail, or read the "
+	    "superseded files, until then. Default false.",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	config.AddExtensionOption("hive_partition_listing_threshold",
 	                          "When a scan reads at least this many partitions below the table location, the location "
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",

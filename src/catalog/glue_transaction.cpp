@@ -1,5 +1,6 @@
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "planning/hive_query_cache.hpp"
 
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -9,23 +10,10 @@
 
 namespace duckdb {
 
-namespace {
-
-bool ConnectionScopedMetadataCache(ClientContext &context) {
-	Value scope;
-	if (context.TryGetCurrentSetting("glue_metadata_cache_scope", scope) && !scope.IsNull()) {
-		return StringUtil::Lower(StringValue::Get(scope)) == "connection";
-	}
-	// matches the registered default of glue_metadata_cache_scope: 'transaction'
-	return false;
-}
-
-} // namespace
-
 GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &manager, ClientContext &context)
     : Transaction(manager, context), glue_catalog(glue_catalog),
       transaction_state(GlueTransactionState::TRANSACTION_NOT_YET_STARTED) {
-	if (ConnectionScopedMetadataCache(context)) {
+	if (GlueTransactionCache::ConnectionScoped(context)) {
 		auto state = context.registered_state->GetOrCreate<GlueMetadataCacheState>("glue_metadata_cache");
 		cache = state->GetCache(glue_catalog.GetName().GetIdentifierName(), glue_catalog.GetAttached().oid);
 	} else {
@@ -74,6 +62,16 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 	if (state) {
 		state->ClearAll();
 	}
+	ClearHiveListingCache(context);
+}
+
+bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {
+	Value scope;
+	if (context.TryGetCurrentSetting("glue_metadata_cache_scope", scope) && !scope.IsNull()) {
+		return StringUtil::Lower(StringValue::Get(scope)) == "connection";
+	}
+	// matches the registered default of glue_metadata_cache_scope: 'transaction'
+	return false;
 }
 
 void GlueTransactionCache::OnDetach(ClientContext &context, Catalog &catalog) {
