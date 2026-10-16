@@ -30,7 +30,8 @@ DROP TABLE IF EXISTS my_datalake.default.formats_csv_plain;
 statement ok
 CREATE TABLE my_datalake.default.formats_csv (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year) WITH (format = 'csv');
 
-# the Glue table describes a csv table the way Hive / Athena expect it: LazySimpleSerDe, comma delimited, no header
+# the Glue table describes a csv table the way Hive / Athena expect it: LazySimpleSerDe, no header and, without a
+# delimiter, Hive's and Athena's default '\001'
 query IIII
 SELECT serde_library, parameters['classification'],
        response.StorageDescriptor.InputFormat::VARCHAR, response.StorageDescriptor.OutputFormat::VARCHAR
@@ -39,11 +40,11 @@ FROM glue_get_table_response('my_datalake.default.formats_csv');
 org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe	csv	org.apache.hadoop.mapred.TextInputFormat	org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
 
 query IIII
-SELECT serde_parameters['field.delim'], serde_parameters['serialization.format'], parameters['delimiter'],
-       parameters['skip.header.line.count'] IS NULL
+SELECT serde_parameters['field.delim'] = chr(1), serde_parameters['serialization.format'] = chr(1),
+       parameters['delimiter'] = chr(1), parameters['skip.header.line.count'] IS NULL
 FROM glue_get_table_response('my_datalake.default.formats_csv');
 ----
-,	,	,	true
+true	true	true	true
 
 query IIII
 SELECT columns[1].name, columns[1].type, columns[2].type, partition_keys[1].name
@@ -62,19 +63,19 @@ INSERT INTO my_datalake.default.formats_csv VALUES
 statement ok
 INSERT INTO my_datalake.default.formats_csv VALUES ('AA5', 7, 2015), ('AA6', 1, 2020);
 
-# the files are comma separated without a header line, one directory per partition, without the partition column
+# the files are '\001' separated without a header line, one directory per partition, without the partition column
 query I
 SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv/year=2015/*.csv');
 ----
 2
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv/year=1993/*.csv');
+SELECT replace(replace(content, chr(1), '<001>'), chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv/year=1993/*.csv');
 ----
-AA4,3<nl>
+AA4<001>3<nl>
 
 query II
-SELECT flight, delay FROM read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv/year=2015/*.csv', header = false, columns = {flight: 'VARCHAR', delay: 'INTEGER'}) ORDER BY flight;
+SELECT flight, delay FROM read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv/year=2015/*.csv', header = false, delim = chr(1), columns = {flight: 'VARCHAR', delay: 'INTEGER'}) ORDER BY flight;
 ----
 AA2	0
 AA5	7
@@ -127,9 +128,9 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_
 ----
 2
 
-# NULL is \N, the default serialization.null.format of LazySimpleSerDe
+# NULL is \N, the default serialization.null.format of LazySimpleSerDe (the '\001' delimiters shown as commas)
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_plain/*.csv') ORDER BY 1;
+SELECT replace(replace(content, chr(1), ','), chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_plain/*.csv') ORDER BY 1;
 ----
 1,a,10.50,true,2016-05-14<nl>2,b,\N,false,\N<nl>
 3,c,0.01,\N,2016-05-15<nl>
@@ -153,7 +154,7 @@ statement ok
 DETACH my_datalake;
 
 query III
-SELECT flight, delay, year FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv', format := 'csv',
+SELECT flight, delay, year FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv', format := 'csv', delim := chr(1),
     schema := {flight: 'VARCHAR', delay: 'INTEGER', year: 'INTEGER'},
     partitions := [{year: 1993}, {year: 2015}, {year: 2020}])
 ORDER BY year, flight;
@@ -164,7 +165,7 @@ AA5	7	2015
 AA6	1	2020
 
 query IIIII
-SELECT id, name, amount, ok, d FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_plain', format := 'csv', nullstr := '\N',
+SELECT id, name, amount, ok, d FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_plain', format := 'csv', delim := chr(1), nullstr := '\N',
     schema := {id: 'INTEGER', name: 'VARCHAR', amount: 'DECIMAL(10, 2)', ok: 'BOOLEAN', d: 'DATE'})
 ORDER BY id;
 ----

@@ -10,6 +10,10 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+statement ok
+SET hive_default_format = 'parquet';
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -164,7 +168,7 @@ SELECT count(*), count(*) FILTER (filename LIKE '%/_hidden.parquet') FROM my_dat
 # the same for a csv table
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.path_flat_csv (id INTEGER, name VARCHAR) WITH (format = 'csv');
+CREATE TABLE my_datalake.default.path_flat_csv (id INTEGER, name VARCHAR) WITH (format = 'csv', delimiter = ',');
 
 statement ok
 INSERT INTO my_datalake.default.path_flat_csv VALUES (1, 'one'), (2, 'two');

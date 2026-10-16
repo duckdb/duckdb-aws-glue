@@ -144,7 +144,7 @@ SELECT id, name FROM my_datalake.default.formats_csv_semicolon ORDER BY id;
 # and NULL is \N. A value holding the delimiter or a line break can not be written, Hive would split it
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_quoted (id INTEGER, name VARCHAR, note VARCHAR) WITH (format = 'csv');
+CREATE TABLE my_datalake.default.formats_csv_quoted (id INTEGER, name VARCHAR, note VARCHAR) WITH (format = 'csv', delimiter = ',');
 
 statement ok
 INSERT INTO my_datalake.default.formats_csv_quoted VALUES

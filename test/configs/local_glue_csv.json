@@ -1,0 +1,39 @@
+{
+	"description": "Like local_glue.json, but every CREATE TABLE without a 'format' option makes a csv table (SET hive_default_format = 'csv'), so the tests also cover csv tables",
+	"on_init": "CREATE SECRET (TYPE S3, KEY_ID 'minio', SECRET 'minio123', REGION 'us-east-1', ENDPOINT 'localhost:9100', USE_SSL false, URL_STYLE 'path'); SET hive_default_format = 'csv';",
+	"statically_loaded_extensions": [
+		"core_functions",
+		"parquet",
+		"json",
+		"avro",
+		"httpfs",
+		"glue"
+	],
+	"test_env": [
+		{
+			"env_name": "GLUE_TEST_CONFIG",
+			"env_value": "local"
+		},
+		{
+			"env_name": "GLUE_CATALOG_ID",
+			"env_value": "123456789012"
+		},
+		{
+			"env_name": "GLUE_ENDPOINT",
+			"env_value": "http://localhost:5555"
+		},
+		{
+			"env_name": "DEFAULT_S3_LOCATION",
+			"env_value": "s3://glue-test/warehouse"
+		}
+	],
+	"skip_tests": [
+		{
+			"reason": "table function not implemented yet",
+			"paths": [
+				"test/sql/hive/ddl/alter_partition/glue_repair_table.test",
+				"test/sql/hive/ddl/alter_partition/test_show_partitions.test"
+			]
+		}
+	]
+}

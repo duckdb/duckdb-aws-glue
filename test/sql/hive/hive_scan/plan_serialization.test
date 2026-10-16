@@ -8,6 +8,10 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+statement ok
+SET hive_default_format = 'parquet';
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -43,7 +47,7 @@ CREATE TABLE my_datalake.default.ps_lines WITH (format = 'json') AS SELECT 7 AS 
 # a header line, a NULL string, a quote that is a plain character, a short row and a value that does not parse
 statement ok
 CREATE TABLE my_datalake.default.ps_text (id INTEGER, name VARCHAR, amount DOUBLE)
-WITH (format = 'csv', 'skip.header.line.count' = '1', 'serialization.null.format' = 'NA');
+WITH (format = 'csv', delimiter = ',', 'skip.header.line.count' = '1', 'serialization.null.format' = 'NA');
 
 statement ok
 COPY (SELECT * FROM (VALUES ('id,name,amount'), ('1,"a",1.5'), ('2,NA,x'), ('3,c')) t(line))

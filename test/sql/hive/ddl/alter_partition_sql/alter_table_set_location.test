@@ -10,6 +10,10 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+statement ok
+SET hive_default_format = 'parquet';
+
 statement ok
 SET active_grammar_extensions = ['glue_hive_ddl'];
 

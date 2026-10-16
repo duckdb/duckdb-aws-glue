@@ -1,0 +1,55 @@
+{
+	"description": "Like local_glue.json, but every CREATE TABLE without a 'format' option makes a avro table (SET hive_default_format = 'avro'), so the tests also cover avro tables",
+	"on_init": "CREATE SECRET (TYPE S3, KEY_ID 'minio', SECRET 'minio123', REGION 'us-east-1', ENDPOINT 'localhost:9100', USE_SSL false, URL_STYLE 'path'); SET hive_default_format = 'avro';",
+	"statically_loaded_extensions": [
+		"core_functions",
+		"parquet",
+		"json",
+		"avro",
+		"httpfs",
+		"glue"
+	],
+	"test_env": [
+		{
+			"env_name": "GLUE_TEST_CONFIG",
+			"env_value": "local"
+		},
+		{
+			"env_name": "GLUE_CATALOG_ID",
+			"env_value": "123456789012"
+		},
+		{
+			"env_name": "GLUE_ENDPOINT",
+			"env_value": "http://localhost:5555"
+		},
+		{
+			"env_name": "DEFAULT_S3_LOCATION",
+			"env_value": "s3://glue-test/warehouse"
+		}
+	],
+	"skip_tests": [
+		{
+			"reason": "table function not implemented yet",
+			"paths": [
+				"test/sql/hive/ddl/alter_partition/glue_repair_table.test",
+				"test/sql/hive/ddl/alter_partition/test_show_partitions.test"
+			]
+		},
+		{
+			"reason": "Avro tables get no cardinality estimate yet",
+			"paths": [
+				"test/sql/hive/bugs/s3_cardinality_empty_and_custom_partitions.test",
+				"test/sql/hive/bugs/s3_cardinality_ignores_data.test",
+				"test/sql/hive/bugs/s3_cardinality_join_inputs.test",
+				"test/sql/hive/bugs/s3_cardinality_pruning.test",
+				"test/sql/hive/bugs/s3_listing_scales_with_table.test_slow",
+				"test/sql/hive/bugs/s3_multi_key_partition_statistics.test",
+				"test/sql/hive/bugs/s3_no_partition_column_statistics.test",
+				"test/sql/hive/bugs/s3_numeric_partition_column_statistics.test",
+				"test/sql/hive/bugs/s3_partition_statistics_date_key.test",
+				"test/sql/hive/bugs/s3_partition_value_valid_escape.test",
+				"test/sql/hive/bugs/s3_plan_time_cost_invariants.test"
+			]
+		}
+	]
+}
