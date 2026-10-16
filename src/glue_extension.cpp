@@ -74,6 +74,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "effect on the next transaction.",
 	                          LogicalType::VARCHAR, Value("transaction"));
 
+	config.AddExtensionOption("glue_batch_table_lookup",
+	                          "After the first table of a database is looked up one at a time, fetch one GetTables "
+	                          "page of the database into the metadata cache instead of a GetTable per table; larger "
+	                          "databases keep per-table lookups for the remainder. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	config.AddExtensionOption("hive_partition_listing_threshold",
 	                          "When a scan reads at least this many partitions below the table location, the location "
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",

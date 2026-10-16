@@ -4,7 +4,9 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/http/http_transport_manager.hpp"
 
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
@@ -22,8 +24,8 @@
 
 // Bridge between the AWS SDK and DuckDB's HTTP layer, modeled after duckdb-aws PR #173: an aws-sdk-cpp
 // HttpClientFactory whose HttpClient forwards every request to HTTPUtil::Get(db). The concrete transport is whatever
-// the DatabaseInstance has registered (httpfs's curl client on native). Requests go through HTTPUtil::Request rather
-// than the client directly so that DuckDB's retry and HTTP logging apply.
+// the DatabaseInstance has registered (httpfs's curl client on native). Requests go through a transport manager
+// session rather than the client directly, so that DuckDB's connection pool, retry and HTTP logging all apply.
 
 namespace duckdb {
 
@@ -120,15 +122,15 @@ public:
 	            Aws::Utils::RateLimits::RateLimiterInterface *) const override {
 		auto aws_response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("GlueDuckDBHttp", request);
 		try {
-			auto &http_util = HTTPUtil::Get(db);
 			string url = EnsureUrlHasPath(request->GetUri().GetURIString(true).c_str());
 
-			// Parameters from the calling connection carry its logger, which is what makes the request show up in
-			// that connection's HTTP log. SDK calls made outside a GlueHttpClientContextScope (e.g. credential
-			// refreshes) fall back to the database level parameters.
+			// Pooled session; the calling connection's parameters carry its logger, so the request shows in that
+			// connection's HTTP log. Calls outside a GlueHttpClientContextScope (e.g. credential refreshes) fall
+			// back to the database level parameters.
 			auto context = GlueHttpClientContextScope::Current();
-			auto params =
-			    context ? http_util.InitializeParameters(*context, url) : http_util.InitializeParameters(db, url);
+			auto &manager = DBConfig::GetConfig(db).GetHTTPTransportManager();
+			auto session = context ? manager.CreateSession(*context, url) : manager.CreateSession(db, url);
+			auto &params = session.Parameters();
 
 			HTTPHeaders headers(db);
 			for (const auto &header : request->GetHeaders()) {
@@ -140,31 +142,26 @@ public:
 				headers.Insert(header.first.c_str(), header.second.c_str());
 			}
 
-			string path;
-			string proto_host_port;
-			HTTPUtil::DecomposeURL(url, path, proto_host_port);
-			auto client = http_util.InitializeClient(*params, proto_host_port);
-
 			unique_ptr<HTTPResponse> response;
 			string body_buffer;
 			switch (ToDuckDBRequestType(request->GetMethod())) {
 			case RequestType::GET_REQUEST: {
 				GetRequestInfo info(
-				    url, headers, *params, [](const HTTPResponse &) { return true; },
+				    url, headers, params, [](const HTTPResponse &) { return true; },
 				    [&](const_data_ptr_t data, idx_t len) {
 					    aws_response->GetResponseBody().write(const_char_ptr_cast(data), NumericCast<int64_t>(len));
 					    return true;
 				    });
 				info.try_request = true;
-				response = http_util.Request(info, client);
+				response = session.Request(info);
 				break;
 			}
 			case RequestType::POST_REQUEST: {
 				body_buffer = ReadRequestBody(request);
-				PostRequestInfo info(url, headers, *params, const_data_ptr_cast(body_buffer.c_str()),
+				PostRequestInfo info(url, headers, params, const_data_ptr_cast(body_buffer.c_str()),
 				                     body_buffer.size());
 				info.try_request = true;
-				response = http_util.Request(info, client);
+				response = session.Request(info);
 				if (response) {
 					aws_response->GetResponseBody().write(info.buffer_out.data(),
 					                                      NumericCast<int64_t>(info.buffer_out.size()));
@@ -174,22 +171,22 @@ public:
 			case RequestType::PUT_REQUEST: {
 				body_buffer = ReadRequestBody(request);
 				string content_type = request->GetContentType().c_str();
-				PutRequestInfo info(url, headers, *params, const_data_ptr_cast(body_buffer.c_str()), body_buffer.size(),
+				PutRequestInfo info(url, headers, params, const_data_ptr_cast(body_buffer.c_str()), body_buffer.size(),
 				                    content_type);
 				info.try_request = true;
-				response = http_util.Request(info, client);
+				response = session.Request(info);
 				break;
 			}
 			case RequestType::HEAD_REQUEST: {
-				HeadRequestInfo info(url, headers, *params);
+				HeadRequestInfo info(url, headers, params);
 				info.try_request = true;
-				response = http_util.Request(info, client);
+				response = session.Request(info);
 				break;
 			}
 			case RequestType::DELETE_REQUEST: {
-				DeleteRequestInfo info(url, headers, *params);
+				DeleteRequestInfo info(url, headers, params);
 				info.try_request = true;
-				response = http_util.Request(info, client);
+				response = session.Request(info);
 				break;
 			}
 			default:
@@ -198,6 +195,16 @@ public:
 
 			if (!response) {
 				aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
+				return aws_response;
+			}
+			if (response->HasRequestError()) {
+				// A transport failure (e.g. a pooled connection the peer closed while idle) never reached the
+				// service, so mark it like the catch below instead of casting status 0 into a response code:
+				// the AWS SDK classifies NETWORK_CONNECTION as retryable and re-issues the request, on a fresh
+				// connection because the session does not return the errored client to the pool.
+				aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
+				aws_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
+				aws_response->SetClientErrorMessage(response->GetRequestError().c_str());
 				return aws_response;
 			}
 			aws_response->SetResponseCode(static_cast<Aws::Http::HttpResponseCode>(static_cast<int>(response->status)));

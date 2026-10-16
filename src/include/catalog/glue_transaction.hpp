@@ -58,8 +58,15 @@ public:
 		tables.clear();
 		partitions.clear();
 	}
+	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
+	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
+	idx_t Id() const {
+		return id;
+	}
 
 private:
+	static idx_t NextId();
+
 	//! One cached value and the lock that guards loading it. The lock is per entry so the Glue calls for
 	//! different tables do not wait on each other (resolving N tables runs their fetches in parallel).
 	template <class T>
@@ -94,6 +101,7 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
+	const idx_t id = NextId();
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
