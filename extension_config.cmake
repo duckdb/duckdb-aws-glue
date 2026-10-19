@@ -16,7 +16,7 @@ duckdb_extension_load(tpcds)
 if (NOT MINGW)
     duckdb_extension_load(avro
         GIT_URL https://github.com/duckdb/duckdb-avro
-        GIT_TAG d786c8bd414ef417d6d4cb1b4f531dd2e7b8f7c3
+        GIT_TAG 4fce24a26170ed56695d0d5dfb3035e86f787155 # main 2026-10-14 pin
         SUBMODULES "third_party/avro-c"
     )
 endif()
