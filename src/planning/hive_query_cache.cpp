@@ -57,13 +57,23 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 	return listing;
 }
 
-shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {
+shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info,
+                                                               const string &expression) {
 	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
 	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
 	// per table, so the Glue calls for different tables do not wait on each other
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
+	if (!expression.empty()) {
+		// a selection of the partitions: kept apart from the full list, and only for this query
+		auto &partitions = entry->filtered_partitions[expression];
+		if (!partitions) {
+			partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
+			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name, expression));
+		}
+		return partitions;
+	}
 	if (!entry->partitions) {
-		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
 		auto load = [&]() {
 			return make_shared_ptr<const vector<GluePartitionInfo>>(
 			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));

@@ -1,4 +1,5 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "planning/glue_partition_expression.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 
@@ -16,6 +17,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -30,6 +32,7 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "core/glue_types.hpp"
+#include "api/glue_api.hpp"
 
 namespace duckdb {
 
@@ -65,11 +68,34 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 		if (partition_keys.empty() || catalog_name.empty()) {
 			// unpartitioned, or a hive_scan that was given none
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
+		} else if (!partition_expression.empty()) {
+			try {
+				partitions = GetTablePartitions(context, *this, partition_expression);
+			} catch (std::exception &ex) {
+				ErrorData error(ex);
+				if (!GlueAPI::IsPartitionExpressionRejected(error)) {
+					throw;
+				}
+				// Glue couldn't use the expression, e.g. a partition value it can't compare with the literal. That's
+				// fine, we apply the filters to the partition values ourselves anyway. Anything else (throttling, a
+				// timeout) fails the scan, since retrying without the expression would only fetch more.
+				DUCKDB_LOG_WARNING(context, "Glue could not filter the partitions of '%s' with '%s', listing all: %s",
+				                   Describe(), partition_expression, error.RawMessage());
+				partition_expression.clear();
+				partitions = GetTablePartitions(context, *this);
+			}
 		} else {
 			partitions = GetTablePartitions(context, *this);
 		}
 	}
 	return partitions;
+}
+
+void HiveScanInfo::SetPartitionExpression(string expression) const {
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	if (!partitions) {
+		partition_expression = std::move(expression);
+	}
 }
 
 bool HiveScanInfo::PartitionsLoaded() const {
@@ -755,11 +781,6 @@ void HiveMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &
 //===--------------------------------------------------------------------===//
 // Partition pruning
 //===--------------------------------------------------------------------===//
-struct PartitionKeyProjection {
-	idx_t projected_column_index;
-	idx_t partition_key_index;
-};
-
 //! Replace references to partition columns of the scanned table by the partition's values
 static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expression> &expr, TableIndex table_index,
                                        const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info,
@@ -862,6 +883,14 @@ static void AddPruningFiltersToExtraInfo(ExtraOperatorInfo &extra_info, const ve
 	}
 }
 
+static bool GluePartitionFilterPushdownEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("glue_partition_filter_pushdown", setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return false;
+}
+
 unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
                                                                      const MultiFileOptions &options,
                                                                      MultiFilePushdownInfo &pushdown_info,
@@ -878,12 +907,17 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// before its directory is listed. Such a filter is then true of every row read and is removed, as DuckDB's own
 	// hive partitioning does: kept, the optimizer would cost it a second time (a range filter keeps a fifth of the
 	// rows the pruning already narrowed down).
-	// first use of the partitions: loaded here, with the filters known
+	// first use of the partitions: loaded here, with the filters known. The filters Glue can evaluate go with the
+	// request, so that it returns only the partitions they match; they count as pruning filters in EXPLAIN
 	auto &hive_list = files.Cast<HiveMultiFileList>();
-	auto candidates = hive_list.PartitionIndexes();
-	auto partitions = info.Partitions(context);
 	unordered_set<idx_t> pruning_filters;
 	unordered_set<idx_t> decided_filters;
+	if (!info.PartitionsLoaded() && GluePartitionFilterPushdownEnabled(context)) {
+		info.SetPartitionExpression(
+		    GluePartitionExpression(info, pushdown_info.table_index, projections, filters, pruning_filters));
+	}
+	auto candidates = hive_list.PartitionIndexes();
+	auto partitions = info.Partitions(context);
 	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
 	                             filters, pruning_filters, decided_filters);
 	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);

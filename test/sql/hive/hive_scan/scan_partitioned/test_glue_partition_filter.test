@@ -1,0 +1,424 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_glue_partition_filter.test
+# description: With glue_partition_filter_pushdown, the filters on the partition columns go to Glue and GetPartitions
+# group: [scan_partitioned]
+
+# returns only the partitions they match. EXPLAIN shows the partitions Glue returned as the second number of
+# 'Scanning Files'.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gpf_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.gpf_orders (id INTEGER, dt VARCHAR, n INTEGER) PARTITIONED BY (dt, n);
+
+# six partitions
+statement ok
+INSERT INTO my_datalake.default.gpf_orders VALUES
+    (1, '2024-01-01', 1), (2, '2024-01-01', 2), (3, '2024-01-02', 1),
+    (4, '2024-01-02', 2), (5, '2024-01-03', 1), (6, '2024-01-03', 2);
+
+#---------------------------------------------------------------------------
+# off by default: Glue returns every partition and DuckDB prunes on their values
+#---------------------------------------------------------------------------
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-02' ORDER BY id;
+----
+3
+4
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-02';
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/6.*
+
+statement ok
+SET glue_partition_filter_pushdown = true;
+
+#---------------------------------------------------------------------------
+# filters Glue applies
+#---------------------------------------------------------------------------
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-02' ORDER BY id;
+----
+3
+4
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-02';
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/2.*
+
+# an integer key
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE n = 1 ORDER BY id;
+----
+1
+3
+5
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE n = 1;
+----
+physical_plan	<REGEX>:.*Scanning Files: 3/3.*
+
+# a range on a string key and an integer key together
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt >= '2024-01-02' AND n > 1 ORDER BY id;
+----
+4
+6
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt >= '2024-01-02' AND n > 1;
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/2.*
+
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt IN ('2024-01-01', '2024-01-03') ORDER BY id;
+----
+1
+2
+5
+6
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt IN ('2024-01-01', '2024-01-03');
+----
+physical_plan	<REGEX>:.*Scanning Files: 4/4.*
+
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt BETWEEN '2024-01-01' AND '2024-01-02' ORDER BY id;
+----
+1
+2
+3
+4
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt BETWEEN '2024-01-01' AND '2024-01-02';
+----
+physical_plan	<REGEX>:.*Scanning Files: 4/4.*
+
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-01' OR n = 2 ORDER BY id;
+----
+1
+2
+4
+6
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-01' OR n = 2;
+----
+physical_plan	<REGEX>:.*Scanning Files: 4/4.*
+
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt <> '2024-01-01' ORDER BY id;
+----
+3
+4
+5
+6
+
+# the constant on the left
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE '2024-01-02' < dt ORDER BY id;
+----
+5
+6
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE '2024-01-02' < dt;
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/2.*
+
+# the partition filter goes to Glue, the filter on a data column stays in DuckDB
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-02' AND id > 3 ORDER BY id;
+----
+4
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-02' AND id > 3;
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/2.*
+
+# no partition matches
+query I
+SELECT count(*) FROM my_datalake.default.gpf_orders WHERE dt = '2023-12-31';
+----
+0
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt = '2023-12-31';
+----
+physical_plan	<REGEX>:.*Scanning Files: 0/0.*
+
+#---------------------------------------------------------------------------
+# filters Glue does not get: every partition is fetched and DuckDB prunes on the partition values
+#---------------------------------------------------------------------------
+# a function of the key
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE right(dt, 2) = '02' ORDER BY id;
+----
+3
+4
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE right(dt, 2) = '02';
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/6.*
+
+# date functions over the key
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE day(dt::DATE) = 3 ORDER BY id;
+----
+5
+6
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE day(dt::DATE) = 3;
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/6.*
+
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE date_diff('day', dt::DATE, DATE '2024-01-03') = 1 ORDER BY id;
+----
+3
+4
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE date_diff('day', dt::DATE, DATE '2024-01-03') = 1;
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/6.*
+
+# LIKE
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt LIKE '%-02' ORDER BY id;
+----
+3
+4
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt LIKE '%-02';
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/6.*
+
+# OR with a data column: not a filter on the partition columns at all
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-01' OR id = 5 ORDER BY id;
+----
+1
+2
+5
+
+# a quote in the literal, and a range with a literal that is not ASCII
+query I
+SELECT count(*) FROM my_datalake.default.gpf_orders WHERE dt = 'it''s';
+----
+0
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt = 'it''s';
+----
+physical_plan	<REGEX>:.*Scanning Files: 0/6.*
+
+query I
+SELECT count(*) FROM my_datalake.default.gpf_orders WHERE dt > 'é';
+----
+0
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE dt > 'é';
+----
+physical_plan	<REGEX>:.*Scanning Files: 0/6.*
+
+# a literal of another type than the key
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE n = 1.5 ORDER BY id;
+----
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_orders WHERE n = 1.5;
+----
+physical_plan	<REGEX>:.*Scanning Files: 0/6.*
+
+#---------------------------------------------------------------------------
+# a NULL partition value: Glue compares the string Hive stores for it
+#---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.gpf_orders VALUES (7, NULL, NULL);
+
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE n >= 2 ORDER BY id;
+----
+2
+4
+6
+
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt <> '2024-01-01' ORDER BY id;
+----
+3
+4
+5
+6
+
+query I
+SELECT id FROM my_datalake.default.gpf_orders WHERE dt IS NULL;
+----
+7
+
+#---------------------------------------------------------------------------
+# a scan that is only bound fetches no partitions
+#---------------------------------------------------------------------------
+# the Glue operation is in the x-amz-target header, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DESCRIBE my_datalake.default.gpf_orders;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetPartitions';
+----
+0
+
+# a scan that filters fetches once
+statement ok
+SELECT count(*) FROM my_datalake.default.gpf_orders WHERE dt = '2024-01-01';
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetPartitions';
+----
+1
+
+# two scans of the table with different filters fetch separately, two with the same filter share the fetch
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.gpf_orders a, my_datalake.default.gpf_orders b
+WHERE a.dt = '2024-01-01' AND b.dt = '2024-01-02';
+----
+4
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetPartitions';
+----
+2
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.gpf_orders a, my_datalake.default.gpf_orders b
+WHERE a.dt = '2024-01-01' AND b.dt = '2024-01-01';
+----
+4
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetPartitions';
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.gpf_orders;
+
+#---------------------------------------------------------------------------
+# a DATE key is compared as a date
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gpf_dates;
+
+statement ok
+CREATE TABLE my_datalake.default.gpf_dates (id INTEGER, d DATE) PARTITIONED BY (d);
+
+statement ok
+INSERT INTO my_datalake.default.gpf_dates VALUES (1, DATE '2024-01-09'), (2, DATE '2024-01-10'), (3, DATE '2024-02-01');
+
+query I
+SELECT id FROM my_datalake.default.gpf_dates WHERE d > DATE '2024-01-09' ORDER BY id;
+----
+2
+3
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_dates WHERE d > DATE '2024-01-09';
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/2.*
+
+query I
+SELECT id FROM my_datalake.default.gpf_dates WHERE d BETWEEN DATE '2024-01-10' AND DATE '2024-01-31' ORDER BY id;
+----
+2
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_dates WHERE d BETWEEN DATE '2024-01-10' AND DATE '2024-01-31';
+----
+physical_plan	<REGEX>:.*Scanning Files: 1/1.*
+
+# a date Glue does not read as one (BC) stays with DuckDB
+query I
+SELECT count(*) FROM my_datalake.default.gpf_dates WHERE d < DATE '0100-01-01 (BC)';
+----
+0
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gpf_dates WHERE d < DATE '0100-01-01 (BC)';
+----
+physical_plan	<REGEX>:.*Scanning Files: 0/3.*
+
+statement ok
+DROP TABLE my_datalake.default.gpf_dates;
+
+#---------------------------------------------------------------------------
+# Glue refusing the expression: the scan fetches every partition and applies the filter to their values
+#---------------------------------------------------------------------------
+# moto refuses to compare the string Hive stores for a NULL partition with an integer; AWS may not
+require-env GLUE_TEST_CONFIG local
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gpf_refused;
+
+statement ok
+CREATE TABLE my_datalake.default.gpf_refused (id INTEGER, n INTEGER) PARTITIONED BY (n);
+
+statement ok
+INSERT INTO my_datalake.default.gpf_refused VALUES (1, 1), (2, 2), (3, NULL);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM my_datalake.default.gpf_refused WHERE n = 2;
+----
+2
+
+# the refused request, then the one without the expression
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetPartitions';
+----
+2
+
+statement ok
+DROP TABLE my_datalake.default.gpf_refused;
