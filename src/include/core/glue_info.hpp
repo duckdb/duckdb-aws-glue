@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector.hpp"
@@ -11,6 +12,11 @@
 #include "core/readers/hive_json_options.hpp"
 
 namespace duckdb {
+
+//! A table / partition as the Glue SDK returned it, reused by a mutation in the same statement instead of a second
+//! fetch. Opaque outside api/, which alone defines them.
+struct GlueFetchedTable;
+struct GlueFetchedPartition;
 
 enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
 
@@ -85,6 +91,8 @@ struct GlueTableInfo {
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
+	//! Set only by the DDL functions' bind-time fetch; null for catalog entries and tables listed by a scan
+	shared_ptr<const GlueFetchedTable> fetched;
 
 public:
 	bool IsView() const {
@@ -161,6 +169,8 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
+	//! Set only by the DDL functions' pre-check fetch; null for partitions listed by a scan or rebuilt from a plan
+	shared_ptr<const GlueFetchedPartition> fetched;
 };
 
 } // namespace duckdb

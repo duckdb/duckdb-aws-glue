@@ -664,7 +664,7 @@ void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &tab
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	// Work on the current Glue definition, not the cached one
 	GlueTableInfo current;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current, nullptr, true)) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
 	}
@@ -682,7 +682,7 @@ void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &tab
 	}
 	// NULL removes the comment
 	column->comment = info.comment_value.IsNull() ? string() : info.comment_value.ToString();
-	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns, &current);
 	RefreshTable(context, table_name);
 }
 
@@ -732,7 +732,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 
 	// Work on the current Glue definition, not the cached one
 	GlueTableInfo current;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current, nullptr, true)) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
 	}
@@ -861,7 +861,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		                              EnumUtil::ToString(alter_table.alter_table_type));
 	}
 
-	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns, &current);
 	RefreshTable(context, table_name);
 }
 
