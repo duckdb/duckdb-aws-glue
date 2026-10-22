@@ -1,12 +1,18 @@
-# name: test/sql/hive/bugs/s3_cardinality_partition_skew.test
+# name: test/sql/hive/format_specific/parquet/s3_cardinality_partition_skew.test
 # description: S3 - a near-empty sampled partition must not collapse the estimate to ~one row per partition.
-# group: [bugs]
+# group: [parquet]
 
 require httpfs
+
+require parquet
 
 require glue
 
 require-env GLUE_CATALOG_ID
+
+# Parquet-specific: the estimates are computed from the row counts in Parquet footers
+statement ok
+SET hive_default_format = 'parquet';
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (

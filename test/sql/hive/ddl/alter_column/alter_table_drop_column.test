@@ -18,8 +18,9 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.ddl_drop_column;
 
+# parquet: csv tables refuse DROP COLUMN, see the end of this file
 statement ok
-CREATE TABLE my_datalake.default.ddl_drop_column (id INTEGER, name VARCHAR, score DOUBLE);
+CREATE TABLE my_datalake.default.ddl_drop_column (id INTEGER, name VARCHAR, score DOUBLE) WITH (format = 'parquet');
 
 statement ok
 ALTER TABLE my_datalake.default.ddl_drop_column DROP COLUMN name;
@@ -69,7 +70,7 @@ DROP TABLE IF EXISTS my_datalake.default.ddl_drop_bucket_column;
 
 statement ok
 CREATE TABLE my_datalake.default.ddl_drop_bucket_column (id INTEGER, region VARCHAR, score DOUBLE, note VARCHAR)
-WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'region', 'SortOrder': 0}]);
+WITH (format = 'parquet', BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'region', 'SortOrder': 0}]);
 
 statement error
 ALTER TABLE my_datalake.default.ddl_drop_bucket_column DROP COLUMN id;

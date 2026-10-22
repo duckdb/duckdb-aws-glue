@@ -23,8 +23,9 @@ DROP TABLE IF EXISTS my_datalake.default.structname_quoted;
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.structname_empty;
 
+# parquet: csv tables can not store nested columns, avro can not name a column '"quoted col name"'
 statement ok
-CREATE TABLE my_datalake.default.structname_quoted AS
+CREATE TABLE my_datalake.default.structname_quoted WITH (format = 'parquet') AS
 SELECT {'quoted ''"field name"': 42} """quoted col name""",
        {'Estimated Cardinality': '1', 'children': [{'Operator Type': 'SCAN', 'it''s': 1.5}]} profile;
 

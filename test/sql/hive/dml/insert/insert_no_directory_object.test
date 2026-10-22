@@ -4,8 +4,6 @@
 
 require httpfs
 
-require parquet
-
 require glue
 
 require-env GLUE_CATALOG_ID
@@ -33,7 +31,7 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_objec
 0
 
 query I
-SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_object/*.parquet');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_object/*');
 ----
 1
 

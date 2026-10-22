@@ -47,6 +47,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);
 
+	config.AddExtensionOption("hive_default_format",
+	                          "The file format CREATE TABLE gives a Glue Hive table that has no 'format' option: "
+	                          "'parquet' (the default), 'csv', 'json' or 'avro'.",
+	                          LogicalType::VARCHAR, Value("parquet"));
 	config.AddExtensionOption("glue_network_calls_via_duckdb",
 	                          "Route the Glue API calls of the AWS SDK through DuckDB's HTTP layer (httpfs) instead "
 	                          "of the AWS SDK's own HTTP client, so they use DuckDB's proxy / certificate settings "

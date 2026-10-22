@@ -43,14 +43,14 @@ WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_duplicate_partition');
 PARTITIONED BY column 'p' is listed twice for table 'ctas_duplicate_partition'
 
 # CTAS input may interleave partition and data columns. Glue stores data columns
-# separately and partition keys in PARTITIONED BY order; Parquet stores only data columns.
+# separately and partition keys in PARTITIONED BY order; Parquet stores only data columns (checked in the files below).
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.ctas_partition_order;
 
 statement ok
 CREATE TABLE my_datalake.default.ctas_partition_order
 PARTITIONED BY (year, region)
-WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_partition_order') AS
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_partition_order', format = 'parquet') AS
 SELECT CASE range % 2 WHEN 0 THEN 'east' ELSE 'west' END AS region,
        range AS id,
        2020 + (range % 2) AS year,

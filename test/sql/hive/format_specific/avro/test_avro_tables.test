@@ -1,4 +1,4 @@
-# name: test/sql/hive/dml/formats/avro/test_avro_tables.test
+# name: test/sql/hive/format_specific/avro/test_avro_tables.test
 # description: Hive tables with the avro file format: CREATE TABLE ... WITH (format = 'avro'), the SerDe Glue stores,
 # group: [avro]
 

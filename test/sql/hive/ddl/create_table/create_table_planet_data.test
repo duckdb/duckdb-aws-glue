@@ -2,8 +2,8 @@
 # description: a planet_data table, normally created as a TSV table
 # group: [create_table]
 
-#              (ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' STORED AS TEXTFILE); this extension only creates parquet
-#              tables, so the table is a parquet Hive table with the same columns
+#              (ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' STORED AS TEXTFILE); here it is a Hive table of the default
+#              format with the same columns
 
 require httpfs
 
@@ -37,9 +37,9 @@ CREATE TABLE my_datalake.default.planet_data (
   )
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/planet_data/');
 
-# the Glue definition: an external parquet table with Hive types
+# the Glue definition: an external table of the default format with Hive types
 query IIII
-SELECT glue_table_type, table_type, serde_library LIKE '%parquet%', location
+SELECT glue_table_type, table_type, parameters['classification'] = current_setting('hive_default_format'), location
 FROM glue_get_table_response('my_datalake.default.planet_data');
 ----
 EXTERNAL_TABLE	HIVE	true	{DEFAULT_S3_LOCATION}/{TEST_DIR}/planet_data

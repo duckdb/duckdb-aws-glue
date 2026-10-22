@@ -31,6 +31,7 @@ SELECT count(*) FROM my_datalake.default.pa_orders;
 
 statement error
 SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partition_keys := ['dt']);
 ----
@@ -39,22 +40,25 @@ SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orde
 # no registered partition reads nothing, like a Glue table without partitions
 query I
 SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partition_keys := ['dt'],
     partitions := []);
 ----
 0
 
-# without partition_keys an empty list is unpartitioned and reads the whole root
+# without partition_keys an empty list is unpartitioned and reads the whole root (data columns only: csv is positional)
 query I
 SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
-    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    format := current_setting('hive_default_format'), delim := chr(1),
+    schema := {id: 'INTEGER', amount: 'DOUBLE'},
     partitions := []);
 ----
 2
 
 query II
 SELECT id, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partition_keys := ['dt'],
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
@@ -66,6 +70,7 @@ ORDER BY id;
 # the partition keys default to the fields of the first partition
 query I
 SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+    format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}]);
 ----
@@ -74,7 +79,8 @@ SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orde
 # neither argument: unpartitioned, the whole root is read
 query I
 SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
-    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'});
+    format := current_setting('hive_default_format'), delim := chr(1),
+    schema := {id: 'INTEGER', amount: 'DOUBLE'});
 ----
 2
 

@@ -25,24 +25,51 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.sql_orders_add;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.sql_orders_add_staging;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.sql_by_year_staging;
+
+statement ok
 CREATE TABLE my_datalake.default.sql_orders_add (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
 
 # data laid out as <key>=<value> directories under the table location, not registered in Glue
+# sql_orders_add_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-COPY (SELECT 1 AS id, 10.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-05-14/country=IN/data.parquet';
+CREATE TABLE my_datalake.default.sql_orders_add_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-05-14/country=IN')
+AS SELECT 1 AS id, 10.0::DOUBLE AS amount;
 
 statement ok
-COPY (SELECT 2 AS id, 20.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-05-31/country=IN/data.parquet';
+DROP TABLE my_datalake.default.sql_orders_add_staging;
 
 statement ok
-COPY (SELECT 3 AS id, 30.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-06-01/country=IN/data.parquet';
+CREATE TABLE my_datalake.default.sql_orders_add_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-05-31/country=IN')
+AS SELECT 2 AS id, 20.0::DOUBLE AS amount;
+
+statement ok
+DROP TABLE my_datalake.default.sql_orders_add_staging;
+
+statement ok
+CREATE TABLE my_datalake.default.sql_orders_add_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-06-01/country=IN')
+AS SELECT 3 AS id, 30.0::DOUBLE AS amount;
+
+statement ok
+DROP TABLE my_datalake.default.sql_orders_add_staging;
 
 # data at custom locations, outside the table location
 statement ok
-COPY (SELECT 4 AS id, 40.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/INDIA_02_June_2016/data.parquet';
+CREATE TABLE my_datalake.default.sql_orders_add_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/INDIA_02_June_2016')
+AS SELECT 4 AS id, 40.0::DOUBLE AS amount;
 
 statement ok
-COPY (SELECT 5 AS id, 50.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/INDIA_03_June_2016/data.parquet';
+DROP TABLE my_datalake.default.sql_orders_add_staging;
+
+statement ok
+CREATE TABLE my_datalake.default.sql_orders_add_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/INDIA_03_June_2016')
+AS SELECT 5 AS id, 50.0::DOUBLE AS amount;
+
+statement ok
+DROP TABLE my_datalake.default.sql_orders_add_staging;
 
 query I
 SELECT count(*) FROM my_datalake.default.sql_orders_add;
@@ -175,7 +202,11 @@ statement ok
 CREATE TABLE my_datalake.default.sql_by_year (id INTEGER, year INTEGER) PARTITIONED BY (year);
 
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_by_year/year=2016/data.parquet';
+CREATE TABLE my_datalake.default.sql_by_year_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_by_year/year=2016')
+AS SELECT 1 AS id;
+
+statement ok
+DROP TABLE my_datalake.default.sql_by_year_staging;
 
 statement ok
 ALTER TABLE my_datalake.default.sql_by_year ADD PARTITION (year = 2016);

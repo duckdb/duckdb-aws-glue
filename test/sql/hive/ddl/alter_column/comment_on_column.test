@@ -22,6 +22,9 @@ statement ok
 DROP VIEW IF EXISTS my_datalake.default.comment_col_view;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.comment_col_replace;
+
+statement ok
 CREATE TABLE my_datalake.default.comment_col (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
@@ -43,20 +46,40 @@ SELECT columns FROM glue_get_table_response('my_datalake.default.comment_col');
 ----
 [{'name': id, 'type': int, 'comment': the id}, {'name': name, 'type': string, 'comment': 'it\'s the name'}]
 
-# other column changes keep the comments (glue_replace_columns with keep_comments)
+# other column changes keep the comments
 statement ok
 ALTER TABLE my_datalake.default.comment_col ALTER COLUMN id TYPE BIGINT;
-
-statement ok
-CALL glue_replace_columns('my_datalake.default.comment_col', {id: 'BIGINT', name: 'VARCHAR', extra: 'VARCHAR'}, keep_comments := true);
 
 query II
 SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' ORDER BY column_index;
 ----
 id	the id
 name	it's the name
+dt	NULL
+
+# glue_replace_columns with keep_comments; parquet because csv tables can not add a column by name
+statement ok
+CREATE TABLE my_datalake.default.comment_col_replace (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'parquet');
+
+statement ok
+COMMENT ON COLUMN my_datalake.default.comment_col_replace.id IS 'the id';
+
+statement ok
+COMMENT ON COLUMN my_datalake.default.comment_col_replace.name IS 'it''s the name';
+
+statement ok
+CALL glue_replace_columns('my_datalake.default.comment_col_replace', {id: 'BIGINT', name: 'VARCHAR', extra: 'VARCHAR'}, keep_comments := true);
+
+query II
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col_replace' ORDER BY column_index;
+----
+id	the id
+name	it's the name
 extra	NULL
 dt	NULL
+
+statement ok
+DROP TABLE my_datalake.default.comment_col_replace;
 
 # NULL removes the comment
 statement ok

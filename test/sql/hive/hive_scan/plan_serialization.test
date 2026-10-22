@@ -4,6 +4,8 @@
 
 require httpfs
 
+require parquet
+
 require glue
 
 require-env GLUE_CATALOG_ID
@@ -33,6 +35,10 @@ CREATE TABLE my_datalake.default.ps_orders (id INTEGER, amount DECIMAL(10,2), dt
 statement ok
 INSERT INTO my_datalake.default.ps_orders VALUES (1, 10.50, '2016-05-14'), (2, 20.25, '2016-05-15'), (3, 30.00, '2016-05-15');
 
+# a Parquet copy of the rows, for the plain read_parquet check below
+statement ok
+COPY (SELECT id, amount FROM my_datalake.default.ps_orders) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ps_orders_copy.parquet' (FORMAT parquet);
+
 statement ok
 CREATE TABLE my_datalake.default.ps_events WITH (format = 'csv', delimiter = '|') AS
 SELECT 1 AS id, 'start' AS kind UNION ALL SELECT 2, 'stop';
@@ -43,7 +49,7 @@ CREATE TABLE my_datalake.default.ps_lines WITH (format = 'json') AS SELECT 7 AS 
 # a header line, a NULL string, a quote that is a plain character, a short row and a value that does not parse
 statement ok
 CREATE TABLE my_datalake.default.ps_text (id INTEGER, name VARCHAR, amount DOUBLE)
-WITH (format = 'csv', 'skip.header.line.count' = '1', 'serialization.null.format' = 'NA');
+WITH (format = 'csv', delimiter = ',', 'skip.header.line.count' = '1', 'serialization.null.format' = 'NA');
 
 statement ok
 COPY (SELECT * FROM (VALUES ('id,name,amount'), ('1,"a",1.5'), ('2,NA,x'), ('3,c')) t(line))
@@ -119,15 +125,25 @@ SELECT * FROM hive_scan(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_orders']);
 ----
 hive_scan takes a single root location, not a list of files
 
-# read_parquet itself is still the format reader
+# read_parquet itself is still the format reader, not a hive_scan
+query II
+EXPLAIN SELECT id FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ps_orders_copy.parquet');
+----
+physical_plan	<REGEX>:.*READ_PARQUET.*
+
+query II
+EXPLAIN SELECT id FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ps_orders_copy.parquet');
+----
+physical_plan	<!REGEX>:.*HIVE_SCAN.*
+
 query I
-SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_orders/*/*.parquet');
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ps_orders_copy.parquet');
 ----
 3
 
 # a hive_scan() call is bound again from its arguments
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_orders',
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_orders', format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DECIMAL(10,2)', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
 ----

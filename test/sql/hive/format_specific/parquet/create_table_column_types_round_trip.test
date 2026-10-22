@@ -1,0 +1,87 @@
+# name: test/sql/hive/format_specific/parquet/create_table_column_types_round_trip.test
+# description: a row of every Hive data_type round-trips through a parquet table, which stores them all
+# group: [parquet]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# Parquet-specific: only parquet stores every type (csv: no nested columns, avro: no TINYINT or SMALLINT, json: BLOB as text)
+statement ok
+SET hive_default_format = 'parquet';
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ddl_types_parquet;
+
+statement ok
+CREATE TABLE my_datalake.default.ddl_types_parquet (
+  boolean_col BOOLEAN,
+  tinyint_col TINYINT,
+  smallint_col SMALLINT,
+  int_col INTEGER,
+  bigint_col BIGINT,
+  double_col DOUBLE,
+  float_col FLOAT,
+  decimal_col DECIMAL(11, 5),
+  decimal_default_scale_col DECIMAL(15),
+  char_col CHAR(10),
+  varchar_col VARCHAR(10),
+  string_col VARCHAR,
+  binary_col BLOB,
+  date_col DATE,
+  timestamp_col TIMESTAMP,
+  array_col INTEGER[],
+  map_col MAP(VARCHAR, INTEGER),
+  struct_col STRUCT(city VARCHAR, zip INTEGER)
+);
+
+statement ok
+INSERT INTO my_datalake.default.ddl_types_parquet VALUES (
+  true, 127, 32767, 2147483647, 9223372036854775807, 1.5, 2.5,
+  123456.12345, 123456789012345,
+  'char', 'varchar', 'string', '\xAB\xCD'::BLOB,
+  DATE '2008-09-15', TIMESTAMP '2008-09-15 03:04:05.324',
+  [1, 2, 3], MAP {'a': 1, 'b': 2}, {'city': 'Seattle', 'zip': 98101}
+);
+
+# read back through a fresh attach, so the types come from Glue
+statement ok
+attach '{GLUE_CATALOG_ID}' as verify_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query IIIIIII
+SELECT boolean_col, tinyint_col, smallint_col, int_col, bigint_col, double_col, float_col FROM verify_datalake.default.ddl_types_parquet;
+----
+true	127	32767	2147483647	9223372036854775807	1.5	2.5
+
+query IIIII
+SELECT decimal_col, decimal_default_scale_col, char_col, varchar_col, string_col FROM verify_datalake.default.ddl_types_parquet;
+----
+123456.12345	123456789012345	char	varchar	string
+
+query III
+SELECT hex(binary_col), date_col, timestamp_col FROM verify_datalake.default.ddl_types_parquet;
+----
+ABCD	2008-09-15	2008-09-15 03:04:05.324
+
+query III
+SELECT array_col, map_col['b'], struct_col.city FROM verify_datalake.default.ddl_types_parquet;
+----
+[1, 2, 3]	2	Seattle
+
+statement ok
+DROP TABLE my_datalake.default.ddl_types_parquet;

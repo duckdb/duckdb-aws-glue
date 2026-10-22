@@ -20,12 +20,13 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.struct_names;
 
+# parquet: csv tables can not store nested columns, avro can not name a field 'a b'
 statement ok
 CREATE TABLE my_datalake.default.struct_names (
   s STRUCT("a b" INTEGER, "Mixed Case" VARCHAR, "x.y$z" INTEGER),
   l STRUCT("in list" INTEGER)[],
   m MAP(VARCHAR, STRUCT("in  map" INTEGER))
-);
+) WITH (format = 'parquet');
 
 query II
 SELECT name, type FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.struct_names'));

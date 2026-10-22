@@ -4,8 +4,6 @@
 
 require httpfs
 
-require parquet
-
 require glue
 
 require-env GLUE_CATALOG_ID
@@ -24,6 +22,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.bucketed_orders;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.bucketed_orders_staging;
+
+statement ok
 CREATE TABLE my_datalake.default.bucketed_orders (id INTEGER, amount DOUBLE)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'id', 'SortOrder': 1}]);
 
@@ -34,10 +35,14 @@ WHERE database_name = 'my_datalake' AND table_name = 'bucketed_orders' ORDER BY 
 id	INTEGER
 amount	DOUBLE
 
-# data written by another engine; COPY TO writes S3 directly and is not a write through the catalog
+# data written by another engine, not through the bucketed table
+# bucketed_orders_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-COPY (SELECT 1 AS id, 10.0 AS amount UNION ALL SELECT 2, 20.0)
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bucketed_orders/data.parquet' (FORMAT parquet);
+CREATE TABLE my_datalake.default.bucketed_orders_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bucketed_orders')
+AS SELECT 1 AS id, 10.0::DOUBLE AS amount UNION ALL SELECT 2, 20.0::DOUBLE;
+
+statement ok
+DROP TABLE my_datalake.default.bucketed_orders_staging;
 
 query II
 SELECT id, amount FROM my_datalake.default.bucketed_orders ORDER BY id;

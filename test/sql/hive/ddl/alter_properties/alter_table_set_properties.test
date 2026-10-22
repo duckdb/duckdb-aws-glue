@@ -52,13 +52,13 @@ finance	customer names
 
 # a dotted Hive property name, and the value the way Glue stores it: a string
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties SET ('parquet.compression' = 'ZSTD', 'compression_level' = 4);
+ALTER TABLE my_datalake.default.ddl_properties SET ('team.name' = 'data-eng', retry_count = 4);
 
 query II
-SELECT parameters['parquet.compression'], parameters['compression_level']
+SELECT parameters['team.name'], parameters['retry_count']
 FROM glue_get_table_response('my_datalake.default.ddl_properties');
 ----
-ZSTD	4
+data-eng	4
 
 # the value can be an expression (DuckDB's option grammar takes a leading string literal as the whole value, so an
 # expression must not start with one)
@@ -72,9 +72,10 @@ run_42
 
 # the parameters CreateTable wrote are untouched
 query II
-SELECT parameters['EXTERNAL'], parameters['classification'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['EXTERNAL'], parameters['classification'] = current_setting('hive_default_format')
+FROM glue_get_table_response('my_datalake.default.ddl_properties');
 ----
-TRUE	parquet
+TRUE	true
 
 # the Athena documentation examples, spelled natively: a value with spaces and a quote is stored verbatim
 statement ok
@@ -116,10 +117,13 @@ ALTER TABLE my_datalake.default.ddl_properties RESET (notes, 'skip.header.line.c
 statement ok
 ALTER TABLE my_datalake.default.ddl_properties RESET (retention_days, batch);
 
+# the keys CreateTable and this test wrote; CreateTable also adds format parameters (e.g. a csv table's delimiter)
 query I
-SELECT list_sort(map_keys(parameters)) FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT list_sort(list_intersect(map_keys(parameters), ['EXTERNAL', 'classification', 'comment', 'owner',
+    'retention_days', 'batch', 'notes', 'skip.header.line.count', 'team.name', 'retry_count']))
+FROM glue_get_table_response('my_datalake.default.ddl_properties');
 ----
-[EXTERNAL, classification, comment, compression_level, owner, parquet.compression]
+[EXTERNAL, classification, comment, owner, retry_count, team.name]
 
 statement ok
 ALTER TABLE my_datalake.default.ddl_properties RESET (does_not_exist);

@@ -20,6 +20,9 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.ddl_types;
 
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ddl_types_common;
+
 # Hive:    boolean, tinyint, smallint, int, bigint, double, float, decimal(p,s), decimal(p), char(n), varchar(n),
 #          string, binary, date, timestamp, array<t>, map<k,v>, struct<...>
 statement ok
@@ -97,35 +100,41 @@ array_col	INTEGER[]
 map_col	MAP(VARCHAR, INTEGER)
 struct_col	STRUCT(city VARCHAR, zip INTEGER)
 
-# a row of every type round-trips through parquet
+# a row of the types every format stores round-trips (csv: no nested columns, avro: no TINYINT or SMALLINT, json: BLOB as text)
 statement ok
-INSERT INTO my_datalake.default.ddl_types VALUES (
-  true, 127, 32767, 2147483647, 9223372036854775807, 1.5, 2.5,
-  123456.12345, 123456789012345,
-  'char', 'varchar', 'string', '\xAB\xCD'::BLOB,
-  DATE '2008-09-15', TIMESTAMP '2008-09-15 03:04:05.324',
-  [1, 2, 3], MAP {'a': 1, 'b': 2}, {'city': 'Seattle', 'zip': 98101}
+CREATE TABLE my_datalake.default.ddl_types_common (
+  boolean_col BOOLEAN,
+  int_col INTEGER,
+  bigint_col BIGINT,
+  double_col DOUBLE,
+  float_col FLOAT,
+  decimal_col DECIMAL(11, 5),
+  decimal_default_scale_col DECIMAL(15),
+  char_col CHAR(10),
+  varchar_col VARCHAR(10),
+  string_col VARCHAR,
+  date_col DATE,
+  timestamp_col TIMESTAMP
 );
 
-query IIIIIII
-SELECT boolean_col, tinyint_col, smallint_col, int_col, bigint_col, double_col, float_col FROM verify_datalake.default.ddl_types;
-----
-true	127	32767	2147483647	9223372036854775807	1.5	2.5
+statement ok
+INSERT INTO my_datalake.default.ddl_types_common VALUES (
+  true, 2147483647, 9223372036854775807, 1.5, 2.5, 123456.12345, 123456789012345, 'char', 'varchar', 'string',
+  DATE '2008-09-15', TIMESTAMP '2008-09-15 03:04:05.324'
+);
 
 query IIIII
-SELECT decimal_col, decimal_default_scale_col, char_col, varchar_col, string_col FROM verify_datalake.default.ddl_types;
+SELECT boolean_col, int_col, bigint_col, double_col, float_col FROM verify_datalake.default.ddl_types_common;
 ----
-123456.12345	123456789012345	char	varchar	string
+true	2147483647	9223372036854775807	1.5	2.5
 
-query III
-SELECT hex(binary_col), date_col, timestamp_col FROM verify_datalake.default.ddl_types;
+query IIIIIII
+SELECT decimal_col, decimal_default_scale_col, char_col, varchar_col, string_col, date_col, timestamp_col FROM verify_datalake.default.ddl_types_common;
 ----
-ABCD	2008-09-15	2008-09-15 03:04:05.324
-
-query III
-SELECT array_col, map_col['b'], struct_col.city FROM verify_datalake.default.ddl_types;
-----
-[1, 2, 3]	2	Seattle
+123456.12345	123456789012345	char	varchar	string	2008-09-15	2008-09-15 03:04:05.324
 
 statement ok
 DROP TABLE my_datalake.default.ddl_types;
+
+statement ok
+DROP TABLE my_datalake.default.ddl_types_common;

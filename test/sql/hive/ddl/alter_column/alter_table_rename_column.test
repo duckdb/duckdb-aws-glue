@@ -94,7 +94,7 @@ Ada
 # parquet columns are matched by name, a rename would lose the existing data
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rename_col_parquet (id INTEGER, name VARCHAR);
+CREATE TABLE my_datalake.default.rename_col_parquet (id INTEGER, name VARCHAR) WITH (format = 'parquet');
 
 statement ok
 INSERT INTO my_datalake.default.rename_col_parquet VALUES (1, 'Ada');

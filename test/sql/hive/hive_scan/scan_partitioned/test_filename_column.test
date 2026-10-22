@@ -24,8 +24,36 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.path_nested;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_staging1;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_staging2;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_staging3;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_staging4;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_staging5;
+
+statement ok
 CREATE TABLE my_datalake.default.path_nested (id INTEGER, val VARCHAR, year INTEGER, month INTEGER, day VARCHAR)
 PARTITIONED BY (year, month, day);
+
+# the directory of a filename, relative to the test directory
+statement ok
+CREATE MACRO rel_dir(p) AS regexp_replace(replace(p, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/', ''), '[^/]*$', '');
+
+# nested_files records, after every write, each new data file with the ids written to its directory
+statement ok
+CREATE TEMP TABLE nested_files (id INTEGER, path VARCHAR);
+
+statement ok
+CREATE MACRO new_files() AS TABLE
+SELECT file FROM (SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*') UNION ALL SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*'))
+WHERE file NOT IN (SELECT path FROM nested_files);
 
 # three levels of partition directories: <root>/year=.../month=.../day=...
 statement ok
@@ -35,21 +63,40 @@ INSERT INTO my_datalake.default.path_nested VALUES
     (4, 'd', 2024, 2, '01'),
     (5, 'e', 2025, 1, '01');
 
+statement ok
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (1, 'default/path_nested/year=2024/month=1/day=01/'), (2, 'default/path_nested/year=2024/month=1/day=01/'), (3, 'default/path_nested/year=2024/month=1/day=02/'), (4, 'default/path_nested/year=2024/month=2/day=01/'), (5, 'default/path_nested/year=2025/month=1/day=01/')) v(id, dir) ON rel_dir(f.file) = v.dir;
+
 # a second file in a partition that already has one
 statement ok
 INSERT INTO my_datalake.default.path_nested VALUES (6, 'f', 2024, 1, '01');
+
+statement ok
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (6, 'default/path_nested/year=2024/month=1/day=01/')) v(id, dir) ON rel_dir(f.file) = v.dir;
 
 # day=0 next to day=01 and day=02: a directory name that is a prefix of other directory names
 statement ok
 INSERT INTO my_datalake.default.path_nested VALUES (7, 'g', 2024, 1, '0');
 
+statement ok
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (7, 'default/path_nested/year=2024/month=1/day=0/')) v(id, dir) ON rel_dir(f.file) = v.dir;
+
 # a value that is escaped in the directory name, and a NULL (__HIVE_DEFAULT_PARTITION__)
 statement ok
 INSERT INTO my_datalake.default.path_nested VALUES (8, 'h', 2024, 3, 'a/b'), (9, 'i', 2024, 3, NULL);
 
-# a partition registered INSIDE the directory of another partition (year=2024/month=1/day=01)
 statement ok
-COPY (SELECT 20 AS id, 'late' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late/data.parquet';
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (8, 'default/path_nested/year=2024/month=3/day=a%2Fb/'), (9, 'default/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/')) v(id, dir) ON rel_dir(f.file) = v.dir;
+
+# a partition registered INSIDE the directory of another partition (year=2024/month=1/day=01)
+# path_nested_staging1 writes files in the default format at a given location; dropping it keeps the files
+statement ok
+CREATE TABLE my_datalake.default.path_nested_staging1 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late') AS SELECT 20 AS id, 'late' AS val;
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_staging1;
+
+statement ok
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (20, 'default/path_nested/year=2024/month=1/day=01/late/')) v(id, dir) ON rel_dir(f.file) = v.dir;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.path_nested', {year: '2024', month: '1', day: 'late'},
@@ -57,7 +104,13 @@ CALL glue_add_partition('my_datalake.default.path_nested', {year: '2024', month:
 
 # a partition registered ABOVE the directories of other partitions: its files lie directly in year=2024
 statement ok
-COPY (SELECT 30 AS id, 'top' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/data.parquet';
+CREATE TABLE my_datalake.default.path_nested_staging2 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024') AS SELECT 30 AS id, 'top' AS val;
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_staging2;
+
+statement ok
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (30, 'default/path_nested/year=2024/')) v(id, dir) ON rel_dir(f.file) = v.dir;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.path_nested', {year: '2023', month: '12', day: 'top'},
@@ -65,7 +118,13 @@ CALL glue_add_partition('my_datalake.default.path_nested', {year: '2023', month:
 
 # a partition outside the table location
 statement ok
-COPY (SELECT 40 AS id, 'away' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p/data.parquet';
+CREATE TABLE my_datalake.default.path_nested_staging3 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p') AS SELECT 40 AS id, 'away' AS val;
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_staging3;
+
+statement ok
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (40, 'path_nested_elsewhere/p/')) v(id, dir) ON rel_dir(f.file) = v.dir;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.path_nested', {year: '2022', month: '6', day: 'away'},
@@ -74,31 +133,33 @@ CALL glue_add_partition('my_datalake.default.path_nested', {year: '2022', month:
 # a directory inside a partition that is not a partition itself, and one below the table location that is not a
 # partition either: both belong to the deepest partition registered above them (day=02 and top)
 statement ok
-COPY (SELECT 50 AS id, 'stray' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=02/extra/data.parquet';
+CREATE TABLE my_datalake.default.path_nested_staging4 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=02/extra') AS SELECT 50 AS id, 'stray' AS val;
 
 statement ok
-COPY (SELECT 51 AS id, 'unregistered' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=9/day=09/data.parquet';
+DROP TABLE my_datalake.default.path_nested_staging4;
+
+statement ok
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (50, 'default/path_nested/year=2024/month=1/day=02/extra/')) v(id, dir) ON rel_dir(f.file) = v.dir;
+
+statement ok
+CREATE TABLE my_datalake.default.path_nested_staging5 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=9/day=09') AS SELECT 51 AS id, 'unregistered' AS val;
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_staging5;
+
+statement ok
+INSERT INTO nested_files SELECT v.id, f.file FROM new_files() f JOIN (VALUES (51, 'default/path_nested/year=2024/month=9/day=09/')) v(id, dir) ON rel_dir(f.file) = v.dir;
 
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.path_nested');
 ----
 10
 
-# every data file written above, read directly: each id is in exactly one file
-statement ok
-CREATE TEMP TABLE nested_files AS
-SELECT id, filename AS path
-FROM read_parquet(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*.parquet',
-                   '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*.parquet'], hive_partitioning = false);
-
+# each id is in exactly one file
 query II
 SELECT count(*), count(DISTINCT id) FROM nested_files;
 ----
 14	14
-
-# the directory of a filename, relative to the test directory
-statement ok
-CREATE MACRO rel_dir(p) AS regexp_replace(replace(p, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/', ''), '[^/]*$', '');
 
 # the queries below run twice: listing every partition on its own, and with one recursive listing of the location
 foreach threshold 100 1
@@ -252,6 +313,7 @@ SET hive_partition_listing_threshold = {threshold};
 
 query III
 SELECT id, day, rel_dir(filename) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested',
+    format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', val: 'VARCHAR', year: 'INTEGER', month: 'INTEGER', day: 'VARCHAR'},
     partitions := [
         {year: 2024, month: 1, day: '01', location: NULL},

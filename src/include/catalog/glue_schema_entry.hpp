@@ -16,10 +16,12 @@ struct SetColumnCommentInfo;
 struct GlueCreateTableOptions {
 	//! Optional explicit S3 location of the table
 	string location;
-	//! The file format of the table (format = 'parquet' | 'csv' | 'json' | 'avro'), parquet by default
+	//! The file format of the table (format = 'parquet' | 'csv' | 'json' | 'avro'); without one, the
+	//! hive_default_format setting, which is parquet unless changed
 	HiveFileFormat format = HiveFileFormat::PARQUET;
-	//! csv only: delimiter, quote and escape (single characters; quote and escape empty unless given)
-	string csv_delimiter = ",";
+	//! csv only: delimiter, quote and escape (single characters, empty unless given). Without a delimiter we use the
+	//! SerDe's own default: '\001' for LazySimpleSerDe, as Hive does, and ',' for OpenCSVSerde.
+	string csv_delimiter;
 	string csv_quote;
 	string csv_escape;
 	//! BucketColumns / NumberOfBuckets / SortColumns, named as in Glue's StorageDescriptor

@@ -61,9 +61,9 @@ SELECT id FROM my_datalake.default.orders_drop ORDER BY id;
 3
 4
 
-# ... but its files stay in S3 (dropping a partition only removes metadata)
+# ... but its file stays in S3 (dropping a partition only removes metadata)
 query I
-SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_drop/dt=2014-05-14/country=IN/*.parquet');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_drop/dt=2014-05-14/country=IN/*');
 ----
 1
 

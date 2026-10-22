@@ -1,12 +1,14 @@
-# name: test/sql/hive/dml/formats/test_compression.test
+# name: test/sql/hive/format_specific/test_compression.test
 # description: Read and write files with the codec the table records
-# group: [formats]
+# group: [format_specific]
 
 require httpfs
 
 require parquet
 
 require json
+
+require avro
 
 require glue
 
@@ -240,26 +242,26 @@ SELECT id FROM my_datalake.default.compr_csv_bzip2;
 # parquet.compression and compression_level
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_zstd (id INTEGER) WITH ('parquet.compression' = 'ZSTD', 'compression_level' = '9');
+CREATE TABLE my_datalake.default.compr_parquet_zstd (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'ZSTD', 'compression_level' = '9');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_gzip (id INTEGER) WITH ('parquet.compression' = 'GZIP');
+CREATE TABLE my_datalake.default.compr_parquet_gzip (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'GZIP');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_none (id INTEGER) WITH ('parquet.compression' = 'NONE');
+CREATE TABLE my_datalake.default.compr_parquet_none (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'NONE');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_snappy (id INTEGER) WITH ('parquet.compression' = 'SNAPPY');
+CREATE TABLE my_datalake.default.compr_parquet_snappy (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'SNAPPY');
 
 # DuckDB writes LZ4 as LZ4_RAW
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_lz4 (id INTEGER) WITH ('parquet.compression' = 'LZ4');
+CREATE TABLE my_datalake.default.compr_parquet_lz4 (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'LZ4');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_brotli (id INTEGER) WITH ('parquet.compression' = 'BROTLI');
+CREATE TABLE my_datalake.default.compr_parquet_brotli (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'BROTLI');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_default (id INTEGER);
+CREATE TABLE my_datalake.default.compr_parquet_default (id INTEGER) WITH (format = 'parquet');
 
 foreach table compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_parquet_default
 
@@ -306,7 +308,7 @@ SELECT sum(id) FROM my_datalake.default.compr_parquet_zstd;
 
 # compressionType, which Glue crawlers record, is ignored: parquet files carry their own codec
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_crawler (id INTEGER) WITH ('compressionType' = 'gzip');
+CREATE TABLE my_datalake.default.compr_parquet_crawler (id INTEGER) WITH (format = 'parquet', 'compressionType' = 'gzip');
 
 statement ok
 INSERT INTO my_datalake.default.compr_parquet_crawler VALUES (1);
@@ -323,13 +325,13 @@ SELECT id FROM my_datalake.default.compr_parquet_crawler;
 
 # compression_level is ignored for codecs other than zstd, whatever its value
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_level (id INTEGER) WITH ('parquet.compression' = 'GZIP', 'compression_level' = 'high');
+CREATE TABLE my_datalake.default.compr_parquet_level (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'GZIP', 'compression_level' = 'high');
 
 statement ok
 INSERT INTO my_datalake.default.compr_parquet_level VALUES (1);
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_badlevel (id INTEGER) WITH ('parquet.compression' = 'ZSTD', 'compression_level' = 'high');
+CREATE TABLE my_datalake.default.compr_parquet_badlevel (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'ZSTD', 'compression_level' = 'high');
 
 statement error
 INSERT INTO my_datalake.default.compr_parquet_badlevel VALUES (1);
@@ -337,7 +339,7 @@ INSERT INTO my_datalake.default.compr_parquet_badlevel VALUES (1);
 Could not convert string 'high' to INT64
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_lzo (id INTEGER) WITH ('parquet.compression' = 'LZO');
+CREATE TABLE my_datalake.default.compr_parquet_lzo (id INTEGER) WITH (format = 'parquet', 'parquet.compression' = 'LZO');
 
 statement error
 INSERT INTO my_datalake.default.compr_parquet_lzo VALUES (1);

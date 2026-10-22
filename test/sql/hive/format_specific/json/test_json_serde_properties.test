@@ -1,4 +1,4 @@
-# name: test/sql/hive/dml/formats/json/test_json_serde_properties.test
+# name: test/sql/hive/format_specific/json/test_json_serde_properties.test
 # description: OpenX JsonSerDe properties: ignore.malformed.json and use.null.for.invalid.data read bad data as NULL
 # group: [json]
 

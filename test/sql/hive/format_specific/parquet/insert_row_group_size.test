@@ -1,6 +1,6 @@
-# name: test/sql/hive/dml/insert/insert_row_group_size.test
+# name: test/sql/hive/format_specific/parquet/insert_row_group_size.test
 # description: Parquet files written to a Hive table have row groups of the writer's row_group_size, not one per chunk
-# group: [insert]
+# group: [parquet]
 
 require httpfs
 
@@ -9,6 +9,10 @@ require parquet
 require glue
 
 require-env GLUE_CATALOG_ID
+
+# Parquet-specific: row groups are a Parquet property
+statement ok
+SET hive_default_format = 'parquet';
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (

@@ -14,8 +14,6 @@
 
 require httpfs
 
-require parquet
-
 require glue
 
 require-env GLUE_CATALOG_ID
@@ -29,6 +27,9 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.gp_nullpart;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gp_nullpart_staging;
 
 statement ok
 CREATE TABLE my_datalake.default.gp_nullpart (id INTEGER, k INTEGER) PARTITIONED BY (k);
@@ -105,13 +106,20 @@ SELECT k, k IS NULL FROM glue_partitions('my_datalake.default.gp_nullpart');
 statement ok
 CALL glue_add_partition('my_datalake.default.gp_nullpart', {k: NULL});
 
+# gp_nullpart_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-COPY (SELECT 1 AS id)
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__/d.parquet' (FORMAT parquet);
+CREATE TABLE my_datalake.default.gp_nullpart_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__')
+AS SELECT 1 AS id;
 
 statement ok
-COPY (SELECT 2 AS id)
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=5/d.parquet' (FORMAT parquet);
+DROP TABLE my_datalake.default.gp_nullpart_staging;
+
+statement ok
+CREATE TABLE my_datalake.default.gp_nullpart_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=5')
+AS SELECT 2 AS id;
+
+statement ok
+DROP TABLE my_datalake.default.gp_nullpart_staging;
 
 query II
 SELECT id, k FROM my_datalake.default.gp_nullpart ORDER BY id;

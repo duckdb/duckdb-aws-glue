@@ -1,0 +1,54 @@
+# name: test/sql/hive/format_specific/parquet/test_order_by_limit_late_materialization.test
+# description: ORDER BY ... LIMIT on a partitioned Parquet Hive table is planned with late materialization
+# group: [parquet]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# Parquet-specific: late materialization joins on the Parquet reader's file_row_number
+statement ok
+SET hive_default_format = 'parquet';
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.obl_late;
+
+statement ok
+CREATE TABLE my_datalake.default.obl_late (id BIGINT, val VARCHAR, dt VARCHAR, region VARCHAR) PARTITIONED BY (dt, region);
+
+# six partitions of ten rows: range % 6 decides both keys
+statement ok
+INSERT INTO my_datalake.default.obl_late
+SELECT range, 'v' || range, '2024-01-0' || (1 + range % 3), CASE range % 2 WHEN 0 THEN 'eu' ELSE 'us' END
+FROM range(60);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.obl_late');
+----
+6
+
+# the plan this test is about: the scan is copied and joined back to the top-n on the row's file and row number
+statement ok
+PRAGMA explain_output = 'optimized_only';
+
+query II
+EXPLAIN SELECT id, val FROM my_datalake.default.obl_late WHERE dt = '2024-01-02' AND region = 'us' ORDER BY id LIMIT 2;
+----
+logical_opt	<REGEX>:.*SEMI.*file_row_number.*Top N.*
+
+statement ok
+RESET explain_output;
+
+statement ok
+DROP TABLE my_datalake.default.obl_late;

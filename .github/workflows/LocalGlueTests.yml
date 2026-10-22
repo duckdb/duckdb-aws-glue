@@ -1,6 +1,8 @@
 # Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/README.md.
 #
-# A release build with DuckDB's assertions and the sanitizers on, i.e. relassert without debug info.
+# A release build with DuckDB's assertions and the sanitizers on, i.e. relassert without debug info. It is built once,
+# and each test config runs on that build as its own job: local_glue.json, and the same tests with csv, json or avro as
+# the default table format.
 
 name: Local Glue tests
 
@@ -12,29 +14,20 @@ on:
   workflow_dispatch:
 
 jobs:
-  local-glue-tests:
+  build:
     runs-on: ubuntu-latest
 
     env:
       GEN: ninja
-      # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
-      AWS_EC2_METADATA_DISABLED: "true"
-      GLUE_ENDPOINT: http://localhost:5555
-      S3_ENDPOINT: localhost:9100
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # the sanitizer build and the test data otherwise fill the runner's disk
+      # the sanitizer build otherwise fills the runner's disk
       - name: Free disk space
         uses: ./duckdb/.github/actions/cleanup_runner
-
-      - uses: docker/setup-compose-action@v1
-
-      - name: Start Glue (moto) and S3 (MinIO)
-        run: docker compose -f scripts/docker-compose.yml up -d --wait
 
       - name: Install build dependencies
         run: |
@@ -56,8 +49,52 @@ jobs:
           build: make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
+      # what the tests run: the unittest binary, the libduckdb.so it loads (by absolute path, the same in every job's
+      # checkout) and the loadable extensions it installs. A tarball keeps the binary's executable bit.
+      - name: Package the test build
+        run: tar -czf test-build.tar.gz build/release/test/unittest build/release/src/libduckdb.so build/release/repository
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-build
+          path: test-build.tar.gz
+          retention-days: 1
+
+  local-glue-tests:
+    name: local-glue-tests (${{ matrix.config }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [local_glue, local_glue_csv, local_glue_json, local_glue_avro]
+
+    env:
+      # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
+      AWS_EC2_METADATA_DISABLED: "true"
+      GLUE_ENDPOINT: http://localhost:5555
+      S3_ENDPOINT: localhost:9100
+
+    steps:
+      # the test files, and DuckDB's test runner from the duckdb submodule
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: docker/setup-compose-action@v1
+
+      - name: Start Glue (moto) and S3 (MinIO)
+        run: docker compose -f scripts/docker-compose.yml up -d --wait
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-build
+
+      - name: Unpack the test build
+        run: tar -xzf test-build.tar.gz
+
       - name: Run tests
-        run: make test-local TEST_BUILD=release
+        run: make test-local TEST_BUILD=release LOCAL_TEST_CONFIG=test/configs/${{ matrix.config }}.json
 
       - name: Server logs
         if: always()

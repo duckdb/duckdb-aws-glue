@@ -8,8 +8,6 @@
 
 require httpfs
 
-require parquet
-
 require glue
 
 require-env GLUE_CATALOG_ID
@@ -47,23 +45,25 @@ CREATE TABLE my_datalake.default.bucket_sorted (id INTEGER, amount DOUBLE, regio
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read', BucketColumns = ['id', 'region'], NumberOfBuckets = 8,
       SortColumns = [{'Column': 'id', 'SortOrder': 1}, {'Column': 'region', 'SortOrder': 0}]);
 
-# One file per id % 4 over ids 0-9, so the layout is consistent with 'bucketed by id into 4 buckets'. COPY TO writes
-# S3 directly, so this is not a write through the catalog and the write guard is not involved.
+# One INSERT, so one file, per id % 4 over ids 0-9: consistent with 'bucketed by id into 4 buckets', though the file
+# names do not say which bucket a file holds. Writing through the unbucketed table leaves the write guard out.
 statement ok
-COPY (SELECT 0 AS id, 0.0 AS amount, 'r0' AS region UNION ALL SELECT 4, 40.0, 'r0' UNION ALL SELECT 8, 80.0, 'r0')
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000000_0' (FORMAT parquet);
+INSERT INTO my_datalake.default.bucket_plain VALUES (0, 0.0, 'r0'), (4, 40.0, 'r0'), (8, 80.0, 'r0');
 
 statement ok
-COPY (SELECT 1 AS id, 10.0 AS amount, 'r1' AS region UNION ALL SELECT 5, 50.0, 'r1' UNION ALL SELECT 9, 90.0, 'r1')
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000001_0' (FORMAT parquet);
+INSERT INTO my_datalake.default.bucket_plain VALUES (1, 10.0, 'r1'), (5, 50.0, 'r1'), (9, 90.0, 'r1');
 
 statement ok
-COPY (SELECT 2 AS id, 20.0 AS amount, 'r0' AS region UNION ALL SELECT 6, 60.0, 'r0')
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000002_0' (FORMAT parquet);
+INSERT INTO my_datalake.default.bucket_plain VALUES (2, 20.0, 'r0'), (6, 60.0, 'r0');
 
 statement ok
-COPY (SELECT 3 AS id, 30.0 AS amount, 'r1' AS region UNION ALL SELECT 7, 70.0, 'r1')
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000003_0' (FORMAT parquet);
+INSERT INTO my_datalake.default.bucket_plain VALUES (3, 30.0, 'r1'), (7, 70.0, 'r1');
+
+# the layout above: one file per bucket
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/*');
+----
+4
 
 #---------------------------------------------------------------------------
 # the bucketed tables return exactly what the unbucketed one does
@@ -124,7 +124,7 @@ SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.d
 #---------------------------------------------------------------------------
 # a predicate on a bucket column returns the right rows
 #---------------------------------------------------------------------------
-# id = 7 lives in 000003_0 only: a bucket-aware engine would read one file, this reads all four
+# id = 7 lives in one of the four files only: a bucket-aware engine would read one file, this reads all four
 query II
 SELECT id, amount FROM my_datalake.default.bucket_hashed WHERE id = 7;
 ----
@@ -159,9 +159,7 @@ JOIN my_datalake.default.bucket_sorted s USING (id);
 # bucket_hashed claims 4 buckets on id; this fifth file holds ids of every residue. A reader that trusted the claim
 # could skip these rows, this one does not consult it.
 statement ok
-COPY (SELECT 100 AS id, 1000.0 AS amount, 'r0' AS region UNION ALL SELECT 101, 1010.0, 'r1'
-      UNION ALL SELECT 102, 1020.0, 'r0' UNION ALL SELECT 103, 1030.0, 'r1')
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/violates_the_claim.parquet' (FORMAT parquet);
+INSERT INTO my_datalake.default.bucket_plain VALUES (100, 1000.0, 'r0'), (101, 1010.0, 'r1'), (102, 1020.0, 'r0'), (103, 1030.0, 'r1');
 
 query II
 SELECT count(*), sum(id) FROM my_datalake.default.bucket_hashed WHERE id >= 100;

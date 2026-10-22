@@ -215,14 +215,14 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/list_a', format := 'parquet',
-    schema := {id: 'BIGINT'});
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/list_a',
+    format := current_setting('hive_default_format'), schema := {id: 'BIGINT'});
 ----
 105
 
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/list_a', format := 'parquet',
-    schema := {id: 'BIGINT'});
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/list_a',
+    format := current_setting('hive_default_format'), schema := {id: 'BIGINT'});
 ----
 105
 

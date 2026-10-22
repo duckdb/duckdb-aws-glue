@@ -1,6 +1,6 @@
-# name: test/sql/hive/bugs/s3_partition_statistics_value_typing.test
+# name: test/sql/hive/format_specific/parquet/s3_partition_statistics_value_typing.test
 # description: partition-column statistics must use the column's DECLARED type.
-# group: [bugs]
+# group: [parquet]
 
 #
 # Glue stores partition values as a string. Statistics built on a guessed numeric type would lead to
@@ -9,9 +9,15 @@
 
 require httpfs
 
+require parquet
+
 require glue
 
 require-env GLUE_CATALOG_ID
+
+# Parquet-specific: the estimates are computed from the row counts in Parquet footers
+statement ok
+SET hive_default_format = 'parquet';
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (

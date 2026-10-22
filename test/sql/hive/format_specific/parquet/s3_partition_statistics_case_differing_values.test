@@ -1,12 +1,18 @@
-# name: test/sql/hive/bugs/s3_partition_statistics_case_differing_values.test
+# name: test/sql/hive/format_specific/parquet/s3_partition_statistics_case_differing_values.test
 # description: partition-column statistics must not fold case.
-# group: [bugs]
+# group: [parquet]
 
 require httpfs
+
+require parquet
 
 require glue
 
 require-env GLUE_CATALOG_ID
+
+# Parquet-specific: the estimates are computed from the row counts in Parquet footers
+statement ok
+SET hive_default_format = 'parquet';
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (

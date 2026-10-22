@@ -120,7 +120,7 @@ their codec themselves.
 - `ALTER SCHEMA ... SET (<key> = '...', ...)` merges options into the Glue database (UpdateDatabase), with the same
   keys as `CREATE SCHEMA`; `ALTER SCHEMA ... RESET (<key>, ...)` removes them. Keys are case-insensitive.
 - `CREATE TABLE ... [PARTITIONED BY (col, ...)] [WITH (format = 'parquet' | 'csv' | 'json' | 'avro', location = '...',
-  <property> = '...')]` creates a parquet (default), csv (LazySimpleSerDe, `,` delimited, no header), json
+  <property> = '...')]` creates a parquet (default), csv (LazySimpleSerDe, `\001` delimited, no header), json
   (JsonSerDe, one object per line) or avro (AvroSerDe)
   Hive table at `location`, else `<DEFAULT_LOCATION>/<database>/<table>`, else `<database LocationUri>/<table>`;
   without any of these the statement fails. Partition keys must be plain column names; they become Glue
@@ -128,9 +128,11 @@ their codec themselves.
   (`COLLATE`, also from a `CREATE TABLE ... AS` query) are refused. Unknown `WITH` keys are stored as Glue table
   parameters. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
   `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
-  For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
-  header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
-  `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
+  For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `\001` without one, as in Hive;
+  `header = true` makes every file start with a header line (`skip.header.line.count`), and `quote = '"'` /
+  `escape = '\'` switch the table to OpenCSVSerde with `separatorChar` (`,` without a delimiter) / `quoteChar` /
+  `escapeChar` (the escape character defaults to the quote character). Without a `format` option the table gets
+  `SET hive_default_format`, which is `'parquet'` unless changed.
   With `SET glue_create_bucketed_tables = true`, `BucketColumns = ['col', ...]`, `NumberOfBuckets = n` and
   `SortColumns = [{'Column': 'col', 'SortOrder': 1}, ...]` (1 ascending, 0 descending) create a bucketed (clustered)
   table, Hive's `CLUSTERED BY (...) SORTED BY (...) INTO n BUCKETS`: bucket and sort columns are columns of the table

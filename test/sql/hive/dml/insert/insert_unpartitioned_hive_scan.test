@@ -21,6 +21,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.ins_plain;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_plain_parquet;
+
+statement ok
 CREATE TABLE my_datalake.default.ins_plain (id INTEGER, name VARCHAR);
 
 # every INSERT writes a new file below the table location
@@ -48,12 +51,28 @@ SELECT id, name, score FROM my_datalake.default.ins_plain ORDER BY id;
 #---------------------------------------------------------------------------
 # the same read with hive_scan(): no catalog attached, the schema is given
 #---------------------------------------------------------------------------
+# hive_scan reads csv by position without padding, so its reads across ADD COLUMN use a Parquet table
+statement ok
+CREATE TABLE my_datalake.default.ins_plain_parquet (id INTEGER, name VARCHAR) WITH (format = 'parquet');
+
+statement ok
+INSERT INTO my_datalake.default.ins_plain_parquet VALUES (1, 'a'), (2, 'b');
+
+statement ok
+INSERT INTO my_datalake.default.ins_plain_parquet VALUES (3, 'c');
+
+statement ok
+ALTER TABLE my_datalake.default.ins_plain_parquet ADD COLUMN score DOUBLE;
+
+statement ok
+INSERT INTO my_datalake.default.ins_plain_parquet VALUES (4, 'd', 4.5);
+
 statement ok
 DETACH my_datalake;
 
 query III
-SELECT id, name, score FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_plain',
-    schema := {id: 'INTEGER', name: 'VARCHAR', score: 'DOUBLE'})
+SELECT id, name, score FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_plain_parquet',
+    format := 'parquet', schema := {id: 'INTEGER', name: 'VARCHAR', score: 'DOUBLE'})
 ORDER BY id;
 ----
 1	a	NULL
@@ -63,15 +82,16 @@ ORDER BY id;
 
 # the schema decides what is read: a subset of the columns, with a wider type
 query II
-SELECT id, typeof(id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_plain',
-    schema := {id: 'BIGINT', name: 'VARCHAR'})
+SELECT id, typeof(id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_plain_parquet',
+    format := 'parquet', schema := {id: 'BIGINT', name: 'VARCHAR'})
 ORDER BY id LIMIT 1;
 ----
 1	BIGINT
 
 # a location without data files scans as empty
 query II
-SELECT count(*), max(id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/does_not_exist', schema := {id: 'INTEGER'});
+SELECT count(*), max(id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/does_not_exist',
+    format := current_setting('hive_default_format'), delim := chr(1), schema := {id: 'INTEGER'});
 ----
 0	NULL
 
@@ -84,3 +104,6 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 
 statement ok
 DROP TABLE my_datalake.default.ins_plain;
+
+statement ok
+DROP TABLE my_datalake.default.ins_plain_parquet;

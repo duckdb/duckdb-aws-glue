@@ -65,7 +65,7 @@ SELECT id FROM my_datalake.default.sql_orders_drop ORDER BY id;
 
 # ... but its files stay in S3
 query I
-SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_drop/dt=2014-05-14/country=IN/*.parquet');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_drop/dt=2014-05-14/country=IN/*');
 ----
 1
 

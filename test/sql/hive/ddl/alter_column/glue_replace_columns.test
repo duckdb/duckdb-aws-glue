@@ -24,8 +24,10 @@ DROP TABLE IF EXISTS my_datalake.default.{table};
 
 endloop
 
+# parquet: csv columns are positional (see the csv table below), avro can not name a column 'Mixed Case'
 statement ok
-CREATE TABLE my_datalake.default.replace_cols (id INTEGER, name VARCHAR, extra DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.default.replace_cols (id INTEGER, name VARCHAR, extra DOUBLE, dt VARCHAR) PARTITIONED BY (dt)
+WITH (format = 'parquet');
 
 statement ok
 INSERT INTO my_datalake.default.replace_cols VALUES (1, 'a', 1.5, '2024-01-01'), (2, 'b', 2.5, '2024-01-02');
@@ -306,9 +308,10 @@ DETACH my_datalake_ro;
 statement ok
 SET glue_create_bucketed_tables = true;
 
+# parquet: csv tables keep their column count first, see below
 statement ok
 CREATE TABLE my_datalake.default.replace_cols_sorted (id INTEGER, name VARCHAR, extra VARCHAR) WITH (
-    BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'name', 'SortOrder': 1}]);
+    format = 'parquet', BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'name', 'SortOrder': 1}]);
 
 statement error
 CALL glue_replace_columns('my_datalake.default.replace_cols_sorted', {name: 'VARCHAR'});

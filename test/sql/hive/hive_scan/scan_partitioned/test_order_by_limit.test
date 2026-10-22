@@ -34,18 +34,6 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.obl_events');
 ----
 6
 
-# the plan this test is about: the scan is copied and joined back to the top-n on the row's file and row number
-statement ok
-PRAGMA explain_output = 'optimized_only';
-
-query II
-EXPLAIN SELECT id, val FROM my_datalake.default.obl_events WHERE dt = '2024-01-02' AND region = 'us' ORDER BY id LIMIT 2;
-----
-logical_opt	<REGEX>:.*SEMI.*file_row_number.*Top N.*
-
-statement ok
-RESET explain_output;
-
 # the queries below run twice: listing every partition on its own, and with one recursive listing of the location
 foreach threshold 10 1
 

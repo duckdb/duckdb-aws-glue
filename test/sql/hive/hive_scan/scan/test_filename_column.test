@@ -26,20 +26,27 @@ DROP TABLE IF EXISTS my_datalake.default.path_flat_csv;
 statement ok
 CREATE TABLE my_datalake.default.path_flat (id INTEGER, name VARCHAR);
 
-# every insert writes its own data file below the table location
+# every insert writes its own data file below the table location; flat_files records each new file with its rows
+statement ok
+CREATE TEMP TABLE flat_files (id INTEGER, path VARCHAR);
+
 statement ok
 INSERT INTO my_datalake.default.path_flat VALUES (1, 'one'), (2, 'two');
+
+statement ok
+INSERT INTO flat_files SELECT unnest([1, 2]), file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*') WHERE file NOT IN (SELECT path FROM flat_files);
 
 statement ok
 INSERT INTO my_datalake.default.path_flat VALUES (3, 'three');
 
 statement ok
+INSERT INTO flat_files SELECT unnest([3]), file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*') WHERE file NOT IN (SELECT path FROM flat_files);
+
+statement ok
 INSERT INTO my_datalake.default.path_flat VALUES (4, 'four'), (5, 'five'), (6, 'six');
 
-# The data files, read directly: every row with the file it is in
 statement ok
-CREATE TEMP TABLE flat_files AS
-SELECT id, filename AS path FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*');
+INSERT INTO flat_files SELECT unnest([4, 5, 6]), file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*') WHERE file NOT IN (SELECT path FROM flat_files);
 
 query II
 SELECT count(*), count(DISTINCT path) FROM flat_files;
@@ -68,7 +75,7 @@ SELECT count(*) FROM my_datalake.default.path_flat t JOIN flat_files f ON t.id =
 6
 
 query III
-SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/%.parquet'
+SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/%.' || current_setting('hive_default_format')
 FROM my_datalake.default.path_flat ORDER BY id;
 ----
 1	one	true
@@ -164,7 +171,7 @@ SELECT count(*), count(*) FILTER (filename LIKE '%/_hidden.parquet') FROM my_dat
 # the same for a csv table
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.path_flat_csv (id INTEGER, name VARCHAR) WITH (format = 'csv');
+CREATE TABLE my_datalake.default.path_flat_csv (id INTEGER, name VARCHAR) WITH (format = 'csv', delimiter = ',');
 
 statement ok
 INSERT INTO my_datalake.default.path_flat_csv VALUES (1, 'one'), (2, 'two');
@@ -198,7 +205,8 @@ SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat_csv GROUP 
 # hive_scan() over the same files
 #---------------------------------------------------------------------------
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat', schema := {id: 'INTEGER', name: 'VARCHAR'}) t
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat', schema := {id: 'INTEGER', name: 'VARCHAR'},
+    format := current_setting('hive_default_format'), delim := chr(1)) t
 JOIN flat_files f ON t.id = f.id AND t.filename = f.path;
 ----
 6

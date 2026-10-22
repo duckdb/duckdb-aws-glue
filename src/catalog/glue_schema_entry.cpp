@@ -249,6 +249,10 @@ static void ResolveBucketing(GlueCreateTableOptions &options, const ColumnList &
 GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &context,
                                                                 const CreateTableInfo &create_info) {
 	GlueCreateTableOptions result;
+	Value default_format;
+	if (context.TryGetCurrentSetting("hive_default_format", default_format) && !default_format.IsNull()) {
+		result.format = HiveFileFormatFromString(default_format.ToString());
+	}
 	for (auto &option : EvaluateOptions(context, create_info.options, "CREATE TABLE")) {
 		auto &key = option.first;
 		auto &value = option.second;
@@ -391,14 +395,17 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	if (table.file_format == HiveFileFormat::CSV) {
 		// with a quote or escape character OpenCSVSerde (which quotes), without both LazySimpleSerDe (which does not)
 		if (options.csv_quote.empty() && options.csv_escape.empty()) {
+			// Hive's default delimiter: real data hardly ever holds it, and LazySimpleSerDe
+			// can't write a value that does
+			auto delimiter = options.csv_delimiter.empty() ? string("\x01") : options.csv_delimiter;
 			table.serde_library = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe";
-			table.serde_parameters["field.delim"] = options.csv_delimiter;
-			table.serde_parameters["serialization.format"] = options.csv_delimiter;
+			table.serde_parameters["field.delim"] = delimiter;
+			table.serde_parameters["serialization.format"] = delimiter;
 		} else {
 			// the escape character defaults to the quote character, like DuckDB's COPY
 			string quote = options.csv_quote.empty() ? "\"" : options.csv_quote;
 			table.serde_library = "org.apache.hadoop.hive.serde2.OpenCSVSerde";
-			table.serde_parameters["separatorChar"] = options.csv_delimiter;
+			table.serde_parameters["separatorChar"] = options.csv_delimiter.empty() ? "," : options.csv_delimiter;
 			table.serde_parameters["quoteChar"] = quote;
 			table.serde_parameters["escapeChar"] = options.csv_escape.empty() ? quote : options.csv_escape;
 		}

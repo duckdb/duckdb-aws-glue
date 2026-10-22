@@ -1,12 +1,18 @@
-# name: test/sql/hive/bugs/s3_cardinality_unpartitioned.test
+# name: test/sql/hive/format_specific/parquet/s3_cardinality_unpartitioned.test
 # description: S3 - UNPARTITIONED Glue table estimates must respond to table size
-# group: [bugs]
+# group: [parquet]
 
 require httpfs
+
+require parquet
 
 require glue
 
 require-env GLUE_CATALOG_ID
+
+# Parquet-specific: the estimates are computed from the row counts in Parquet footers
+statement ok
+SET hive_default_format = 'parquet';
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (

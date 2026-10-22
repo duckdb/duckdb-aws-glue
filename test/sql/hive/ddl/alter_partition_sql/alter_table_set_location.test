@@ -23,6 +23,9 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.sql_customers;
 
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.sql_customers_staging;
+
 # a customers table, partitioned by zip and state
 statement ok
 CREATE TABLE my_datalake.default.sql_customers (id INTEGER, name VARCHAR, zip VARCHAR, state VARCHAR) PARTITIONED BY (zip, state);
@@ -33,8 +36,13 @@ INSERT INTO my_datalake.default.sql_customers VALUES
     (2, 'bob', '98101', 'WA');
 
 # the data that the partition will be pointed at
+# sql_customers_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-COPY (SELECT 3 AS id, 'cid' AS name) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/data.parquet';
+CREATE TABLE my_datalake.default.sql_customers_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata')
+AS SELECT 3 AS id, 'cid' AS name;
+
+statement ok
+DROP TABLE my_datalake.default.sql_customers_staging;
 
 #---------------------------------------------------------------------------
 # ALTER TABLE customers PARTITION (zip = '98040', state = 'WA') SET LOCATION 's3://.../custdata/';

@@ -22,6 +22,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.overlap_orders;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.overlap_orders_staging;
+
+statement ok
 CREATE TABLE my_datalake.default.overlap_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
@@ -32,11 +35,20 @@ statement ok
 CALL glue_add_partition('my_datalake.default.overlap_orders', {dt: 'inner'},
     location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/sub');
 
+# overlap_orders_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/f_outer.parquet';
+CREATE TABLE my_datalake.default.overlap_orders_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer')
+AS SELECT 1 AS id;
 
 statement ok
-COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/sub/f_inner.parquet';
+DROP TABLE my_datalake.default.overlap_orders_staging;
+
+statement ok
+CREATE TABLE my_datalake.default.overlap_orders_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/sub')
+AS SELECT 2 AS id;
+
+statement ok
+DROP TABLE my_datalake.default.overlap_orders_staging;
 
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.overlap_orders');
@@ -73,7 +85,11 @@ RESET hive_partition_listing_threshold;
 
 # an unregistered subdirectory belongs to the enclosing partition
 statement ok
-COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/plain/f.parquet';
+CREATE TABLE my_datalake.default.overlap_orders_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/plain')
+AS SELECT 3 AS id;
+
+statement ok
+DROP TABLE my_datalake.default.overlap_orders_staging;
 
 foreach threshold 1 10
 

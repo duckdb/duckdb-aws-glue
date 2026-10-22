@@ -30,8 +30,10 @@ glue-fixture-down:
 PYTHON ?= python3
 TEST_BATCH_SIZE ?= 10
 TEST_BUILD ?= relassert
+# LOCAL_TEST_CONFIG: local_glue.json, or local_glue_{csv,json,avro}.json to run the tests with that default table format
+LOCAL_TEST_CONFIG ?= test/configs/local_glue.json
 test-local:
-	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 $(PYTHON) duckdb/scripts/ci/run_tests.py ./build/$(TEST_BUILD)/test/unittest --test-config test/configs/local_glue.json --workers 1 --batch-size $(TEST_BATCH_SIZE) --retry 2 'test/sql/*'
+	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 $(PYTHON) duckdb/scripts/ci/run_tests.py ./build/$(TEST_BUILD)/test/unittest --test-config $(LOCAL_TEST_CONFIG) --workers 1 --batch-size $(TEST_BATCH_SIZE) --retry 2 'test/sql/*'
 # CLOUD_TEST_CONFIG: a copy of cloud_glue.json pointing at another account, as .github/workflows/CloudGlueTests.yml does
 CLOUD_TEST_CONFIG ?= test/configs/cloud_glue.json
 test-cloud:
