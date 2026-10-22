@@ -171,13 +171,8 @@ statement ok
 DROP TABLE my_datalake.default.ddl_opts_props;
 
 #---------------------------------------------------------------------------
-# not supported: COMMENT, ROW FORMAT, STORED AS, WITH SERDEPROPERTIES
+# not supported: ROW FORMAT, STORED AS, WITH SERDEPROPERTIES
 #---------------------------------------------------------------------------
-# table comments are not written to Glue
-statement error
-COMMENT ON TABLE my_datalake.default.ddl_opts IS 'planet data';
-----
-
 # DuckDB's SORTED BY is rejected, the sort order of a bucketed table is the SortColumns option
 statement error
 CREATE TABLE my_datalake.default.ddl_opts_sorted (id INTEGER) SORTED BY (id);

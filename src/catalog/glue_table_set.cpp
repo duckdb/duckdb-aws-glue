@@ -40,6 +40,10 @@ unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
 	for (auto &column : table.partition_keys) {
 		add_column(column);
 	}
+	auto comment = table.GetParameter("comment");
+	if (!comment.empty()) {
+		info.comment = Value(comment);
+	}
 	auto entry = make_uniq<GlueTable>(catalog, schema, info, table);
 	SetTableTypeTag(*entry);
 	return entry;

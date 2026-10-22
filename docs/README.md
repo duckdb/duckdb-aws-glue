@@ -168,6 +168,8 @@ their codec themselves.
   renamed.
 - `COMMENT ON COLUMN` sets the Glue column comment (`IS NULL` removes it); the comments of Glue columns show in
   `duckdb_columns()`. Comments on partition keys and on views are not supported yet.
+- `COMMENT ON TABLE` sets the table comment, which Hive keeps in the `comment` table parameter (`IS NULL` removes
+  it); it shows in `duckdb_tables()`. Comments on views are not supported yet.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`

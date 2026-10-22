@@ -1,0 +1,83 @@
+# name: test/sql/hive/ddl/alter_properties/comment_on_table.test
+# description: COMMENT ON TABLE on a Hive table registered in Glue
+# group: [alter_properties]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.comment_tbl;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.comment_tbl_view;
+
+statement ok
+CREATE TABLE my_datalake.default.comment_tbl (id INTEGER) WITH (owner = 'analytics');
+
+statement ok
+COMMENT ON TABLE my_datalake.default.comment_tbl IS 'it''s the orders';
+
+query I
+SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'comment_tbl';
+----
+it's the orders
+
+# stored as the 'comment' table parameter, the other parameters stay
+query II
+SELECT parameters['comment'], parameters['owner'] FROM glue_get_table_response('my_datalake.default.comment_tbl');
+----
+it's the orders	analytics
+
+# the same parameter ALTER TABLE ... SET (comment = ...) writes
+statement ok
+ALTER TABLE my_datalake.default.comment_tbl SET (comment = 'orders');
+
+query I
+SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'comment_tbl';
+----
+orders
+
+# NULL removes the comment
+statement ok
+COMMENT ON TABLE my_datalake.default.comment_tbl IS NULL;
+
+query II
+SELECT comment, (SELECT parameters['comment'] FROM glue_get_table_response('my_datalake.default.comment_tbl'))
+FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'comment_tbl';
+----
+NULL	NULL
+
+query I
+SELECT parameters['owner'] FROM glue_get_table_response('my_datalake.default.comment_tbl');
+----
+analytics
+
+# errors
+statement error
+COMMENT ON TABLE my_datalake.default.comment_tbl_nope IS 'x';
+----
+comment_tbl_nope
+
+statement ok
+CREATE VIEW my_datalake.default.comment_tbl_view AS SELECT 1 AS a;
+
+statement error
+COMMENT ON VIEW my_datalake.default.comment_tbl_view IS 'x';
+----
+Comments on Glue views are not supported yet
+
+statement ok
+DROP VIEW my_datalake.default.comment_tbl_view;
+
+statement ok
+DROP TABLE my_datalake.default.comment_tbl;

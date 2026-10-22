@@ -11,6 +11,7 @@
 namespace duckdb {
 struct CreateTableInfo;
 struct SetColumnCommentInfo;
+struct SetCommentInfo;
 
 //! Options accepted in CREATE TABLE ... WITH (...) for Glue tables
 struct GlueCreateTableOptions {
@@ -83,6 +84,7 @@ private:
 	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
 	//! COMMENT ON COLUMN: Glue keeps the comment with the column
 	void SetColumnComment(ClientContext &context, const string &table_name, SetColumnCommentInfo &info);
+	void SetTableComment(ClientContext &context, const string &table_name, SetCommentInfo &info);
 
 public:
 	//! The database definition as returned by Glue

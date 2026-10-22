@@ -686,6 +686,21 @@ void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &tab
 	RefreshTable(context, table_name);
 }
 
+//! COMMENT ON TABLE: Hive keeps the table comment in the 'comment' table parameter
+void GlueSchemaEntry::SetTableComment(ClientContext &context, const string &table_name, SetCommentInfo &info) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	vector<pair<string, string>> set;
+	vector<string> unset;
+	// NULL removes the comment
+	if (info.comment_value.IsNull()) {
+		unset.emplace_back("comment");
+	} else {
+		set.emplace_back("comment", info.comment_value.ToString());
+	}
+	GlueAPI::UpdateTableParameters(context, glue_catalog, database_info.name, table_name, set, unset);
+	RefreshTable(context, table_name);
+}
+
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &context = transaction.GetContext();
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
@@ -718,6 +733,10 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	}
 	if (info.type == AlterType::SET_COLUMN_COMMENT) {
 		SetColumnComment(context, table_name, info.Cast<SetColumnCommentInfo>());
+		return;
+	}
+	if (info.type == AlterType::SET_COMMENT) {
+		SetTableComment(context, table_name, info.Cast<SetCommentInfo>());
 		return;
 	}
 	if (info.type != AlterType::ALTER_TABLE) {
