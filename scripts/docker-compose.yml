@@ -14,8 +14,11 @@
 #   docker compose -f scripts/docker-compose.yml up -d
 #   AWS_EC2_METADATA_DISABLED=true ./build/relassert/test/unittest --test-config test/configs/local_glue.json 'test/sql/*'
 # Ports 5555 and 9100 are used so that they do not clash with macOS (5000) and other S3 instances (9000).
-# 'fault-proxy' (port 5556, GLUE_FAULT_ENDPOINT) forwards to moto, except GetTables on a database named fault_*, which
-# fails with the Glue error scripts/glue_fault_proxy.py assigns to that prefix.
+# 'fault-proxy' (port 5556, GLUE_FAULT_ENDPOINT) forwards to moto, except GetTables (and UpdateTable for
+# fault_concurrent_modification*) on a database named fault_*, which fails with the Glue error
+# scripts/glue_fault_proxy.py assigns to that prefix.
+# The script is bind-mounted as one file: after editing it (or a git checkout that rewrites it) recreate the
+# container (docker rm -f glue-fault-proxy; docker compose up -d), a restart keeps the old file.
 name: duckdb-glue
 services:
   moto:

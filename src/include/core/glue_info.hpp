@@ -87,6 +87,10 @@ struct GlueTableInfo {
 	//! StorageDescriptor.SortColumns, in Glue's order; only name and sort_order are set
 	vector<GlueColumn> sort_columns;
 	unordered_map<string, string> parameters;
+	//! Glue's VersionId and CreateTime of a fetched table; a DROP + CREATE starts at version 1 again, CreateTime
+	//! tells the two apart. Empty for a definition not fetched from Glue.
+	string version_id;
+	int64_t create_time_ms = 0;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
 
@@ -96,6 +100,8 @@ public:
 	}
 	//! The table format and what it was derived from (GlueTableFormat::Detect)
 	GlueTableFormat GetFormat() const;
+	//! Whether 'other' is the same Glue version of the table; false when either version is unknown
+	bool IsSameVersion(const GlueTableInfo &other) const;
 	//! The 'metadata_location' parameter of an Iceberg table (empty if not present)
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing

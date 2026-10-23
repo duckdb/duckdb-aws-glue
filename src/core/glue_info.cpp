@@ -360,6 +360,10 @@ GlueTableFormat GlueTableInfo::GetFormat() const {
 	return GlueTableFormat::Detect(info);
 }
 
+bool GlueTableInfo::IsSameVersion(const GlueTableInfo &other) const {
+	return !version_id.empty() && version_id == other.version_id && create_time_ms == other.create_time_ms;
+}
+
 string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
 }

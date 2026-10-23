@@ -70,10 +70,19 @@ shared_ptr<HiveQueryCache> HiveQueryCache::Get(ClientContext &context) {
 }
 
 string HiveQueryCache::TableKey(const string &catalog, const string &database, const string &table) {
-	return catalog + "\x1f" + database + "\x1f" + table;
+	return catalog + "\x1f" + StringUtil::Lower(database) + "\x1f" + StringUtil::Lower(table);
+}
+
+void HiveQueryCache::QueryBegin(ClientContext &context) {
+	// a scan bound outside a query sees no QueryEnd, what it cached must not seed this query
+	Clear();
 }
 
 void HiveQueryCache::QueryEnd(ClientContext &context) {
+	Clear();
+}
+
+void HiveQueryCache::Clear() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	glue_tables.clear();
 	samples.clear();

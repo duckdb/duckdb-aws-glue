@@ -1,0 +1,52 @@
+# name: test/sql/hive/ddl/alter_column/alter_table_concurrent_modification.test
+# description: Glue refusing an UpdateTable at the bound VersionId (ConcurrentModificationException) fails the ALTER with the same error as a definition changed on the client, and the table is left as it was
+# group: [alter_column]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.fault_concurrent_modification_alter;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.fault_concurrent_modification_alter.t;
+
+statement ok
+CREATE TABLE my_datalake.fault_concurrent_modification_alter.t (id INTEGER);
+
+# the proxy answers every UpdateTable on this database with ConcurrentModificationException, what Glue returns when
+# the table is no longer at the VersionId the request names
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement error
+ALTER TABLE fault_dl.fault_concurrent_modification_alter.t ADD COLUMN tag VARCHAR;
+----
+Catalog Error: Glue object "fault_concurrent_modification_alter.t" changed since it was bound; retry the statement
+
+query I
+SELECT column_name FROM (DESCRIBE my_datalake.fault_concurrent_modification_alter.t);
+----
+id
+
+statement ok
+DROP TABLE my_datalake.fault_concurrent_modification_alter.t;
+
+statement ok
+DROP SCHEMA my_datalake.fault_concurrent_modification_alter;

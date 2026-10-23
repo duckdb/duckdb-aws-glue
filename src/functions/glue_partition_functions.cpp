@@ -32,6 +32,16 @@ struct GluePartitionTarget {
 	}
 };
 
+//! Replace the catalog entry of a table one of the functions below altered with the definition Glue stored
+static GlueTable &RefreshTableEntry(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &stored) {
+	auto schema = catalog.GetSchemas().GetEntry(context, stored.database_name);
+	if (!schema) {
+		throw CatalogException("Table \"%s.%s\" was altered but its Glue database could not be found afterwards",
+		                       stored.database_name, stored.name);
+	}
+	return schema->Cast<GlueSchemaEntry>().RefreshTable(stored);
+}
+
 void ThrowIsView(const string &function_name, const string &table_name, bool require_partitions) {
 	if (require_partitions) {
 		throw BinderException("%s: Glue view '%s' has no partitions", function_name, table_name);
@@ -448,8 +458,10 @@ void GlueSetTableLocationScan(ClientContext &context, TableFunctionInput &data, 
 	}
 	state.done = true;
 	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
+	auto &catalog = *bind_data.target.catalog;
 	auto &table = bind_data.target.table;
-	GlueAPI::SetTableLocation(context, *bind_data.target.catalog, table.database_name, table.name, bind_data.location);
+	RefreshTableEntry(context, catalog,
+	                  GlueAPI::SetTableLocation(context, catalog, table.database_name, table.name, bind_data.location));
 	output.data[0].Append(Value(bind_data.location));
 	output.CheckCardinality(1);
 }
@@ -609,13 +621,8 @@ void GlueReplaceColumnsScan(ClientContext &context, TableFunctionInput &data, Da
 	auto &table = bind_data.target.table;
 	// keeps the refreshed entry alive while its columns are read below
 	Transaction::Get(context, catalog);
-	GlueAPI::UpdateTableColumns(context, catalog, table.database_name, table.name, bind_data.columns);
-	auto schema = catalog.GetSchemas().GetEntry(context, table.database_name);
-	if (!schema) {
-		throw CatalogException("Table \"%s\" was altered but its Glue database could not be found afterwards",
-		                       bind_data.target.TableName());
-	}
-	auto &updated = schema->Cast<GlueSchemaEntry>().RefreshTable(context, table.name);
+	auto &updated =
+	    RefreshTableEntry(context, catalog, GlueAPI::UpdateTableColumns(context, catalog, table, bind_data.columns));
 	vector<Value> columns;
 	for (auto &column : updated.table_info.columns) {
 		columns.push_back(
@@ -860,7 +867,9 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			                              step.location);
 			break;
 		case GlueAlterAction::SET_TABLE_LOCATION:
-			GlueAPI::SetTableLocation(context, catalog, table.database_name, table.name, step.location);
+			RefreshTableEntry(
+			    context, catalog,
+			    GlueAPI::SetTableLocation(context, catalog, table.database_name, table.name, step.location));
 			break;
 		}
 		emit(step);

@@ -76,18 +76,18 @@ public:
 	static bool IsBucketingOption(const string &key);
 	//! Type changes Hive can read back from the existing parquet files: widening only
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
-	//! Replace the cached entry of an altered table with what Glue stored
-	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
+	//! Replace the entry of an altered table with the definition Glue stored (what the UpdateTable call returned)
+	GlueTable &RefreshTable(const GlueTableInfo &updated);
 
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
 	                                               const GlueTableInfo *resolved_table_info);
 	static bool CatalogTypeIsSupported(CatalogType type);
-	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
+	void AlterTableProperties(ClientContext &context, const GlueTableInfo &table, AlterTableInfo &alter_table);
 	//! COMMENT ON COLUMN: Glue keeps the comment with the column
-	void SetColumnComment(ClientContext &context, const string &table_name, SetColumnCommentInfo &info);
+	void SetColumnComment(ClientContext &context, const GlueTableInfo &table, SetColumnCommentInfo &info);
 	//! COMMENT ON TABLE: Glue stores it as the table's Description
-	void SetTableComment(ClientContext &context, const string &table_name, SetCommentInfo &info);
+	void SetTableComment(ClientContext &context, const GlueTableInfo &table, SetCommentInfo &info);
 
 public:
 	//! The database definition as returned by Glue

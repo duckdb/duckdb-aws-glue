@@ -20,8 +20,14 @@ public:
 	explicit GlueTableSet(GlueSchemaEntry &schema);
 
 public:
-	//! The entry with this name whatever its type: callers check entry->type against what they need
+	//! The entry with this name whatever its type (callers check entry->type against what they need), reconciled with
+	//! the definition Glue holds: replaced when its version changed, gone when Glue no longer has it
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup);
+	//! The entry for the definition 'current' holds: the cached one when it is the same version, else a replacement
+	//! built from 'current' (the entry a running statement bound stays alive, RetireEntry)
+	optional_ptr<CatalogEntry> Reconcile(const GlueTableInfo &current);
+	//! The definition a table or view entry was built from
+	static const GlueTableInfo &GetTableInfo(const CatalogEntry &entry);
 	//! The entries of the given type (TABLE_ENTRY or VIEW_ENTRY)
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
 	//! Insert a (new) entry into the set, replacing any existing entry with the same name
@@ -41,6 +47,8 @@ private:
 	//! Move an entry out of the set; the transaction manager keeps it alive while a running statement may use it.
 	//! Called with entry_lock held.
 	void RetireEntry(const string &name);
+	//! Reconcile with entry_lock held
+	CatalogEntry &ReconcileLocked(const GlueTableInfo &current);
 
 private:
 	GlueSchemaEntry &schema;

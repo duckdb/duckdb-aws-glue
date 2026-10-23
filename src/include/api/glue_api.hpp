@@ -62,30 +62,34 @@ public:
 	//! partition keys in 'table'
 	static void CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);
 	static void CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
+	//! The UpdateTable calls below return the definition as stored, which replaces the catalog entry. Those given the
+	//! definition the statement bound ('table') tell Glue its VersionId and fail with a CatalogException when the table
+	//! changed since, instead of writing over the change; SetTableLocation sets a value and applies to the current
+	//! definition.
 	//! Replace the definition of an existing view (CREATE OR REPLACE VIEW)
-	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
+	static GlueTableInfo UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
+	                                const GlueViewInfo &view);
 	//! Replace the (data) columns of a table, keeping everything else of its Glue definition as is. Used for
 	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata.
-	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                               const string &table_name, const vector<GlueColumn> &columns);
+	static GlueTableInfo UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
+	                                        const vector<GlueColumn> &columns);
 	//! Replace the partition keys of a table, keeping everything else of its Glue definition as is. Only the names,
 	//! types and comments of the partition keys are overwritten; the StorageDescriptor and registered partitions are
 	//! untouched. Used for COMMENT ON COLUMN on a partition key.
-	static void UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                     const string &table_name, const vector<GlueColumn> &partition_keys);
+	static GlueTableInfo UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog,
+	                                              const GlueTableInfo &table, const vector<GlueColumn> &partition_keys);
 	//! Replace the description of a table (Glue's Table.Description), keeping everything else of its Glue definition
 	//! as is. An empty description clears it.
-	static void UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                   const string &table_name, const string &description);
+	static GlueTableInfo UpdateTableDescription(ClientContext &context, GlueCatalog &catalog,
+	                                            const GlueTableInfo &table, const string &description);
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
-	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                             const string &table_name, const string &location);
+	static GlueTableInfo SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                      const string &table_name, const string &location);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
 	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
-	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                  const string &table_name, const vector<pair<string, string>> &set,
-	                                  const vector<string> &unset);
+	static GlueTableInfo UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
+	                                           const vector<pair<string, string>> &set, const vector<string> &unset);
 	//! Point a partition at another location, throws a CatalogException if the partition does not exist
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const vector<string> &values, const string &location);

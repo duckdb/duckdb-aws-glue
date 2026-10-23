@@ -101,6 +101,21 @@ SELECT id FROM my_datalake.default.customers_location ORDER BY id;
 3
 4
 
+# two table-level steps in one call are applied in order
+statement ok
+CALL glue_alter_table('my_datalake.default.customers_location',
+    [{action: 'set_table_location', if_not_exists: NULL::BOOLEAN, if_exists: NULL::BOOLEAN,
+      partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[],
+      new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/customers_v3/'},
+     {action: 'set_table_location', if_not_exists: NULL::BOOLEAN, if_exists: NULL::BOOLEAN,
+      partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[],
+      new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/customers_v4/'}]);
+
+query I
+SELECT location LIKE '%/customers_v4%' FROM glue_get_table_response('my_datalake.default.customers_location');
+----
+true
+
 # the second attach sees the new locations
 statement ok
 attach '{GLUE_CATALOG_ID}' as verify_datalake (
@@ -110,7 +125,7 @@ attach '{GLUE_CATALOG_ID}' as verify_datalake (
 );
 
 query I
-SELECT location LIKE '%/customers_v2%' FROM glue_get_table_response('verify_datalake.default.customers_location');
+SELECT location LIKE '%/customers_v4%' FROM glue_get_table_response('verify_datalake.default.customers_location');
 ----
 true
 

@@ -14,8 +14,6 @@ struct HiveTableSample;
 //! What Glue said about a table the running query scans
 struct GlueTableEntry {
 	annotated_mutex lock;
-	//! Null until the first scan of the table asks Glue
-	shared_ptr<const GlueTableInfo> table_info DUCKDB_GUARDED_BY(lock);
 	//! Null until the first scan of a partitioned table asks Glue for them
 	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
 };
@@ -28,15 +26,17 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! What the running query learned about the tables it scans, dropped when the query ends: the Glue definition and
-//! partitions of a table (asked for once however often the query scans it), the recursive listings of directories
-//! (shared by the estimate and every scan listing the same directory) and the table samples
+//! What the running query learned about the tables it scans: the partitions of a table (asked for once however often
+//! the query scans it), the recursive listings of directories (shared by the estimate and every scan listing the same
+//! directory) and the table samples. Dropped when the query ends, and when the next begins: a scan bound outside a
+//! query (a relation) sees no QueryEnd
 class HiveQueryCache : public ClientContextState {
 public:
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);
-	//! The key of a Glue table in GetGlueTable
+	//! The key of a Glue table in GetGlueTable; Glue folds names to lower case, so the key does too
 	static string TableKey(const string &catalog, const string &database, const string &table);
 
+	void QueryBegin(ClientContext &context) override;
 	void QueryEnd(ClientContext &context) override;
 
 	//! 'key' identifies the table (TableKey)
@@ -49,6 +49,8 @@ public:
 	                                              bool cache_in_connection = false);
 
 private:
+	void Clear();
+
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);

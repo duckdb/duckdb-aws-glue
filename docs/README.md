@@ -111,8 +111,16 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
   the listing. Avro tables are not measured, so planning them lists nothing.
-- The Glue table definition and the partition list are fetched once per query and table, however often the
-  query scans the table.
+- The Glue table definition is fetched once per transaction and table, the partition list once per query, and the
+  catalog entry is replaced whenever Glue's `VersionId` or `CreateTime` differ from the entry's: a table or view
+  another client altered or replaced under the same name is read as that fetch found it, not as it was first seen,
+  and a listing (`SHOW TABLES`, `duckdb_columns()`) that fetches the database's tables shows it the same way. Under
+  `glue_metadata_cache_scope = 'connection'` "fetched" means from that cache (below). A write that derives from the
+  definition the statement bound (`ALTER TABLE` on columns and properties, `CREATE OR REPLACE VIEW`,
+  `glue_replace_columns`) tells Glue that version (UpdateTable's `VersionId`) and fails with `Glue object "db.table"
+  changed since it was bound; retry the statement` when the table changed in between, instead of writing over the
+  change; `SET LOCATION` sets a value and applies to the current definition. An endpoint that does not report
+  `VersionId` gets no such check.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
@@ -375,7 +383,8 @@ A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_END
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under
 `test/sql/cloud/` read tables of the live account that the tests do not create and only run with the cloud config.
 The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
-GetTables on a database named `fault_*` with a Glue error; tests that need it are skipped without it.
+GetTables (and UpdateTable, for `fault_concurrent_modification*`) on a database named `fault_*` with the Glue error
+assigned to that prefix; tests that need it are skipped without it.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
