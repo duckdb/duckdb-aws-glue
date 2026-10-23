@@ -75,7 +75,7 @@ void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, 
 	auto &bind_data = data.bind_data->Cast<GlueGetTableResponseBindData>();
 	auto &table = bind_data.table;
 
-	output.data[0].Append(Value(table.database_name));
+	output.data[0].Append(Value(table.schema_name));
 	output.data[1].Append(Value(table.name));
 	output.data[2].Append(Value(table.GetFormat().ToString()));
 	output.data[3].Append(Value(table.glue_table_type));

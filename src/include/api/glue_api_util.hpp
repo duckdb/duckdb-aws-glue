@@ -16,7 +16,7 @@ string ToStdString(const Aws::String &input);
 unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> &input);
 vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input);
 GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database);
-GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table);
+GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &schema_name);
 Aws::Map<Aws::String, Aws::String> ToAwsMap(const unordered_map<string, string> &input);
 Aws::Vector<Aws::Glue::Model::Column> ToAwsColumns(const vector<GlueColumn> &input);
 Aws::Vector<Aws::String> ToAwsValues(const vector<string> &values);

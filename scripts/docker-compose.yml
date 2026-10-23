@@ -16,13 +16,16 @@
 # Ports 5555 and 9100 are used so that they do not clash with macOS (5000) and other S3 instances (9000).
 # 'fault-proxy' (port 5556, GLUE_FAULT_ENDPOINT) forwards to moto, except GetTables on a database named fault_*, which
 # fails with the Glue error scripts/glue_fault_proxy.py assigns to that prefix.
+# 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link
+# link_db whose target is target_db (scripts/resource_link_proxy.py).
+# Ports are published on 127.0.0.1 only, so the servers are not reachable from other machines.
 name: duckdb-glue
 services:
   moto:
     image: motoserver/moto:5.2.3
     container_name: glue-moto
     ports:
-      - "5555:5000"
+      - "127.0.0.1:5555:5000"
     environment:
       - MOTO_PORT=5000
   fault-proxy:
@@ -31,15 +34,25 @@ services:
     depends_on:
       - moto
     ports:
-      - "5556:5556"
+      - "127.0.0.1:5556:5556"
     volumes:
       - ./glue_fault_proxy.py:/glue_fault_proxy.py:ro
     entrypoint: ["python3", "/glue_fault_proxy.py", "--port", "5556", "--upstream", "http://moto:5000"]
+  link-proxy:
+    image: motoserver/moto:5.2.3
+    container_name: glue-link-proxy
+    depends_on:
+      - moto
+    ports:
+      - "127.0.0.1:5557:5557"
+    volumes:
+      - ./resource_link_proxy.py:/resource_link_proxy.py:ro
+    entrypoint: ["python3", "/resource_link_proxy.py", "--host", "0.0.0.0", "--port", "5557", "--upstream", "http://moto:5000"]
   s3:
     image: chrislusf/seaweedfs:4.47
     container_name: glue-s3
     ports:
-      - "9100:8333"
+      - "127.0.0.1:9100:8333"
     volumes:
       - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
     command: ["server", "-dir=/data", "-ip.bind=0.0.0.0", "-s3", "-s3.port=8333", "-s3.config=/etc/seaweedfs/s3.json"]

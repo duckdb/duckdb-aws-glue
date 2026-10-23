@@ -50,7 +50,7 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 		}
 		auto &tables = outcome.GetResult();
 		for (auto &table : tables.GetTableList()) {
-			result.push_back(ToTableInfo(table));
+			result.push_back(ToTableInfo(table, database_name));
 		}
 		next_token = tables.GetNextToken();
 		if (single_page) {
@@ -106,7 +106,7 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 		ThrowGlueError(outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
 	}
 	auto &table = outcome.GetResult().GetTable();
-	result = ToTableInfo(table);
+	result = ToTableInfo(table, database_name);
 	if (raw_json) {
 		*raw_json = ToStdString(table.Jsonize().View().WriteReadable());
 	}
@@ -117,7 +117,7 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateTable");
 	if (table.location.empty()) {
-		throw InvalidInputException("Can not create Hive table '%s.%s' without a location", table.database_name,
+		throw InvalidInputException("Can not create Hive table '%s.%s' without a location", table.schema_name,
 		                            table.name);
 	}
 	GlueHttpClientContextScope http_scope(context);
@@ -198,16 +198,16 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 
 	Aws::Glue::Model::CreateTableRequest request;
 	SetCatalogId(request, catalog);
-	request.SetDatabaseName(table.database_name);
+	request.SetDatabaseName(table.schema_name);
 	request.SetTableInput(table_input);
 	auto outcome = client->CreateTable(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
 			throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table.name,
-			                       table.database_name);
+			                       table.schema_name);
 		}
-		ThrowGlueError(outcome, StringUtil::Format("CreateTable '%s.%s' (location '%s')", table.database_name,
-		                                           table.name, table.location));
+		ThrowGlueError(outcome, StringUtil::Format("CreateTable '%s.%s' (location '%s')", table.schema_name, table.name,
+		                                           table.location));
 	}
 }
 

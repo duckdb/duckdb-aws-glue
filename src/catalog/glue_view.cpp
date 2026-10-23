@@ -20,7 +20,7 @@ GlueView::GlueView(Catalog &catalog, SchemaCatalogEntry &schema, CreateViewInfo 
 
 const SelectStatement &GlueView::GetQuery() {
 	if (!IsSupported()) {
-		throw BinderException("Glue view \"%s.%s\" can not be queried: %s", table_info.database_name, table_info.name,
+		throw BinderException("Glue view \"%s.%s\" can not be queried: %s", table_info.schema_name, table_info.name,
 		                      unsupported_reason);
 	}
 	lock_guard<mutex> guard(parse_lock);
@@ -31,7 +31,7 @@ const SelectStatement &GlueView::GetQuery() {
 			statement = CreateViewInfo::ParseSelect(parser, select_sql);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
-			throw BinderException("Glue view \"%s.%s\" could not be parsed: %s", table_info.database_name,
+			throw BinderException("Glue view \"%s.%s\" could not be parsed: %s", table_info.schema_name,
 			                      table_info.name, error.RawMessage());
 		}
 		// set together: a failure here must not leave a parse without its ids
@@ -57,7 +57,7 @@ const SelectStatement &GlueView::GetQuery() {
 		return *existing->second;
 	}
 	auto copy = unique_ptr_cast<SQLStatement, SelectStatement>(parsed->Copy());
-	GlueViewNames::ResolveForReading(glue_catalog, table_info.database_name + "." + table_info.name, aliases,
+	GlueViewNames::ResolveForReading(glue_catalog, table_info.schema_name + "." + table_info.name, aliases,
 	                                 *copy->node);
 	GlueViewNames::PinToCatalog(*copy->node, catalog.GetName());
 	auto &result = *copy;
@@ -91,12 +91,13 @@ unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntr
 	} else {
 		// The unqualified names in the SQL belong to the database the view was written in. DuckDB binds a view in
 		// the database that holds it, so a view moved or copied to another database would bind against the wrong
-		// tables; refuse it instead
+		// tables; refuse it instead. Through a resource link the view is held by the link's target
 		auto written_for = table.GetParameter("duckdb_view_default_database");
-		if (!written_for.empty() && !StringUtil::CIEquals(written_for, table.database_name)) {
+		auto &held_by = table.glue_database_name.empty() ? table.schema_name : table.glue_database_name;
+		if (!written_for.empty() && !StringUtil::CIEquals(written_for, held_by)) {
 			unsupported_reason = StringUtil::Format("it was written for database \"%s\" and is now in database \"%s\"; "
 			                                        "DuckDB binds a view in the database that holds it",
-			                                        written_for, table.database_name);
+			                                        written_for, held_by);
 		}
 	}
 

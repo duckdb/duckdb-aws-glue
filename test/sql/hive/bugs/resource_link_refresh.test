@@ -1,0 +1,38 @@
+# name: test/sql/hive/bugs/resource_link_refresh.test
+# description: A table read through a database resource link is re-fetched under the link, not the target database
+# group: [bugs]
+#
+# Needs a fixture this test cannot create (a resource link needs the Glue API's TargetDatabase):
+#   GLUE_LINK_DATABASE           a database that is a resource link, in GLUE_CATALOG_ID
+#   GLUE_LINK_TABLE              an unpartitioned table reachable through it, with at least one row
+#   GLUE_LINK_PARTITIONED_TABLE  a partitioned table reachable through it, with at least one row
+# Before the fix both SELECTs fail with "Glue table '<target database>.<table>' no longer exists" whenever the
+# target database is not in GLUE_CATALOG_ID (a cross-account link).
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_LINK_DATABASE
+
+require-env GLUE_LINK_TABLE
+
+require-env GLUE_LINK_PARTITIONED_TABLE
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+query I
+SELECT count(*) > 0 FROM my_datalake.{GLUE_LINK_DATABASE}.{GLUE_LINK_TABLE};
+----
+true
+
+query I
+SELECT count(*) > 0 FROM my_datalake.{GLUE_LINK_DATABASE}.{GLUE_LINK_PARTITIONED_TABLE};
+----
+true

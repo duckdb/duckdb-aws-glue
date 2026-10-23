@@ -28,7 +28,7 @@ struct GluePartitionTarget {
 	GlueTableInfo table;
 
 	string TableName() const {
-		return table.database_name + "." + table.name;
+		return table.schema_name + "." + table.name;
 	}
 };
 
@@ -237,10 +237,10 @@ unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctio
 	return_types.emplace_back(LogicalType::VARCHAR);
 	auto load_partitions = [&]() {
 		return make_shared_ptr<const vector<GluePartitionInfo>>(
-		    GlueAPI::GetPartitions(context, *result->target.catalog, table.database_name, table.name));
+		    GlueAPI::GetPartitions(context, *result->target.catalog, table.schema_name, table.name));
 	};
 	auto &cache = *GlueTransaction::Get(context, *result->target.catalog).cache;
-	result->partitions = *cache.GetPartitions(table.database_name, table.name, load_partitions);
+	result->partitions = *cache.GetPartitions(table.schema_name, table.name, load_partitions);
 	return std::move(result);
 }
 
@@ -307,7 +307,7 @@ void GlueAddPartitionScan(ClientContext &context, TableFunctionInput &data, Data
 	GluePartitionInput partition;
 	partition.values = bind_data.values;
 	partition.location = bind_data.location;
-	GlueAPI::CreatePartition(context, *bind_data.target.catalog, table.database_name, table.name, partition,
+	GlueAPI::CreatePartition(context, *bind_data.target.catalog, table.schema_name, table.name, partition,
 	                         bind_data.if_not_exists);
 	output.data[0].Append(Value(bind_data.location));
 	output.CheckCardinality(1);
@@ -342,7 +342,7 @@ void GlueDropPartitionScan(ClientContext &context, TableFunctionInput &data, Dat
 	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
 	auto &table = bind_data.target.table;
 	auto dropped =
-	    GlueAPI::DeletePartition(context, *bind_data.target.catalog, table.database_name, table.name, bind_data.values);
+	    GlueAPI::DeletePartition(context, *bind_data.target.catalog, table.schema_name, table.name, bind_data.values);
 	if (!dropped && !bind_data.if_exists) {
 		throw CatalogException("Partition [%s] does not exist in Glue table '%s'",
 		                       StringUtil::Join(bind_data.values, ", "), bind_data.target.TableName());
@@ -375,10 +375,10 @@ void GlueRenamePartitionScan(ClientContext &context, TableFunctionInput &data, D
 	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
 	auto &table = bind_data.target.table;
 	auto &catalog = *bind_data.target.catalog;
-	GlueAPI::RenamePartition(context, catalog, table.database_name, table.name, bind_data.values, bind_data.new_values);
+	GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name, bind_data.values, bind_data.new_values);
 	GluePartitionInfo renamed;
 	string location;
-	if (GlueAPI::GetPartition(context, catalog, table.database_name, table.name, bind_data.new_values, renamed)) {
+	if (GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, bind_data.new_values, renamed)) {
 		location = renamed.location;
 	}
 	output.data[0].Append(Value(location));
@@ -424,7 +424,7 @@ void GlueSetPartitionLocationScan(ClientContext &context, TableFunctionInput &da
 	state.done = true;
 	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
 	auto &table = bind_data.target.table;
-	GlueAPI::SetPartitionLocation(context, *bind_data.target.catalog, table.database_name, table.name, bind_data.values,
+	GlueAPI::SetPartitionLocation(context, *bind_data.target.catalog, table.schema_name, table.name, bind_data.values,
 	                              bind_data.location);
 	output.data[0].Append(Value(bind_data.location));
 	output.CheckCardinality(1);
@@ -449,7 +449,7 @@ void GlueSetTableLocationScan(ClientContext &context, TableFunctionInput &data, 
 	state.done = true;
 	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
 	auto &table = bind_data.target.table;
-	GlueAPI::SetTableLocation(context, *bind_data.target.catalog, table.database_name, table.name, bind_data.location);
+	GlueAPI::SetTableLocation(context, *bind_data.target.catalog, table.schema_name, table.name, bind_data.location);
 	output.data[0].Append(Value(bind_data.location));
 	output.CheckCardinality(1);
 }
@@ -609,8 +609,8 @@ void GlueReplaceColumnsScan(ClientContext &context, TableFunctionInput &data, Da
 	auto &table = bind_data.target.table;
 	// keeps the refreshed entry alive while its columns are read below
 	Transaction::Get(context, catalog);
-	GlueAPI::UpdateTableColumns(context, catalog, table.database_name, table.name, bind_data.columns);
-	auto schema = catalog.GetSchemas().GetEntry(context, table.database_name);
+	GlueAPI::UpdateTableColumns(context, catalog, table.schema_name, table.name, bind_data.columns);
+	auto schema = catalog.GetSchemas().GetEntry(context, table.schema_name);
 	if (!schema) {
 		throw CatalogException("Table \"%s\" was altered but its Glue database could not be found afterwards",
 		                       bind_data.target.TableName());
@@ -793,7 +793,7 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		switch (step.action) {
 		case GlueAlterAction::ADD:
 			if (!step.if_not_exists &&
-			    GlueAPI::GetPartition(context, catalog, table.database_name, table.name, step.values, existing)) {
+			    GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, step.values, existing)) {
 				throw CatalogException("Partition [%s] already exists in Glue table '%s'",
 				                       StringUtil::Join(step.values, ", "), table_name);
 			}
@@ -801,17 +801,17 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		case GlueAlterAction::DROP:
 		case GlueAlterAction::SET_PARTITION_LOCATION:
 			if (!step.if_exists &&
-			    !GlueAPI::GetPartition(context, catalog, table.database_name, table.name, step.values, existing)) {
+			    !GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, step.values, existing)) {
 				throw CatalogException("Partition [%s] does not exist in Glue table '%s'",
 				                       StringUtil::Join(step.values, ", "), table_name);
 			}
 			break;
 		case GlueAlterAction::RENAME:
-			if (!GlueAPI::GetPartition(context, catalog, table.database_name, table.name, step.values, existing)) {
+			if (!GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, step.values, existing)) {
 				throw CatalogException("Partition [%s] does not exist in Glue table '%s'",
 				                       StringUtil::Join(step.values, ", "), table_name);
 			}
-			if (GlueAPI::GetPartition(context, catalog, table.database_name, table.name, step.new_values, existing)) {
+			if (GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, step.new_values, existing)) {
 				throw CatalogException("Partition [%s] already exists in Glue table '%s'",
 				                       StringUtil::Join(step.new_values, ", "), table_name);
 			}
@@ -834,7 +834,7 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		if (pending_adds.empty()) {
 			return;
 		}
-		GlueAPI::BatchCreatePartitions(context, catalog, table.database_name, table.name, pending_adds);
+		GlueAPI::BatchCreatePartitions(context, catalog, table.schema_name, table.name, pending_adds);
 		pending_adds.clear();
 	};
 	for (auto &step : bind_data.steps) {
@@ -850,17 +850,16 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		}
 		case GlueAlterAction::DROP:
-			GlueAPI::DeletePartition(context, catalog, table.database_name, table.name, step.values);
+			GlueAPI::DeletePartition(context, catalog, table.schema_name, table.name, step.values);
 			break;
 		case GlueAlterAction::RENAME:
-			GlueAPI::RenamePartition(context, catalog, table.database_name, table.name, step.values, step.new_values);
+			GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name, step.values, step.new_values);
 			break;
 		case GlueAlterAction::SET_PARTITION_LOCATION:
-			GlueAPI::SetPartitionLocation(context, catalog, table.database_name, table.name, step.values,
-			                              step.location);
+			GlueAPI::SetPartitionLocation(context, catalog, table.schema_name, table.name, step.values, step.location);
 			break;
 		case GlueAlterAction::SET_TABLE_LOCATION:
-			GlueAPI::SetTableLocation(context, catalog, table.database_name, table.name, step.location);
+			GlueAPI::SetTableLocation(context, catalog, table.schema_name, table.name, step.location);
 			break;
 		}
 		emit(step);
@@ -900,7 +899,7 @@ unique_ptr<FunctionData> GlueGetPartitionResponseBind(ClientContext &context, Ta
 	result->target = ResolveGlueTable(context, "glue_get_partition_response", input.inputs[0]);
 	auto values = ParsePartitionSpec("glue_get_partition_response", result->target, input.inputs[1]);
 	auto &table = result->target.table;
-	if (!GlueAPI::GetPartition(context, *result->target.catalog, table.database_name, table.name, values,
+	if (!GlueAPI::GetPartition(context, *result->target.catalog, table.schema_name, table.name, values,
 	                           result->partition, &result->raw_json)) {
 		throw CatalogException("Partition [%s] does not exist in Glue table '%s'", StringUtil::Join(values, ", "),
 		                       result->target.TableName());
@@ -934,7 +933,7 @@ void GlueGetPartitionResponseScan(ClientContext &context, TableFunctionInput &da
 		values.emplace_back(value);
 	}
 
-	output.data[0].Append(Value(table.database_name));
+	output.data[0].Append(Value(table.schema_name));
 	output.data[1].Append(Value(table.name));
 	output.data[2].Append(Value::LIST(LogicalType::VARCHAR, std::move(values)));
 	output.data[3].Append(Value(partition.location));

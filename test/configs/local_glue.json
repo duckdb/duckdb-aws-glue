@@ -27,6 +27,10 @@
       "env_value": "http://localhost:5556"
     },
     {
+      "env_name": "GLUE_LINK_PROXY_ENDPOINT",
+      "env_value": "http://localhost:5557"
+    },
+    {
       "env_name": "DEFAULT_S3_LOCATION",
       "env_value": "s3://glue-test/warehouse"
     }

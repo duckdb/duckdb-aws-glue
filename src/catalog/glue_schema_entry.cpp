@@ -387,7 +387,7 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 
 	GlueTableInfo table;
 	table.name = table_name;
-	table.database_name = database_info.name;
+	table.schema_name = database_info.name;
 	// Table description: `WITH (comment = '...')` is the primary spelling (DuckDB's parser accepts a trailing
 	// `COMMENT '...'` only on CREATE SCHEMA, not CREATE TABLE); CreateInfo::comment is a Value and set by a
 	// future parser or an engine wrapper, so honor it too and let the WITH value override when both are given.
@@ -483,7 +483,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	}
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
-	D_ASSERT(table.database_name == database_info.name);
+	D_ASSERT(table.schema_name == database_info.name);
 	GlueAPI::CreateHiveTable(context, glue_catalog, table);
 
 	// re-fetch so the entry reflects what Glue stored
