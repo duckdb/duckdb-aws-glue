@@ -1,5 +1,9 @@
 #include "planning/glue_hive_insert.hpp"
 
+#include "api/glue_api_util.hpp"
+
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -592,7 +596,24 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	for (auto &entry : partitions) {
 		to_register.push_back(entry.second);
 	}
-	GlueAPI::BatchCreatePartitions(context, catalog, table_info.database_name, table_info.name, to_register);
+	try {
+		GlueAPI::BatchCreatePartitions(context, catalog, table_info.database_name, table_info.name, to_register);
+	} catch (std::exception &ex) {
+		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
+		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.
+		ErrorData error(ex);
+		try {
+			FileSystem::GetFileSystem(context).RemoveFiles(state.written_files);
+		} catch (std::exception &remove_ex) {
+			throw IOException("INSERT into Hive table '%s.%s' failed: %s. Deleting the %llu files it wrote failed too "
+			                  "(%s); remove them before running it again",
+			                  table_info.database_name, table_info.name, error.RawMessage(), state.written_files.size(),
+			                  ErrorData(remove_ex).RawMessage());
+		}
+		throw IOException("INSERT into Hive table '%s.%s' was rolled back: %s. The files it wrote were deleted, so it "
+		                  "can be run again",
+		                  table_info.database_name, table_info.name, error.RawMessage());
+	}
 	return SinkFinalizeType::READY;
 }
 

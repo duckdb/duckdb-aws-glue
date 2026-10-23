@@ -10,6 +10,7 @@
 #include "catalog/glue_attach.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
+#include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
@@ -108,6 +109,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "break inside a quoted field needs: the parallel scanner refuses such a field together "
 	                          "with the NULL padding of short rows. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
+	config.AddExtensionOption(
+	    "glue_debug_fail_partition_registration",
+	    "For tests: '<Glue error code>:<n>' makes the n-th partition a write registers in Glue, "
+	    "and every later one, fail with that error code; a transient error (ThrottlingException, "
+	    "InternalServiceException, ...) fails the first attempt only. Empty, the default, injects "
+	    "nothing.",
+	    LogicalType::VARCHAR, Value(""), GlueAPI::CheckDebugFailPartitionRegistration, SetScope::SESSION, true);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();

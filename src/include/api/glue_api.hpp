@@ -6,6 +6,7 @@
 #include "core/glue_info.hpp"
 
 #include "duckdb/common/pair.hpp"
+#include "duckdb/common/enums/set_scope.hpp"
 
 #include <memory>
 
@@ -18,6 +19,7 @@ class GlueClient;
 namespace duckdb {
 class ClientContext;
 class GlueCatalog;
+class Value;
 
 class GlueException : public IOException {
 public:
@@ -112,9 +114,12 @@ public:
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
-	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped.
+	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped; throws
+	//! for the first partition Glue refuses, after retrying the errors that may pass.
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<GluePartitionInput> &partitions);
+	//! SET callback of glue_debug_fail_partition_registration: rejects a value that is not '<error code>:<index>'
+	static void CheckDebugFailPartitionRegistration(ClientContext &context, SetScope scope, Value &parameter);
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
