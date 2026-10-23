@@ -17,7 +17,6 @@
 #include "catalog/glue_view.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_transaction_manager.hpp"
-#include "planning/hive_query_cache.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
@@ -74,13 +73,13 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	for (auto &table : tables) {
 		if (cache) {
-			// Without this the per reference GetQueryTableInfo re-fetches every table this one request
+			// Without this the per reference GetEntry re-fetches every table this one request
 			// already returned, which makes the bulk round trip pure added cost
 			shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
 			cache->GetTable(schema.database_info.name, table.name, [&info]() { return info; });
 		}
 		auto existing = entries.find(table.name);
-		if (existing != entries.end() && TableInfoOf(*existing->second).HasSameBinding(table)) {
+		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(table)) {
 			// already loaded through a direct lookup, and still what Glue holds
 			continue;
 		}
@@ -144,7 +143,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	auto &name = lookup.GetEntryName();
 	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
 	// is started before entry_lock is taken, the order RetireEntry takes the locks in
-	Transaction::Get(context, catalog);
+	auto &cache = *GlueTransaction::Get(context, catalog).cache;
 	// the name Glue knows when the entry is cached: the lookup name may differ in case
 	auto glue_name = name;
 	bool cached = false;
@@ -154,23 +153,27 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		if (existing != entries.end()) {
 			glue_name = existing->second->name.GetIdentifierName();
 			cached = true;
-		} else {
-			auto cache = GlueTransactionCache::Of(context, catalog);
+		} else if (!batch_forbidden && cache.Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
+		           BatchTableLookups(context)) {
 			// The attach's first round-trip miss stays direct: a lone lookup must not enumerate a large database.
 			// From the second round-trip-causing miss on (round trips count across cache instances), one GetTables
 			// page warms the cache, at most once per instance - under the default scope that is once per transaction.
-			// Only a miss on the entries gets here: refreshing a cached entry stays one GetTable, as it was when the
-			// scan bind fetched it
-			if (cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
-			    BatchTableLookups(context)) {
-				BulkLoadTableInfo(context, *cache);
-			}
+			// Refreshing a cached entry stays one GetTable.
+			BulkLoadTableInfo(context, cache);
 		}
 	}
-	// the query's snapshot of the table, shared with the scan bind; taken outside the lock so that a Glue round trip
-	// does not hold up the lookups of other tables
+	// the definition Glue holds, once per transaction (GlueTransactionCache); fetched outside the lock so that a Glue
+	// round trip does not hold up the lookups of other tables
 	bool asked_glue = false;
-	auto table = GetQueryTableInfo(context, catalog, schema.database_info.name, glue_name, asked_glue);
+	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		asked_glue = true;
+		GlueTableInfo table;
+		if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, glue_name, table)) {
+			return nullptr;
+		}
+		return make_shared_ptr<const GlueTableInfo>(std::move(table));
+	};
+	auto table = cache.GetTable(schema.database_info.name, glue_name, load);
 	lock_guard<mutex> guard(entry_lock);
 	if (!cached && asked_glue) {
 		// counts the round trips of misses, not lookups: a cache hit (including a bulk-warmed one) costs nothing
@@ -192,16 +195,17 @@ optional_ptr<CatalogEntry> GlueTableSet::Reconcile(const GlueTableInfo &current)
 
 CatalogEntry &GlueTableSet::ReconcileLocked(const GlueTableInfo &current) {
 	auto existing = entries.find(current.name);
-	if (existing != entries.end() && TableInfoOf(*existing->second).HasSameBinding(current)) {
+	if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(current)) {
 		return *existing->second;
 	}
-	// new, or its binding changed (another client replaced the table): a statement that bound the old entry keeps it
+	// new, or another version (another client altered or replaced the table, or the endpoint reports no version): a
+	// statement that bound the old entry keeps it
 	RetireEntry(current.name);
 	auto result = entries.emplace(current.name, CreateEntry(current));
 	return *result.first->second;
 }
 
-const GlueTableInfo &GlueTableSet::TableInfoOf(const CatalogEntry &entry) {
+const GlueTableInfo &GlueTableSet::GetTableInfo(const CatalogEntry &entry) {
 	if (entry.type == CatalogType::VIEW_ENTRY) {
 		return entry.Cast<GlueView>().table_info;
 	}

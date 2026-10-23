@@ -8,16 +8,12 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
-class GlueCatalog;
 struct HiveScanInfo;
 struct HiveTableSample;
 
 //! What Glue said about a table the running query scans
 struct GlueTableEntry {
 	annotated_mutex lock;
-	//! Whether table_info was loaded; a loaded null value means the table did not exist
-	bool table_info_loaded DUCKDB_GUARDED_BY(lock) = false;
-	shared_ptr<const GlueTableInfo> table_info DUCKDB_GUARDED_BY(lock);
 	//! Null until the first scan of a partitioned table asks Glue for them
 	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
 };
@@ -30,10 +26,10 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! What the running query learned about the tables it scans: the Glue definition and partitions of a table (asked for
-//! once however often the query scans it), the recursive listings of directories (shared by the estimate and every
-//! scan listing the same directory) and the table samples. Dropped when the query ends, and when its transaction does:
-//! a lookup outside a query (Connection::TableInfo, binding a relation) runs in a transaction but sees no QueryEnd
+//! What the running query learned about the tables it scans: the partitions of a table (asked for once however often
+//! the query scans it), the recursive listings of directories (shared by the estimate and every scan listing the same
+//! directory) and the table samples. Dropped when the query ends, and when the next begins: a scan bound outside a
+//! query (a relation) sees no QueryEnd
 class HiveQueryCache : public ClientContextState {
 public:
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);
@@ -42,8 +38,6 @@ public:
 
 	void QueryBegin(ClientContext &context) override;
 	void QueryEnd(ClientContext &context) override;
-	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override;
-	void TransactionRollback(MetaTransaction &transaction, ClientContext &context) override;
 
 	//! 'key' identifies the table (TableKey)
 	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
@@ -62,14 +56,6 @@ private:
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<MultiFileList>> directory_listings DUCKDB_GUARDED_BY(lock);
 };
-
-//! The table definition in this query, loaded once; null means Glue did not have the table
-shared_ptr<const GlueTableInfo> GetQueryTableInfo(ClientContext &context, GlueCatalog &catalog, const string &database,
-                                                  const string &table);
-//! As above; 'asked_glue' tells whether this call cost a Glue round trip (neither the query nor the transaction cache
-//! had the table), what GlueTableSet counts to decide when a GetTables page pays off
-shared_ptr<const GlueTableInfo> GetQueryTableInfo(ClientContext &context, GlueCatalog &catalog, const string &database,
-                                                  const string &table, bool &asked_glue);
 
 //! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info);

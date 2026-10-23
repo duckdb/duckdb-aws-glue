@@ -310,6 +310,43 @@ p
 statement ok
 DROP TABLE mutator_glue.stale_definition.stale_listing;
 
+# The entry is kept while Glue's VersionId and CreateTime are those it was built from and replaced on any change,
+# a parameter-only update included: the oid tells one entry from the next.
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_version (id INTEGER)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_version');
+
+query I
+SELECT id FROM cached_glue.stale_definition.stale_version;
+----
+
+statement ok
+SET VARIABLE first_oid = (SELECT table_oid FROM duckdb_tables() WHERE database_name = 'cached_glue' AND schema_name = 'stale_definition' AND table_name = 'stale_version');
+
+query I
+SELECT id FROM cached_glue.stale_definition.stale_version;
+----
+
+query I
+SELECT table_oid = getvariable('first_oid') FROM duckdb_tables() WHERE database_name = 'cached_glue' AND schema_name = 'stale_definition' AND table_name = 'stale_version';
+----
+true
+
+statement ok
+ALTER TABLE mutator_glue.stale_definition.stale_version SET (owner_note = 'changed');
+
+query I
+SELECT id FROM cached_glue.stale_definition.stale_version;
+----
+
+query I
+SELECT table_oid <> getvariable('first_oid') FROM duckdb_tables() WHERE database_name = 'cached_glue' AND schema_name = 'stale_definition' AND table_name = 'stale_version';
+----
+true
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_version;
+
 # Under a connection-scoped metadata cache the definition this connection fetched stays until a write clears it: a
 # table another connection replaced reads as first seen, consistently, and an ALTER against it fails rather than
 # writing a definition the statement did not see.
@@ -364,6 +401,24 @@ id
 p
 q
 tag
+
+# SET LOCATION is a value, not derived from the stale definition: it applies to the current one and keeps what the
+# other connection changed
+query III
+SELECT id, p, q FROM cached_glue.stale_definition.stale_scope;
+----
+2	P2	Q2
+
+statement ok con2
+ALTER TABLE mutator_glue.stale_definition.stale_scope SET (owner_note = 'con2');
+
+statement ok
+CALL glue_set_table_location('cached_glue.stale_definition.stale_scope', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_scope-moved');
+
+query II
+SELECT location LIKE '%/stale_scope-moved', parameters['owner_note'] FROM glue_get_table_response('mutator_glue.stale_definition.stale_scope');
+----
+true	con2
 
 statement ok
 RESET glue_metadata_cache_scope;

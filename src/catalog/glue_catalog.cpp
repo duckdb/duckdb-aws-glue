@@ -346,8 +346,8 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
                                            GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();
-	// another engine may have converted the table since the entry was cached
-	table_info = glue_table.GetTableInfoForQuery(context);
+	// the entry holds the definition this transaction looked up; another engine may have converted the table
+	table_info = glue_table.table_info;
 	auto format = table_info.GetFormat();
 	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "

@@ -1,4 +1,5 @@
-"""Forwards Glue requests to moto, except GetTables on a fault_* database, which fails with that fault's Glue error."""
+"""Forwards Glue requests to moto, except GetTables (and UpdateTable, for fault_concurrent_modification*) on a fault_*
+database, which fails with that fault's Glue error."""
 
 import argparse
 import http.client
@@ -6,19 +7,24 @@ import json
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-FAULTS = {"fault_access_denied": "AccessDeniedException", "fault_invalid_input": "InvalidInputException"}
+FAULTS = {
+    "AWSGlue.GetTables": {"fault_access_denied": "AccessDeniedException",
+                          "fault_invalid_input": "InvalidInputException"},
+    "AWSGlue.UpdateTable": {"fault_concurrent_modification": "ConcurrentModificationException"},
+}
 NOT_FORWARDED = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "content-length",
                  "server", "date"}
 
 
 def injected_error(target, body):
-    if target != "AWSGlue.GetTables":
+    faults = FAULTS.get(target)
+    if not faults:
         return None
     try:
         database = json.loads(body or b"{}").get("DatabaseName", "")
     except ValueError:
         return None
-    return next((error for prefix, error in FAULTS.items() if database.startswith(prefix)), None)
+    return next((error for prefix, error in faults.items() if database.startswith(prefix)), None)
 
 
 class Handler(BaseHTTPRequestHandler):
