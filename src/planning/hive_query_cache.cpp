@@ -80,6 +80,17 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 	directory_listings.clear();
 }
 
+// A listing made with credentials is keyed by their address, which a later transaction may reuse
+void HiveQueryCache::TransactionCommit(MetaTransaction &transaction, ClientContext &context) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	directory_listings.clear();
+}
+
+void HiveQueryCache::TransactionRollback(MetaTransaction &transaction, ClientContext &context) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	directory_listings.clear();
+}
+
 shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	auto &entry = glue_tables[key];
@@ -99,18 +110,23 @@ shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) 
 }
 
 shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
-                                                              bool cache_in_connection) {
+                                                              bool cache_in_connection,
+                                                              const shared_ptr<FileCredentials> &credentials) {
 	auto key = directory;
 	StringUtil::RTrim(key, "/");
-	if (cache_in_connection) {
+	if (cache_in_connection && !credentials) {
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
 		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, key);
 	}
 	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &listing = directory_listings[key];
+	// the files of a listing carry its credentials, so only reads with the same credentials share it
+	auto &listing =
+	    directory_listings[credentials ? key + '\0' + std::to_string(CastPointerToValue(credentials.get())) : key];
 	if (!listing) {
+		FileGlobInput input(FileGlobOptions::ALLOW_EMPTY);
+		input.credentials = credentials;
 		auto &fs = FileSystem::GetFileSystem(context);
-		listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
+		listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", input));
 	}
 	return listing;
 }

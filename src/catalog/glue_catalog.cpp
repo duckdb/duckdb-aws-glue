@@ -19,6 +19,7 @@
 #include "duckdb/planner/operator/logical_update.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_file_credentials.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
@@ -396,6 +397,13 @@ PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 	ThrowIfInExplicitTransaction(context);
 	GlueTableInfo table_info;
 	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
+	// an INSERT writes by path, without the credentials the table's scans read with
+	// TODO: support INSERT into a table with credentials, by writing its files with them
+	if (GlueFileCredentialsCallback::Get(context, glue_table, table_info)) {
+		throw NotImplementedException("INSERT into Glue table '%s', which is read with file credentials, is not "
+		                              "supported",
+		                              op.table.name.GetIdentifierName());
+	}
 	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, table_info, plan);
 }
 

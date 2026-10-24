@@ -269,6 +269,27 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
   `partitions := []` with `partition_keys` reads no rows.
 - A root or partition without data files scans as zero rows.
 
+## File credentials
+
+An extension can give the scans of a Glue table credentials of their own, for example credentials a governance
+service vends for that table. It registers a `GlueFileCredentialsCallback`
+([glue_file_credentials.hpp](../src/include/catalog/glue_file_credentials.hpp)) as an `ExtensionCallback`, which this
+extension asks each time a scan of a Hive table is bound. A scan the callback gives `FileCredentials` lists and opens
+every file of the table with them, and with no secret matched to the path; without a callback, or when it returns
+none, the files are read as above.
+
+- The credentials serve only the connection whose transaction created them, only for paths under their scope, and
+  only until that transaction ends; a read outside the scope fails.
+- The per-query listing cache keeps a listing made with credentials apart from one made without them or with others,
+  and `glue_cache_listings` does not keep it.
+- A plan whose scan has credentials is not copied through serialization; optimizations that copy plans that way leave
+  it as bound.
+- INSERT into a table whose scans read with credentials is refused: a write opens its files by path.
+
+The tests under `test/sql/file_credentials/` give tables credentials with the test extension `glue_test_credentials`
+(`test/extension/glue_test_credentials/`), which must share a binary with this extension; `extension_config.cmake`
+links both into `unittest`.
+
 ## Partitions
 
 DuckDB has no `ALTER TABLE ... PARTITION` syntax, so the Hive partition statements are table functions. The

@@ -9,6 +9,7 @@
 
 namespace duckdb {
 struct HiveScanInfo;
+class FileCredentials;
 struct HiveTableSample;
 
 //! What Glue said about a table the running query scans
@@ -38,15 +39,18 @@ public:
 	static string TableKey(const string &catalog, const string &database, const string &table);
 
 	void QueryEnd(ClientContext &context) override;
+	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override;
+	void TransactionRollback(MetaTransaction &transaction, ClientContext &context) override;
 
 	//! 'key' identifies the table (TableKey)
 	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
-	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
-	//! listing is kept beyond the query (glue_cache_listings)
+	//! The recursive listing of 'directory', fetched page by page as it is read, and made with 'credentials' if any.
+	//! With 'cache_in_connection' and no credentials the listing is kept beyond the query (glue_cache_listings)
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
-	                                              bool cache_in_connection = false);
+	                                              bool cache_in_connection = false,
+	                                              const shared_ptr<FileCredentials> &credentials = nullptr);
 
 private:
 	annotated_mutex lock;
