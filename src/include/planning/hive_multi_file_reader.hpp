@@ -44,6 +44,10 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
 	//! columns
 	table_function_get_virtual_columns_t format_virtual_columns = nullptr;
+	//! The pushdown_complex_filter of the bound file format reader. For text formats BindHiveScan wraps it so filters
+	//! stay in the plan while filter_pushdown stays enabled for the join filters that prune partitions. Null when the
+	//! reader has none.
+	table_function_pushdown_complex_filter_t format_pushdown_complex_filter = nullptr;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;

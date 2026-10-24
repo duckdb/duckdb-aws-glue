@@ -20,8 +20,10 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -651,6 +653,28 @@ static bool HasBinaryColumn(const HiveScanInfo &scan_info) {
 	return false;
 }
 
+static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data,
+                                          vector<unique_ptr<Expression>> &filters) {
+	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
+	auto &scan_info = multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
+	if (scan_info.format_pushdown_complex_filter) {
+		scan_info.format_pushdown_complex_filter(context, get, bind_data, filters);
+	}
+	// Occupy table_filters with an always-true filter: FilterPushdown then keeps every filter in the plan instead
+	// of converting it into table filters the text readers cannot apply (see InitializeReader). The join filters
+	// are unaffected: they attach to the scan at run time and prune the file list through the partition values.
+	if (!filters.empty() && !get.table_filters.HasFilters() && !get.GetColumnIds().empty()) {
+		auto &type = get.GetColumnType(get.GetColumnIds()[0]);
+		auto always_true = make_uniq<BoundConjunctionExpression>(
+		    ExpressionType::CONJUNCTION_OR,
+		    ExpressionFilter::CreateNullCheckExpression(make_uniq<BoundReferenceExpression>(type, 0ULL),
+		                                                ExpressionType::OPERATOR_IS_NULL),
+		    ExpressionFilter::CreateNullCheckExpression(make_uniq<BoundReferenceExpression>(type, 0ULL),
+		                                                ExpressionType::OPERATOR_IS_NOT_NULL));
+		get.table_filters.PushFilter(ProjectionIndex(0), make_uniq<ExpressionFilter>(std::move(always_true)));
+	}
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -738,6 +762,14 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.get_table_entry = HiveScanGetTableEntry;
 	scan_info->format_virtual_columns = scan_function.get_virtual_columns;
 	scan_function.get_virtual_columns = HiveScanGetVirtualColumns;
+	if (IsTextFileFormat(scan_info->file_format)) {
+		// join filters prune partitions; every other filter stays in the plan (HiveTextComplexFilterPushdown), and
+		// the text readers never evaluate table filters (see InitializeReader)
+		scan_info->format_pushdown_complex_filter = scan_function.pushdown_complex_filter;
+		scan_function.pushdown_complex_filter = HiveTextComplexFilterPushdown;
+		scan_function.filter_pushdown = true;
+		scan_function.filter_prune = false;
+	}
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
@@ -1170,6 +1202,10 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
                                                            const vector<ColumnIndex> &global_column_ids,
                                                            optional_ptr<TableFilterSet> table_filters,
                                                            ClientContext &context, MultiFileGlobalState &gstate) {
+	if (IsTextFileFormat(ScanInfo().file_format)) {
+		// partition-column filters were applied by pruning the file list; nothing reaches read_csv/read_json
+		table_filters = nullptr;
+	}
 	auto result = MultiFileReader::InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
 	                                                table_filters, context, gstate);
 	if (ScanInfo().file_format == HiveFileFormat::PARQUET) {

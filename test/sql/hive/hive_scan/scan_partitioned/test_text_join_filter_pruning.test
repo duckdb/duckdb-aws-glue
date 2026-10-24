@@ -1,0 +1,191 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_text_join_filter_pruning.test
+# description: Join filters prune partitions of csv/json tables; non-partition filters stay above the text scan
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET threads = 1;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.tjf_csv;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.tjf_json;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.tjf_pq;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.tjf_dim;
+
+statement ok
+CREATE TABLE my_datalake.default.tjf_csv (id INTEGER, flt INTEGER, par INTEGER, dk INTEGER) PARTITIONED BY (dk) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.tjf_csv SELECT i, i % 4, i % 2, 10 + (i % 6) FROM range(0, 600) t(i);
+
+statement ok
+CREATE TABLE my_datalake.default.tjf_json (id INTEGER, flt INTEGER, par INTEGER, dk INTEGER) PARTITIONED BY (dk) WITH (format = 'json');
+
+statement ok
+INSERT INTO my_datalake.default.tjf_json SELECT i, i % 4, i % 2, 10 + (i % 6) FROM range(0, 600) t(i);
+
+statement ok
+CREATE TABLE my_datalake.default.tjf_pq (id INTEGER, flt INTEGER, par INTEGER, dk INTEGER) PARTITIONED BY (dk);
+
+statement ok
+INSERT INTO my_datalake.default.tjf_pq SELECT i, i % 4, i % 2, 10 + (i % 6) FROM range(0, 600) t(i);
+
+statement ok
+CREATE TABLE my_datalake.default.tjf_dim (dk INTEGER, yr INTEGER) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.tjf_dim VALUES (10, 2000), (11, 2001), (12, 2000), (13, 2001), (14, 2000), (15, 2001);
+
+statement ok
+CREATE TEMP TABLE dim AS SELECT 10 + i AS dk, (10 + i) % 3 AS grp FROM range(0, 6) t(i);
+
+# join filter on the partition key prunes csv partitions
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv f JOIN dim d ON f.dk = d.dk WHERE d.grp = 1;
+----
+200	59700
+
+query II
+EXPLAIN ANALYZE SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv f JOIN dim d ON f.dk = d.dk WHERE d.grp = 1;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2 .*
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.tjf_json f JOIN dim d ON f.dk = d.dk WHERE d.grp = 1;
+----
+200	59700
+
+query II
+EXPLAIN ANALYZE SELECT count(*), sum(id) FROM my_datalake.default.tjf_json f JOIN dim d ON f.dk = d.dk WHERE d.grp = 1;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2 .*
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.tjf_pq f JOIN dim d ON f.dk = d.dk WHERE d.grp = 1;
+----
+200	59700
+
+query II
+EXPLAIN ANALYZE SELECT count(*), sum(id) FROM my_datalake.default.tjf_pq f JOIN dim d ON f.dk = d.dk WHERE d.grp = 1;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2 .*
+
+# a filter on a column the query does not project stays above the scan
+query I
+SELECT sum(id) FROM my_datalake.default.tjf_csv WHERE flt = 3;
+----
+45150
+
+query I
+SELECT count(*) FROM my_datalake.default.tjf_csv WHERE id IS NOT NULL AND flt = 2;
+----
+150
+
+query I
+SELECT sum(id) FROM my_datalake.default.tjf_json WHERE flt = 3;
+----
+45150
+
+query II
+SELECT flt, count(*) FROM my_datalake.default.tjf_csv WHERE flt = 3 GROUP BY flt;
+----
+3	150
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv WHERE dk = 12 AND flt = 2;
+----
+50	14800
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.tjf_json WHERE dk = 12 AND flt = 2;
+----
+50	14800
+
+query I
+SELECT count(*) FROM (SELECT dk, flt FROM my_datalake.default.tjf_csv) s WHERE s.flt = 2;
+----
+150
+
+# a filtered csv dimension drives the join filter on the fact
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv f JOIN my_datalake.default.tjf_dim d ON f.dk = d.dk WHERE d.yr = 2001;
+----
+300	90000
+
+query II
+EXPLAIN ANALYZE SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv f JOIN my_datalake.default.tjf_dim d ON f.dk = d.dk WHERE d.yr = 2001;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 3 .*
+
+# join filter and a non-partition filter on the fact combine
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv f JOIN dim d ON f.dk = d.dk WHERE d.grp = 1 AND f.par = 1;
+----
+100	30000
+
+query II
+EXPLAIN ANALYZE SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv f JOIN dim d ON f.dk = d.dk WHERE d.grp = 1 AND f.par = 1;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2 .*
+
+# a left join that keeps every fact row must not prune
+query II
+SELECT count(*), count(d.dk) FROM my_datalake.default.tjf_csv f LEFT JOIN (SELECT * FROM dim WHERE grp = 1) d ON f.dk = d.dk;
+----
+600	200
+
+query II
+EXPLAIN ANALYZE SELECT count(*), count(d.dk) FROM my_datalake.default.tjf_csv f LEFT JOIN (SELECT * FROM dim WHERE grp = 1) d ON f.dk = d.dk;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 6 .*
+
+# static partition predicates keep pruning
+query I
+SELECT count(*) FROM my_datalake.default.tjf_csv WHERE dk = 12;
+----
+100
+
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM my_datalake.default.tjf_csv WHERE dk = 12;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1 .*
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv WHERE dk BETWEEN 10 AND 11;
+----
+200	59500
+
+query II
+EXPLAIN ANALYZE SELECT count(*), sum(id) FROM my_datalake.default.tjf_csv WHERE dk BETWEEN 10 AND 11;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2 .*
+
+statement ok
+DROP TABLE my_datalake.default.tjf_csv;
+
+statement ok
+DROP TABLE my_datalake.default.tjf_json;
+
+statement ok
+DROP TABLE my_datalake.default.tjf_pq;
+
+statement ok
+DROP TABLE my_datalake.default.tjf_dim;
