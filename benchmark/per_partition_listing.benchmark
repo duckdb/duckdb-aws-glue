@@ -1,0 +1,66 @@
+# name: benchmark/per_partition_listing.benchmark
+# description: read 100 partitions that are each listed on their own, with S3 requests delayed by 20 ms, in the local Glue (moto) + S3 (SeaweedFS)
+# group: [file_pruning_benchmarks]
+
+name Read 100 partitions listed one directory each
+group file_pruning_benchmarks
+subgroup per_partition_listing
+
+require parquet
+
+require httpfs
+
+require glue
+
+cache per_partition_listing.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE TABLE IF NOT EXISTS my_datalake.default.per_partition_listing (
+    id BIGINT,
+    value DOUBLE,
+    dt VARCHAR
+) PARTITIONED BY (dt);
+INSERT INTO my_datalake.default.per_partition_listing
+SELECT
+    d * 1000 + r                                                 AS id,
+    random() * 1000                                              AS value,
+    strftime(DATE '2026-01-01' + d::INTEGER, '%Y-%m-%d')         AS dt
+FROM range(0, 100) AS t(d)
+CROSS JOIN range(0, 1000) AS u(r)
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.default.per_partition_listing);
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+
+run
+SET enable_external_file_cache = false;
+SET debug_fs_delay_mean_ms = 20;
+SET hive_partition_listing_threshold = 1000;
+SELECT count(*), sum(value) > 0 FROM my_datalake.default.per_partition_listing;
