@@ -13,6 +13,7 @@ void HiveCSVOptions::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(104, "null_string", null_string);
 	serializer.WriteProperty(105, "serde_fields", serde_fields);
 	serializer.WritePropertyWithDefault<bool>(106, "null_for_invalid_data", null_for_invalid_data, true);
+	serializer.WritePropertyWithDefault<bool>(107, "false_unless_true", false_unless_true, false);
 }
 
 HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
@@ -25,6 +26,7 @@ HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
 	result.serde_fields = deserializer.ReadProperty<bool>(105, "serde_fields");
 	result.null_for_invalid_data =
 	    deserializer.ReadPropertyWithExplicitDefault<bool>(106, "null_for_invalid_data", true);
+	result.false_unless_true = deserializer.ReadPropertyWithExplicitDefault<bool>(107, "false_unless_true", false);
 	return result;
 }
 

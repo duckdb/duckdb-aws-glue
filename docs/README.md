@@ -51,7 +51,8 @@ Text tables are read the way their SerDe reads them:
   does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per
   file and the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per
   file in every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two
-  broken rows, a difference this extension does not reproduce.
+  broken rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any
+  case and false otherwise.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
   are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in

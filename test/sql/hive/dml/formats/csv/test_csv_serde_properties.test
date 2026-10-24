@@ -206,7 +206,7 @@ has 'skip.footer.line.count' set, which DuckDB can not read or write
 #---------------------------------------------------------------------------
 # tables this extension writes; a table property overrides the SerDe property of the same name
 #---------------------------------------------------------------------------
-foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
+foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -319,6 +319,46 @@ statement error
 SELECT id FROM my_datalake.default.formats_csv_opencsv WHERE name = 'd';
 ----
 <REGEX>:.*Could not convert string 'x' to (INT32|INTEGER).*
+
+# an OpenCSVSerde boolean is true when the field is 'true' in any case and false otherwise; a missing field is NULL
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_opencsv_bool (id INTEGER, flag BOOLEAN) WITH (format = 'csv', quote = '"');
+
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('"1","true"'),
+    ('"2","TRUE"'),
+    ('"3","false"'),
+    ('"4",""'),
+    ('"5","True."'),
+    ('"6","abc"'),
+    ('"7","1"'),
+    ('"8","yes"'),
+    ('"9"')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv_bool/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, flag FROM my_datalake.default.formats_csv_opencsv_bool ORDER BY id;
+----
+1	true
+2	true
+3	false
+4	false
+5	false
+6	false
+7	false
+8	false
+9	NULL
+
+# use.null.for.invalid.data does not change it: no boolean field is invalid
+statement ok
+ALTER TABLE my_datalake.default.formats_csv_opencsv_bool SET ('use.null.for.invalid.data' = 'true');
+
+query II
+SELECT id, flag FROM my_datalake.default.formats_csv_opencsv_bool WHERE id IN (4, 5) ORDER BY id;
+----
+4	false
+5	false
 
 # a separator of more than one byte can be read, but not written
 statement ok
@@ -546,7 +586,7 @@ DROP TABLE my_datalake.default.formats_json_lines;
 
 endloop
 
-foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_header_ctas
+foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_header_ctas
 
 statement ok
 DROP TABLE my_datalake.default.{table};

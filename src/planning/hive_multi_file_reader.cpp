@@ -20,6 +20,7 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -1164,6 +1165,28 @@ static void DecodeBlobAsText(ClientContext &context, unique_ptr<Expression> &exp
 	expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, "decode", std::move(children));
 }
 
+//! Make the cast of a field's text to BOOLEAN lower(text) = 'true', as OpenCSVSerde reads a boolean
+static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &expr) {
+	if (!expr || !BoundCastExpression::IsCast(*expr) || expr->GetReturnType().id() != LogicalTypeId::BOOLEAN) {
+		return;
+	}
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(BoundCastExpression::ChildMutable(cast)));
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto lower = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("lower"),
+	                                                std::move(children), error);
+	if (!lower) {
+		error.Throw();
+	}
+	expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, std::move(lower),
+	                                         make_uniq<BoundConstantExpression>(Value("true")));
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1191,11 +1214,14 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 	if (!reader_data.reader->expression_map.empty()) {
 		throw InternalException("Hive text table '%s': a filter was pushed into read_csv", ScanInfo().Describe());
 	}
-	if (!ScanInfo().csv_options.null_for_invalid_data) {
-		return result;
-	}
+	auto &csv_options = ScanInfo().csv_options;
 	for (auto &expr : reader_data.expressions) {
-		MakeTryCast(context, expr);
+		if (csv_options.false_unless_true) {
+			MakeFalseUnlessTrue(context, expr);
+		}
+		if (csv_options.null_for_invalid_data) {
+			MakeTryCast(context, expr);
+		}
 	}
 	return result;
 }

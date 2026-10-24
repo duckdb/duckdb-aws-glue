@@ -20,6 +20,8 @@ struct HiveCSVOptions {
 	bool serde_fields = false;
 	//! With serde_fields: a field that does not parse as its column type is NULL (TRY_CAST), else the query fails
 	bool null_for_invalid_data = true;
+	//! With serde_fields: a boolean field is true when it is 'true' in any case and false otherwise, never an error
+	bool false_unless_true = false;
 
 public:
 	void Serialize(Serializer &serializer) const;
