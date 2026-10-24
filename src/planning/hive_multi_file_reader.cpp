@@ -706,6 +706,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		function_name = "read_json";
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["format"] = Value("newline_delimited");
+		param_map["case_insensitive_keys"] = Value::BOOLEAN(scan_info->json_options.case_insensitive_keys);
 		if (scan_info->json_options.ignore_errors) {
 			param_map["ignore_errors"] = Value::BOOLEAN(true);
 		}

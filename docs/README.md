@@ -34,7 +34,7 @@ InputFormat tells them apart from a Hive table. They are listed but not read or 
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
-`read_json` (one object per line, keys by name; SerDe properties see below) and AvroSerDe with `read_avro`
+`read_json` (one object per line, keys by name ignoring case; SerDe properties see below) and AvroSerDe with `read_avro`
 (columns by name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
 A parquet `BYTE_ARRAY` column without a `STRING` annotation (as Impala and older Hive writers produce) is read as
 UTF-8 text when Glue declares the column `string` (bytes that are not UTF-8 are an error), and as bytes when it
@@ -61,10 +61,10 @@ Text tables are read the way their SerDe reads them:
 - OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
   `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
   its column is NULL; either property enables both. Other JsonSerDe properties that change how the files are read
-  (OpenX `mapping.*`, `dots.in.keys` and `case.insensitive=true`, Hive `timestamp.formats`) are not applied: the read
+  (OpenX `mapping.*` and `dots.in.keys`, Hive `timestamp.formats`) are not applied: the read
   succeeds and a warning is logged (`CALL enable_logging(level := 'warning')`).
-- JSON keys are matched to the columns exactly, as with OpenX `case.insensitive=false`; both SerDes match them
-  ignoring case by default, so a key `userId` does not fill the column `userid`.
+- JSON keys are matched to the columns ignoring (ASCII) case, as both SerDes do, at every nesting level; an OpenX table
+  with `case.insensitive=false` matches them exactly. Keys of one object that differ only in case are duplicate keys.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
   line break.
