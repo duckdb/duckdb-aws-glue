@@ -103,8 +103,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
 
 	config.AddExtensionOption("hive_csv_parallel",
-	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
-	                          "twice `threads` files. False reads one thread per file, which a file that holds a line "
+	                          "Read each file of an OpenCSVSerde table, and of a hive_scan with serde_fields, a "
+	                          "quote and no parallel argument, with several threads when a scan has at most twice "
+	                          "`threads` files. False reads one thread per file, which a file that holds a line "
 	                          "break inside a quoted field needs: the parallel scanner refuses such a field together "
 	                          "with the NULL padding of short rows. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));

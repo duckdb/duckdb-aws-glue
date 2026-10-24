@@ -103,6 +103,21 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 	return (*partitions)[partition_index];
 }
 
+optional_ptr<const GluePartitionInfo> HiveScanInfo::TryGetPartitionOfFile(const string &path) const {
+	idx_t partition_index;
+	{
+		lock_guard<mutex> guard(file_partitions_lock);
+		auto entry = file_partitions.find(path);
+		if (entry == file_partitions.end()) {
+			return nullptr;
+		}
+		partition_index = entry->second;
+	}
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	D_ASSERT(partitions);
+	return &(*partitions)[partition_index];
+}
+
 string HiveScanInfo::Describe() const {
 	if (database_name.empty()) {
 		return table_name;
@@ -297,6 +312,53 @@ void HiveMultiFileList::AddFile(OpenFileInfo file, idx_t partition_index) const 
 	expanded_files.push_back(std::move(file));
 }
 
+vector<OpenFileInfo> HiveMultiFileList::GivenFiles(const vector<idx_t> &partition_indexes) const {
+	if (scan_info->partition_keys.empty()) {
+		return scan_info->root_files;
+	}
+	vector<OpenFileInfo> files;
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto partition_index : partition_indexes) {
+		for (auto &file : scan_info->partition_files[partition_index]) {
+			scan_info->file_partitions[file.path] = partition_index;
+			files.push_back(file);
+		}
+	}
+	return files;
+}
+
+idx_t HiveMultiFileList::GivenFileCount() const {
+	if (scan_info->partition_keys.empty()) {
+		return scan_info->root_files.size();
+	}
+	idx_t count = 0;
+	for (auto partition_index : *PartitionIndexes()) {
+		count += scan_info->partition_files[partition_index].size();
+	}
+	return count;
+}
+
+bool HiveMultiFileList::ExpandGivenFiles() const {
+	if (given_files_expanded) {
+		return false;
+	}
+	given_files_expanded = true;
+	if (scan_info->partition_keys.empty()) {
+		for (auto &file : scan_info->root_files) {
+			expanded_files.push_back(file);
+		}
+		return true;
+	}
+	auto indexes = PartitionIndexes();
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto partition_index : *indexes) {
+		for (auto &file : scan_info->partition_files[partition_index]) {
+			AddFile(file, partition_index);
+		}
+	}
+	return true;
+}
+
 void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	auto root = scan_info->root_location;
 	StringUtil::RTrim(root, "/");
@@ -337,6 +399,9 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 
 bool HiveMultiFileList::ExpandNextPath() const {
 	// called with the list's lock held; runs one listing per call
+	if (scan_info->explicit_files) {
+		return ExpandGivenFiles();
+	}
 	PlanListings();
 	if (next_job >= listing_jobs.size()) {
 		return false;
@@ -372,6 +437,9 @@ FileExpandResult HiveMultiFileList::GetExpandResult() const {
 }
 
 MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
+	if (scan_info->explicit_files) {
+		return MultiFileCount(GivenFileCount(), FileExpansionType::ALL_FILES_EXPANDED);
+	}
 	// The optimizer asks for a rough file count to estimate the cardinality. Listing the partitions for that would
 	// make planning (and EXPLAIN) pay for the listing; answer with what is known and at least one file per partition
 	// still to list.
@@ -398,6 +466,14 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 }
 
 vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
+	if (scan_info->explicit_files) {
+		// all of them: the sample then knows every partition's files, also those of another scan of the table
+		vector<idx_t> partitions;
+		for (idx_t partition_index = 0; partition_index < scan_info->partition_files.size(); partition_index++) {
+			partitions.push_back(partition_index);
+		}
+		return GivenFiles(partitions);
+	}
 	lock_guard<mutex> lck(lock);
 	PlanListings();
 	vector<OpenFileInfo> files;
@@ -510,6 +586,13 @@ vector<OpenFileInfo> HiveMultiFileList::GetDisplayFileList(optional_idx max_file
 		// the base lists the files, which takes the lock: it must not be held here
 		return LazyMultiFileList::GetDisplayFileList(max_files);
 	}
+	if (scan_info->explicit_files) {
+		auto files = GivenFiles(*PartitionIndexes());
+		if (max_files.IsValid() && files.size() > max_files.GetIndex()) {
+			files.resize(max_files.GetIndex());
+		}
+		return files;
+	}
 	// Not listed yet (bind, EXPLAIN): show what is known without loading the partitions or listing
 	vector<OpenFileInfo> result;
 	if (scan_info->partition_keys.empty() || !scan_info->PartitionsLoaded()) {
@@ -585,6 +668,32 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(111, "column_types", info.types);
 	serializer.WriteProperty(112, "csv_options", info.csv_options);
 	serializer.WriteProperty(113, "json_options", info.json_options);
+	// the given files of the partitions written above: the deserialized scan reads them instead of listing
+	vector<vector<Value>> partition_files;
+	vector<Value> root_files;
+	if (info.explicit_files) {
+		for (auto index : *indexes) {
+			vector<Value> files;
+			for (auto &file : info.partition_files[index]) {
+				files.push_back(file.ToValue());
+			}
+			partition_files.push_back(std::move(files));
+		}
+		for (auto &file : info.root_files) {
+			root_files.push_back(file.ToValue());
+		}
+	}
+	serializer.WritePropertyWithDefault<bool>(114, "explicit_files", info.explicit_files, false);
+	serializer.WritePropertyWithDefault(115, "partition_files", partition_files);
+	serializer.WritePropertyWithDefault(116, "files", root_files);
+}
+
+static vector<OpenFileInfo> FilesFromValues(const vector<Value> &values) {
+	vector<OpenFileInfo> files;
+	for (auto &value : values) {
+		files.push_back(OpenFileInfo::FromValue(value, Identifier("hive_scan")));
+	}
+	return files;
 }
 
 //! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
@@ -604,9 +713,22 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	info->types = deserializer.ReadProperty<vector<LogicalType>>(111, "column_types");
 	info->csv_options = deserializer.ReadProperty<HiveCSVOptions>(112, "csv_options");
 	info->json_options = deserializer.ReadProperty<HiveJSONOptions>(113, "json_options");
+	info->explicit_files = deserializer.ReadPropertyWithExplicitDefault<bool>(114, "explicit_files", false);
+	auto partition_files = deserializer.ReadPropertyWithDefault<vector<vector<Value>>>(115, "partition_files");
+	auto root_files = deserializer.ReadPropertyWithDefault<vector<Value>>(116, "files");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
+	}
+	if (info->explicit_files) {
+		if (!info->partition_keys.empty() && partition_files.size() != partitions.size()) {
+			throw SerializationException("Hive scan of \"%s\": %d partitions but %d lists of their files",
+			                             info->table_name, partitions.size(), partition_files.size());
+		}
+		for (auto &files : partition_files) {
+			info->partition_files.push_back(FilesFromValues(files));
+		}
+		info->root_files = FilesFromValues(root_files);
 	}
 	vector<GluePartitionInfo> partition_infos;
 	for (idx_t i = 0; i < partitions.size(); i++) {
@@ -690,14 +812,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);
 			param_map["strict_mode"] = Value::BOOLEAN(false);
-			if (!scan_info->csv_options.quote.empty()) {
-				// the parallel scanner refuses null_padding together with a quoted line break (hive_csv_parallel)
-				Value parallel;
-				if (context.TryGetCurrentSetting("hive_csv_parallel", parallel) && !parallel.IsNull() &&
-				    !BooleanValue::Get(parallel)) {
-					param_map["parallel"] = Value::BOOLEAN(false);
-				}
-			}
+		}
+		if (!scan_info->csv_options.parallel) {
+			param_map["parallel"] = Value::BOOLEAN(false);
 		}
 		break;
 	case HiveFileFormat::JSON:

@@ -1,4 +1,5 @@
-# Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/README.md.
+# Runs the sqllogictests and the C++ tests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml
+# and docs/README.md.
 #
 # A release build with DuckDB's assertions and the sanitizers on, i.e. relassert without debug info.
 
@@ -58,6 +59,9 @@ jobs:
 
       - name: Run tests
         run: make test-local TEST_BUILD=release
+
+      - name: Run C++ tests
+        run: make test-cpp TEST_BUILD=release
 
       - name: Server logs
         if: always()

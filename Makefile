@@ -37,3 +37,8 @@ test-local:
 CLOUD_TEST_CONFIG ?= test/configs/cloud_glue.json
 test-cloud:
 	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-config $(CLOUD_TEST_CONFIG) 'test/sql/*'
+# The C++ tests of test/unittest, whose binary a normal build skips. Its Glue table tests only run against a local
+# GLUE_ENDPOINT, so they need `make glue-fixture` first
+test-cpp:
+	cmake --build build/$(TEST_BUILD) --target unittest_glue
+	GLUE_ENDPOINT=http://localhost:5555 AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest_glue

@@ -1,0 +1,13 @@
+# name: test/sql/hive/hive_scan/hive_scan_arguments.test
+# description: The arguments of hive_scan(), all of which HiveScanGetCall restates (no catalog, no cloud)
+# group: [hive_scan]
+
+require glue
+
+# A new argument changes this list: restate it in HiveScanGetCall and test that in test/unittest/hive_scan_call_test.cpp
+# (the overload taking a list of files only throws)
+query I
+SELECT list_sort(parameters) FROM duckdb_functions()
+WHERE function_name = 'hive_scan' AND parameter_types[1] = 'VARCHAR';
+----
+[col0, delim, escape, files, format, header, ignore_errors, null_for_invalid_data, nullstr, parallel, partition_keys, partitions, quote, schema, serde_fields, skip]

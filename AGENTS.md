@@ -60,11 +60,17 @@ AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 \
 - `test/configs/*.json` own the init SQL, env and skip policy. When something fails for one config only, skip the
   narrowest path there with a concrete reason instead of weakening the test; remove the skip when support lands.
   Validate config edits with `jq empty test/configs/*.json`.
-- Test targets don't build first: rebuild before running tests.
+- Test targets don't build first: rebuild before running tests (`make test-cpp` builds its own binary).
 
 Test format is DuckDB's sqllogictest (`statement ok|error`, `query I...`, `----`, `<REGEX>:` for error patterns,
 `require-env`). Slow tests use `.test_slow`. Do not add `PRAGMA enable_verification`. Test error paths, not just the
 happy path.
+
+C++ tests: `test/unittest/` holds Catch tests of `src/include/functions/hive_scan_call.hpp`, which no SQL reaches, in
+their own binary `unittest_glue` (extensions linked statically; a normal build skips it). `make test-cpp` builds and
+runs it. Its Glue table tests only run when `GLUE_ENDPOINT` names localhost (the target sets it), since they create
+and drop tables. `test/sql/hive/hive_scan/hive_scan_arguments.test` pins `hive_scan`'s arguments: restate a new one in
+`HiveScanGetCall` and add it to the C++ tests.
 
 Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
 `./build/relassert/benchmark/benchmark_runner <path>`; see `docs/README.md` for data caching and caveats
@@ -90,6 +96,8 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   (`read_parquet`/`read_csv`/`read_json`/ `read_avro`) using `HiveMultiFileReader` + a lazy `HiveMultiFileList`:
   partition filters are pushed down to Glue's partition values before any S3 listing. The `hive_scan` table function
   (`src/functions/hive_scan_function.cpp`) reuses the same reader with schema/partitions given as arguments.
+  `functions/hive_scan_call.hpp` restates a bound Hive scan as the `hive_scan` call reading the same files, for
+  engines that distribute them.
 - **Writing** `src/planning/glue_hive_insert.cpp`: INSERT and CTAS plan a `PhysicalCopyToFile` in the table's format
   with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. The copy is
   `GlueHiveCopy` (`src/execution/hive_copy.cpp`); for CTAS it carries the bound CREATE TABLE and creates the Glue table
@@ -120,7 +128,8 @@ Follow DuckDB's style (`duckdb/AGENTS.md`):
 
 ## Change checklist
 
-- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/SeaweedFS).
+- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/SeaweedFS),
+  and `make test-cpp` when it touches `hive_scan` or `hive_scan_call.hpp`.
 - Build change: read both the root `Makefile` and `extension-ci-tools/makefiles/duckdb_extension.Makefile`.
 - Documentation-only change: check commands statically; don't start containers or run tests.
 

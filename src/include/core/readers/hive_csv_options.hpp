@@ -5,6 +5,7 @@
 
 namespace duckdb {
 
+class ClientContext;
 class Serializer;
 class Deserializer;
 
@@ -20,8 +21,13 @@ struct HiveCSVOptions {
 	bool serde_fields = false;
 	//! With serde_fields: a field that does not parse as its column type is NULL (TRY_CAST), else the query fails
 	bool null_for_invalid_data = true;
+	//! Read a file with several threads (read_csv's parallel)
+	bool parallel = true;
 
 public:
+	//! With serde_fields and a quote, the hive_csv_parallel setting decides 'parallel'
+	void UseParallelSetting(ClientContext &context);
+
 	void Serialize(Serializer &serializer) const;
 	static HiveCSVOptions Deserialize(Deserializer &deserializer);
 };

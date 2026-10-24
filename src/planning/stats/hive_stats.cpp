@@ -6,6 +6,7 @@
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -224,6 +225,10 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 				auto size = ListedFileSize(file);
 				partition.bytes += size.IsValid() ? size.GetIndex() : average_file_size;
 			}
+			// the given files are all of them: a partition given none holds nothing
+			for (idx_t partition_index = 0; partition_index < info.partition_files.size(); partition_index++) {
+				sample.partition_sizes.emplace(partition_index, HivePartitionSize());
+			}
 		}
 		if (listed.empty()) {
 			return sample;
@@ -258,11 +263,31 @@ static unique_ptr<NodeStatistics> UnsampledCardinality(ClientContext &context, c
 	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
+//! A hive_scan given its files measures those, and another call over the same root may be given others
+static string SampleKey(const HiveScanInfo &info) {
+	auto key = info.catalog_name + "." + info.Describe();
+	if (!info.explicit_files) {
+		return key;
+	}
+	hash_t files_hash = 0;
+	auto add = [&](const OpenFileInfo &file) {
+		files_hash = CombineHash(files_hash * 31, Hash(file.path.c_str()));
+	};
+	for (auto &file : info.root_files) {
+		add(file);
+	}
+	for (auto &files : info.partition_files) {
+		for (auto &file : files) {
+			add(file);
+		}
+	}
+	return key + " given files " + to_string(files_hash);
+}
+
 //! The sample of the table 'hive_list' reads, measured by the first scan of the table in this query to ask
 static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, const MultiFileBindData &bind_data,
                                                      const HiveMultiFileList &hive_list) {
-	auto &info = hive_list.ScanInfo();
-	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
+	auto entry = HiveQueryCache::Get(context)->GetSample(SampleKey(hive_list.ScanInfo()));
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->sample) {
 		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));

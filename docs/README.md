@@ -74,7 +74,7 @@ Text tables are read the way their SerDe reads them:
   NULL string. Writes need a single-byte delimiter.
 - As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
   and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
-  their own. `hive_scan()` uses plain `read_csv` rules.
+  their own. `hive_scan()` uses plain `read_csv` rules unless `serde_fields := true`.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
@@ -258,16 +258,40 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 ```
 
 - `schema` (required): a struct of column name to DuckDB type name, data columns and partition columns.
-- `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true`, `delim := '|'`,
-  `quote := '"'`, `escape := '\'` and `nullstr := '\N'` describe the files (an empty field is NULL unless `nullstr`
-  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name. For json,
-  `ignore_errors := true` reads a line that is not valid JSON as a row of NULLs.
-- `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
-  a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
-  `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is
-  unpartitioned and all files below the root are read; `partition_keys` without `partitions` is an error, and
-  `partitions := []` with `partition_keys` reads no rows.
+- `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true` (or `skip := 2`, the
+  header lines every file starts with), `delim := '|'`, `quote := '"'`, `escape := '\'` and `nullstr := '\N'`
+  describe the files (an empty field is NULL unless `nullstr` says otherwise, as in `read_csv`); csv columns are
+  matched by position, json keys by name. For json, `ignore_errors := true` reads a line that is not valid JSON as a
+  row of NULLs.
+- `serde_fields := true` reads csv the way a Glue text table is read (see Reading): short rows are padded with
+  NULL, extra fields are ignored and a field that does not parse as its column type is NULL, or fails the query with
+  `null_for_invalid_data := false`. `parallel := false` reads one thread per file; it defaults to
+  `hive_csv_parallel` with `serde_fields` and a quote, else to true.
+- `partitions`: one struct per partition with a value for every partition key, an optional `location` and optional
+  `files`; without a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct
+  fields other than `location` and `files`, in that order, unless `partition_keys := [...]` names them. Without
+  `partitions` the table is unpartitioned and all files below the root are read; `partition_keys` without
+  `partitions` is an error, and `partitions := []` with `partition_keys` reads no rows.
+- `files`: the data files to read instead of listing them, per partition (`{dt: '...', files: [...]}`), or as
+  `files := [...]` for an unpartitioned table. An entry is a path, or a struct of a `filename` and the options to open
+  the file with, as `read_parquet` takes them (`{filename: 's3://...', file_size: 1234}`). Either every partition
+  gives its files or none does, `files: []` reads nothing from that partition, and a file may be given once. Nothing
+  is listed, not even for the row-count estimate, and a file is read as given: no name is skipped and nothing is
+  globbed. Like `location`, `files` cannot be a partition key.
 - A root or partition without data files scans as zero rows.
+
+An engine that hands some of a scan's files to machines without Glue access can run them there as a `hive_scan()`
+call: `src/include/functions/hive_scan_call.hpp` restates a bound Hive scan, of a Glue table or of a `hive_scan()`
+call, as the call that reads the same files the same way.
+
+- `HiveScanGetCall(get)`: the root and the named arguments: `schema`, `format`, the format's reading options and
+  `partition_keys`. The caller adds the files to read, as
+  `partitions := [{<key>: <value>, ..., location: ..., files: [...]}, ...]`, or `files := [...]` for a table
+  without partition keys.
+- `HiveScanGetFilePartition(get, path)`: the values (as Glue stores them) and the location of the partition a file
+  of the scan belongs to.
+- Both read only the bound scan, with no `ClientContext` and no Glue call, and use only core DuckDB types. They
+  return nothing for a scan this build of the extension did not bind.
 
 ## Partitions
 
@@ -380,12 +404,13 @@ GetTables on a database named `fault_*` with a Glue error; tests that need it ar
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
 make test-local          # unittest --test-config test/configs/local_glue.json 'test/sql/*', with retries
+make test-cpp            # builds and runs unittest_glue, the C++ tests of test/unittest
 make glue-fixture-down
 
 AWS_PROFILE=... AWS_CONFIG_FILE=~/.aws/config AWS_SHARED_CREDENTIALS_FILE=~/.aws/credentials make test-cloud
 ```
 
-Both targets set `AWS_EC2_METADATA_DISABLED=true`: the test runner hides `~/.aws`, and without a region from the
+The test targets set `AWS_EC2_METADATA_DISABLED=true`: the test runner hides `~/.aws`, and without a region from the
 environment or a profile the AWS SDK asks the EC2 instance metadata service for one, which off EC2 hangs for
 minutes per client. A test config can not export process environment variables, so this stays on the command.
 
@@ -410,6 +435,13 @@ leaves behind after 2 days.
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.
+
+The C++ interface in `src/include/functions/hive_scan_call.hpp` is not reachable from SQL, so it is tested in C++:
+`test/unittest/` holds Catch tests in a binary of their own, `unittest_glue`, which links the extensions statically
+and which a normal build does not build. `make test-cpp` builds and runs it (`TEST_BUILD` as above). The tests that
+create Glue tables run only when `GLUE_ENDPOINT` points at localhost, which the target sets, so they need
+`make glue-fixture`; the others read local files. `test/sql/hive/hive_scan/hive_scan_arguments.test` pins the
+arguments of `hive_scan()`: adding one fails it, as a reminder to restate the new argument in `HiveScanGetCall`.
 
 The benchmarks under `benchmark/` read from the same local servers. They build their tables in the `load` step and
 use `debug_fs_delay_mean_ms` to add latency to every file open and read, standing in for the S3 round trip the local

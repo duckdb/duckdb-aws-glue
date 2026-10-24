@@ -1,0 +1,105 @@
+# name: test/sql/hive/hive_scan/catalog_files_restatement.test
+# description: hive_scan() given a Glue table's partitions and data files reads the rows the scan of the table reads
+# group: [hive_scan]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.hfr_orders;
+
+# the rows one side reads and the other does not
+statement ok
+CREATE MACRO differences(a, b) AS TABLE
+    (FROM query_table(a) EXCEPT ALL FROM query_table(b)) UNION ALL (FROM query_table(b) EXCEPT ALL FROM query_table(a));
+
+# typed partition keys, a NULL partition, two files in one partition and a partition outside the table location
+statement ok
+CREATE TABLE my_datalake.default.hfr_orders (id INTEGER, amount DOUBLE, dt DATE, k INTEGER) PARTITIONED BY (dt, k);
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 10.5::DOUBLE), (2, 20.5::DOUBLE)) t(id, amount))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/hfr_orders/dt=2016-05-14/k=1/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 3 AS id, 30.5::DOUBLE AS amount)
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/hfr_orders/dt=2016-05-14/k=1/b.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 4 AS id, 40.5::DOUBLE AS amount)
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/hfr_orders/dt=2016-05-15/k=__HIVE_DEFAULT_PARTITION__/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 5 AS id, 50.5::DOUBLE AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hfr_imports/may16/a.parquet' (FORMAT parquet);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.hfr_orders', {dt: '2016-05-14', k: 1});
+
+statement ok
+CALL glue_add_partition('my_datalake.default.hfr_orders', {dt: '2016-05-15', k: NULL});
+
+statement ok
+CALL glue_add_partition('my_datalake.default.hfr_orders', {dt: '2016-05-16', k: 2},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hfr_imports/may16');
+
+# the partitions as Glue stores them (values as text) and the files a listing of each finds
+statement ok
+CREATE VIEW hfr_restated AS
+SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/hfr_orders',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'DATE', k: 'INTEGER'},
+    partitions := [
+        {dt: '2016-05-14', k: '1', location: NULL,
+         files: ['{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/hfr_orders/dt=2016-05-14/k=1/a.parquet',
+                 '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/hfr_orders/dt=2016-05-14/k=1/b.parquet']},
+        {dt: '2016-05-15', k: '__HIVE_DEFAULT_PARTITION__', location: NULL,
+         files: ['{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/hfr_orders/dt=2016-05-15/k=__HIVE_DEFAULT_PARTITION__/a.parquet']},
+        {dt: '2016-05-16', k: '2', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hfr_imports/may16',
+         files: ['{DEFAULT_S3_LOCATION}/{TEST_DIR}/hfr_imports/may16/a.parquet']}
+    ]);
+
+query IIII
+SELECT id, amount, dt, k FROM my_datalake.default.hfr_orders ORDER BY id;
+----
+1	10.5	2016-05-14	1
+2	20.5	2016-05-14	1
+3	30.5	2016-05-14	1
+4	40.5	2016-05-15	NULL
+5	50.5	2016-05-16	2
+
+query II
+SELECT (SELECT count(*) FROM hfr_restated), (SELECT count(*) FROM differences('my_datalake.default.hfr_orders', 'hfr_restated'));
+----
+5	0
+
+# the partition values are typed alike, so filters on them prune the same partitions on both sides
+foreach source my_datalake.default.hfr_orders hfr_restated
+
+query IIII
+SELECT id, amount, dt, k FROM {source} WHERE dt = DATE '2016-05-16' OR k IS NULL ORDER BY id;
+----
+4	40.5	2016-05-15	NULL
+5	50.5	2016-05-16	2
+
+query II
+SELECT k, count(*) FROM {source} WHERE dt < DATE '2016-05-16' GROUP BY k ORDER BY k NULLS LAST;
+----
+1	3
+NULL	1
+
+endloop
+
+statement ok
+DROP VIEW hfr_restated;
+
+statement ok
+DROP TABLE my_datalake.default.hfr_orders;

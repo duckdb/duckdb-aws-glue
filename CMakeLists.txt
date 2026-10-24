@@ -47,3 +47,10 @@ install(
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+# The C++ tests (make test-cpp); they need cmake_language(DEFER)
+if(BUILD_UNITTESTS
+   AND NOT EMSCRIPTEN
+   AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
+  add_subdirectory(test/unittest)
+endif()

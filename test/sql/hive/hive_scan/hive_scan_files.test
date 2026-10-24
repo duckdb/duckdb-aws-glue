@@ -1,0 +1,242 @@
+# name: test/sql/hive/hive_scan/hive_scan_files.test
+# description: hive_scan() given its data files reads exactly those and lists nothing (no catalog, no cloud)
+# group: [hive_scan]
+
+require parquet
+
+require glue
+
+# two partitions, one file each, and a second file in the first partition's directory
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'a', 'd1'), (2, 'b', 'd2')) t(id, s, dt)) TO '{TEST_DIR}/hf' (FORMAT parquet, PARTITION_BY (dt));
+
+statement ok
+COPY (SELECT 3 AS id, 'c' AS s) TO '{TEST_DIR}/hf/dt=d1/extra.parquet' (FORMAT parquet);
+
+# a name a listing skips
+statement ok
+COPY (SELECT 4 AS id, 'd' AS s) TO '{TEST_DIR}/hf/dt=d2/_hidden.parquet' (FORMAT parquet);
+
+# listed, the partitions hold three files
+query III
+SELECT id, s, dt FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1'}, {dt: 'd2'}])
+ORDER BY id;
+----
+1	a	d1
+2	b	d2
+3	c	d1
+
+# given one file per partition, the scan reads those and not the other file in the directory
+query III
+SELECT id, s, dt FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/data_0.parquet']},
+                   {dt: 'd2', files: ['{TEST_DIR}/hf/dt=d2/data_0.parquet']}])
+ORDER BY id;
+----
+1	a	d1
+2	b	d2
+
+# a given file is read as given: a name a listing skips, under the partition it is given in
+query III
+SELECT id, s, dt FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/extra.parquet', '{TEST_DIR}/hf/dt=d2/_hidden.parquet']},
+                   {dt: 'd2', files: []}])
+ORDER BY id;
+----
+3	c	d1
+4	d	d1
+
+# entries can be file structs, as read_parquet takes them
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: [{filename: '{TEST_DIR}/hf/dt=d1/data_0.parquet'}, {filename: '{TEST_DIR}/hf/dt=d1/extra.parquet'}]}]);
+----
+2
+
+# a filter on the partition key prunes the partition before its files are opened: d1's file does not exist
+query II
+SELECT id, dt FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/missing.parquet']},
+                   {dt: 'd2', files: ['{TEST_DIR}/hf/dt=d2/data_0.parquet']}])
+WHERE dt = 'd2';
+----
+2	d2
+
+statement error
+SELECT id, dt FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/missing.parquet']},
+                   {dt: 'd2', files: ['{TEST_DIR}/hf/dt=d2/data_0.parquet']}]);
+----
+<REGEX>:.*missing\.parquet.*
+
+# a join filter prunes it when the scan starts
+query II
+SELECT id, t.dt FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/missing.parquet']},
+                   {dt: 'd2', files: ['{TEST_DIR}/hf/dt=d2/data_0.parquet']}]) t
+JOIN (VALUES ('d2')) v(dt) ON t.dt = v.dt;
+----
+2	d2
+
+# a missing file fails the read, not the plan: the estimate does without it
+query II
+EXPLAIN SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/missing.parquet']}]);
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*
+
+#---------------------------------------------------------------------------
+# an unpartitioned table
+#---------------------------------------------------------------------------
+query II
+SELECT id, s FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR'},
+    files := ['{TEST_DIR}/hf/dt=d1/extra.parquet', '{TEST_DIR}/hf/dt=d2/data_0.parquet'])
+ORDER BY id;
+----
+2	b
+3	c
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR'}, files := []);
+----
+0
+
+#---------------------------------------------------------------------------
+# the estimate measures the given files, also when another scan of the query is given others below the same root
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT range AS id, 'x' AS s FROM range(1000)) TO '{TEST_DIR}/hf_big.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT range AS id, 'x' AS s FROM range(10)) TO '{TEST_DIR}/hf_small.parquet' (FORMAT parquet);
+
+query II
+EXPLAIN SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf_big.parquet'])
+UNION ALL
+SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf_small.parquet']);
+----
+physical_plan	<REGEX>:.*~1,000 rows.*~10 rows.*
+
+# a partition given no files holds no rows
+query II
+EXPLAIN SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf_big.parquet']}, {dt: 'd2', files: []}, {dt: 'd3', files: []}]);
+----
+physical_plan	<REGEX>:.*~1,000 rows.*
+
+# and a pruned scan is estimated at the files of the partitions it reads
+query II
+EXPLAIN SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf_small.parquet']}, {dt: 'd2', files: ['{TEST_DIR}/hf_big.parquet']}])
+WHERE dt = 'd2';
+----
+physical_plan	<REGEX>:.*Scanning Files: 1/2.*~1,000 rows.*
+
+#---------------------------------------------------------------------------
+# csv: the given files are read by the format's reader as well
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES (5, 'e', 'd1'), (6, 'f', 'd1')) t(id, s, dt)) TO '{TEST_DIR}/hf_csv' (FORMAT csv, HEADER false, PARTITION_BY (dt));
+
+statement ok
+COPY (SELECT 7 AS id, 'g' AS s) TO '{TEST_DIR}/hf_csv/dt=d1/extra.csv' (FORMAT csv, HEADER false);
+
+query III
+SELECT id, s, dt FROM hive_scan('{TEST_DIR}/hf_csv', format := 'csv', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf_csv/dt=d1/extra.csv']}]);
+----
+7	g	d1
+
+#---------------------------------------------------------------------------
+# the files are part of the plan: two calls that differ only in them are not one common subplan, and a serialized
+# plan reads the same files
+#---------------------------------------------------------------------------
+query II
+EXPLAIN SELECT * FROM
+    (SELECT count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf_big.parquet']) WHERE id > 5) a,
+    (SELECT count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf_big.parquet']) WHERE id > 5) b;
+----
+physical_plan	<REGEX>:.*__common_subplan.*
+
+query II
+EXPLAIN SELECT * FROM
+    (SELECT count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf_big.parquet']) WHERE id > 5) a,
+    (SELECT count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf_small.parquet']) WHERE id > 5) b;
+----
+physical_plan	<!REGEX>:.*__common_subplan.*
+
+query II
+SELECT * FROM
+    (SELECT count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf_big.parquet']) WHERE id > 5) a,
+    (SELECT count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'BIGINT', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf_small.parquet']) WHERE id > 5) b;
+----
+994	4
+
+statement ok
+SET debug_verify_serializer = true;
+
+query II
+SELECT id, s FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/data_0.parquet']}])
+UNION ALL
+SELECT id, s FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/extra.parquet']}])
+ORDER BY id;
+----
+1	a
+3	c
+
+query II
+SELECT id, s FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf/dt=d2/data_0.parquet'])
+UNION ALL
+SELECT id, s FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR'}, files := ['{TEST_DIR}/hf/dt=d1/extra.parquet'])
+ORDER BY id;
+----
+2	b
+3	c
+
+query II
+SELECT dt, count(*) FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/data_0.parquet', '{TEST_DIR}/hf/dt=d1/extra.parquet']},
+                   {dt: 'd2', files: ['{TEST_DIR}/hf/dt=d2/data_0.parquet']}])
+WHERE dt <> 'd2'
+GROUP BY dt;
+----
+d1	2
+
+statement ok
+SET debug_verify_serializer = false;
+
+#---------------------------------------------------------------------------
+# what is refused
+#---------------------------------------------------------------------------
+statement error
+SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/data_0.parquet']}, {dt: 'd2', files: NULL}]);
+----
+<REGEX>:Binder Error.*either every partition gives its 'files' or none does, but 1 of the 2 partitions do.*
+
+statement error
+SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: ['{TEST_DIR}/hf/dt=d1/data_0.parquet']},
+                   {dt: 'd2', files: ['{TEST_DIR}/hf/dt=d1/data_0.parquet']}]);
+----
+<REGEX>:Binder Error.*the file '.*data_0\.parquet' is given more than once.*
+
+statement error
+SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1'}], files := ['{TEST_DIR}/hf/dt=d1/data_0.parquet']);
+----
+<REGEX>:Binder Error.*'files' is for a table without partition keys.*
+
+statement error
+SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR'}, files := '{TEST_DIR}/hf/dt=d1/data_0.parquet');
+----
+<REGEX>:Binder Error.*'files' must be a list of files.*
+
+statement error
+SELECT * FROM hive_scan('{TEST_DIR}/hf', schema := {id: 'INTEGER', s: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'd1', files: 'x'}]);
+----
+<REGEX>:Binder Error.*'files' of partition 1 must be a list of files.*
