@@ -6,6 +6,7 @@
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 
 namespace duckdb {
 
@@ -19,25 +20,34 @@ struct GlueShowColumnsState : public GlobalTableFunctionState {
 	idx_t offset = 0;
 };
 
-//! The column names of the table: data columns first, partition keys last. Read straight from Glue, so it works for
-//! every table format.
-vector<string> GetColumnNames(ClientContext &context, const Value &table_name) {
-	if (table_name.IsNull()) {
+//! The column names of the table: data columns first, partition keys last. Read from the Glue definition, so it
+//! works for every table format.
+vector<string> GetColumnNames(ClientContext &context, const Value &input) {
+	if (input.IsNull()) {
 		throw BinderException("glue_show_columns: the table name can not be NULL");
 	}
-	auto name = ResolveGlueTableName(context, "glue_show_columns", table_name.GetValue<string>());
+	auto name = ResolveGlueTableName(context, "glue_show_columns", input.GetValue<string>());
 	auto &catalog = Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
-	GlueTableInfo table;
-	if (!GlueAPI::GetTable(context, catalog, name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(),
-	                       table)) {
-		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", name.Schema().GetIdentifierName(),
-		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
+	auto database_name = name.Schema().GetIdentifierName();
+	auto table_name = name.Name().GetIdentifierName();
+	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		GlueTableInfo info;
+		if (!GlueAPI::GetTable(context, catalog, database_name, table_name, info)) {
+			return nullptr;
+		}
+		return make_shared_ptr<const GlueTableInfo>(std::move(info));
+	};
+	// Of() is null in a bare statement (nothing started the catalog's transaction); Get() starts it
+	auto table = GlueTransaction::Get(context, catalog).cache->GetTable(database_name, table_name, load);
+	if (!table) {
+		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", database_name, table_name,
+		                       name.Catalog().GetIdentifierName());
 	}
 	vector<string> result;
-	for (auto &column : table.columns) {
+	for (auto &column : table->columns) {
 		result.push_back(column.name);
 	}
-	for (auto &key : table.partition_keys) {
+	for (auto &key : table->partition_keys) {
 		result.push_back(key.name);
 	}
 	return result;

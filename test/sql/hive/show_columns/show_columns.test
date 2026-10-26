@@ -29,6 +29,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.show_columns_db.upper_cols;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.show_columns_db.evolving;
+
+statement ok
 DROP SCHEMA IF EXISTS my_datalake.show_columns_db;
 
 statement ok
@@ -213,6 +216,123 @@ customer
 dt
 country
 
+# served from the transaction's Glue metadata cache
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+# direct lookups only, so the counts do not depend on the lookups earlier in this test
+statement ok
+SET glue_batch_table_lookup = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM glue_show_columns('my_datalake.show_columns_db.orders');
+----
+5
+
+query I
+SELECT glue_calls('GetTable');
+----
+1
+
+# a bare name: resolving it fetches the table once and the function reuses that fetch
+statement ok
+USE my_datalake.show_columns_db;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM glue_show_columns('orders');
+----
+5
+
+statement ok
+USE memory;
+
+query I
+SELECT glue_calls('GetTable');
+----
+1
+
+# inside BEGIN ... COMMIT the second call is answered from the first one's fetch
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) FROM glue_show_columns('my_datalake.show_columns_db.orders');
+----
+5
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM glue_show_columns('my_datalake.show_columns_db.orders');
+----
+5
+
+query I
+SELECT glue_calls('GetTable');
+----
+0
+
+statement ok
+COMMIT;
+
+statement ok
+RESET glue_batch_table_lookup;
+
+# a column change through the extension is seen by the next call, also when the cache outlives the transaction
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok
+CREATE TABLE my_datalake.show_columns_db.evolving (col1 VARCHAR, col2 INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv');
+
+query I
+SELECT * FROM glue_show_columns('my_datalake.show_columns_db.evolving');
+----
+col1
+col2
+dt
+
+statement ok
+ALTER TABLE my_datalake.show_columns_db.evolving ADD COLUMN col3 DOUBLE;
+
+query I
+SELECT * FROM glue_show_columns('my_datalake.show_columns_db.evolving');
+----
+col1
+col2
+col3
+dt
+
+# csv tables are read by position, so RENAME COLUMN is allowed on them
+statement ok
+ALTER TABLE my_datalake.show_columns_db.evolving RENAME COLUMN col1 TO first_name;
+
+query I
+SELECT * FROM glue_show_columns('my_datalake.show_columns_db.evolving');
+----
+first_name
+col2
+col3
+dt
+
+statement ok
+RESET glue_metadata_cache_scope;
+
 # cleanup
 statement ok
 DROP VIEW my_datalake.show_columns_db.orders_view;
@@ -225,6 +345,9 @@ DROP TABLE my_datalake.show_columns_db.unpart;
 
 statement ok
 DROP TABLE my_datalake.show_columns_db.upper_cols;
+
+statement ok
+DROP TABLE my_datalake.show_columns_db.evolving;
 
 statement ok
 DROP SCHEMA my_datalake.show_columns_db;

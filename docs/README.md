@@ -362,9 +362,10 @@ SELECT * FROM glue_show_columns('some_table');      -- resolved like a table nam
 
 `DESCRIBE` shows the same column names for Hive tables, but it binds a scan of the table: it fails for Iceberg, Delta
 and Hudi tables and for tables with types DuckDB can't map, and it fetches all partitions from Glue. `glue_show_columns`
-makes a single Glue `GetTable` call and works on any table format. It is also much faster than filtering
-`duckdb_columns()`, which lists the whole catalog. For Iceberg, Delta and Hudi tables it returns the columns recorded
-in Glue, which can lag the table's own metadata.
+makes at most one Glue `GetTable` call and works on any table format; like the tables of a query, the definition is
+served from the Glue metadata cache. It is also much faster than filtering `duckdb_columns()`, which lists the whole
+catalog. For Iceberg, Delta and Hudi tables it returns the columns recorded in Glue, which can lag the table's own
+metadata.
 
 ## HTTP transport and logging
 

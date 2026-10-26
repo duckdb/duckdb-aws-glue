@@ -72,6 +72,14 @@ SELECT count(*) FROM dl.link_db.tp;
 ----
 2
 
+# glue_show_columns resolves the table through the link too
+query I
+SELECT * FROM glue_show_columns('dl.link_db.tp');
+----
+id
+v
+dt
+
 # the partition functions resolve the table through the link too: add, then drop a partition of link_db.tp
 statement ok
 CALL glue_add_partition('dl.link_db.tp', {dt: 'b'});
