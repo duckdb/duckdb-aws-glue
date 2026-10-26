@@ -1,0 +1,273 @@
+# name: test/sql/hive/functions/duckdb_tables_sql.test
+# description: SQL reconstruction of Glue Hive tables via duckdb_tables().sql. Round-trippable Hive
+# group: [functions]
+
+#              tables surface a full CREATE TABLE statement; non-Hive formats, unknown SerDes or
+#              SerDe parameters our CREATE path can not round-trip surface a "Not supported: ..."
+#              reason inline (so a bulk catalog scan never breaks on a single bad table).
+
+require httpfs
+
+require json
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_plain;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_bucketed;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_csv_pipe;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_csv_opencsv;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_csv_header;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_json;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_avro;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_params;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rsp_sql_roundtrip;
+
+#---------------------------------------------------------------------------
+# a plain parquet table — the sql column contains the full CREATE TABLE
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_plain (id BIGINT, name VARCHAR);
+
+query II
+SELECT sql LIKE '%CREATE TABLE "default".rsp_sql_plain%',
+       sql LIKE '%''format''=''parquet''%' AND sql LIKE '%''type''=''HIVE''%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_plain';
+----
+true	true
+
+#---------------------------------------------------------------------------
+# a partitioned table — PARTITIONED BY appears
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_partitioned (id BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+
+query I
+SELECT sql LIKE '%PARTITIONED BY (dt)%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_partitioned';
+----
+true
+
+#---------------------------------------------------------------------------
+# a bucketed and sorted table — BucketColumns, NumberOfBuckets, SortColumns appear
+#---------------------------------------------------------------------------
+statement ok
+SET glue_create_bucketed_tables = true;
+
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_bucketed (id BIGINT, region VARCHAR)
+WITH (BucketColumns = list_value('id'), NumberOfBuckets = 4, SortColumns = list_value(struct_pack("Column" := 'region', SortOrder := 1)));
+
+query III
+SELECT
+    sql LIKE '%''BucketColumns''=list_value(''id'')%',
+    sql LIKE '%''NumberOfBuckets''=4%',
+    sql LIKE '%''SortColumns''=list_value(struct_pack("Column" := ''region'', SortOrder := 1))%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_bucketed';
+----
+true	true	true
+
+statement ok
+RESET glue_create_bucketed_tables;
+
+#---------------------------------------------------------------------------
+# csv with a non-default delimiter — 'delimiter' appears, serialization.format does not
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_csv_pipe (id BIGINT, name VARCHAR) WITH (format = 'csv', delimiter = '|');
+
+query II
+SELECT
+    sql LIKE '%''delimiter''=''|''%',
+    sql LIKE '%''serialization.format''%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_csv_pipe';
+----
+true	false
+
+#---------------------------------------------------------------------------
+# csv with quote and escape → OpenCSVSerde → quote/escape in the sql
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_csv_opencsv (id BIGINT, name VARCHAR)
+WITH (format = 'csv', delimiter = '|', quote = '"', escape = '\');
+
+query III
+SELECT
+    sql LIKE '%''delimiter''=''|''%',
+    sql LIKE '%''quote''=''"''%',
+    sql LIKE '%''escape''=''\''%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_csv_opencsv';
+----
+true	true	true
+
+#---------------------------------------------------------------------------
+# csv with header = true → 'header'=true in sql, 'skip.header.line.count' via table params passthrough
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_csv_header (id BIGINT, name VARCHAR) WITH (format = 'csv', header = true);
+
+query II
+SELECT
+    sql LIKE '%''header''=true%',
+    sql LIKE '%''skip.header.line.count''=''1''%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_csv_header';
+----
+true	true
+
+#---------------------------------------------------------------------------
+# json and avro tables emit format=json / format=avro
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_json (id BIGINT, payload VARCHAR) WITH (format = 'json');
+
+query I
+SELECT sql LIKE '%''format''=''json''%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_json';
+----
+true
+
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_avro (id BIGINT, name VARCHAR) WITH (format = 'avro');
+
+query I
+SELECT sql LIKE '%''format''=''avro''%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_avro';
+----
+true
+
+#---------------------------------------------------------------------------
+# Table.Parameters passthrough — custom tags from CREATE flow into the sql verbatim
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_params (id BIGINT) WITH (format = 'parquet', owner = 'alice', department = 'engineering');
+
+query II
+SELECT
+    sql LIKE '%''owner''=''alice''%',
+    sql LIKE '%''department''=''engineering''%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_params';
+----
+true	true
+
+#---------------------------------------------------------------------------
+# Round-trip — every parameter set on CREATE flows back through duckdb_tables().sql
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.rsp_sql_roundtrip (
+    id BIGINT,
+    name VARCHAR,
+    region VARCHAR,
+    dt VARCHAR
+)
+PARTITIONED BY (dt)
+WITH (format      = 'csv',
+      delimiter   = '|',
+      quote       = '"',
+      escape      = '\',
+      header      = true,
+      owner       = 'alice',
+      department  = 'engineering',
+      cost_center = 'cc-100');
+
+query IIIIIIIII
+SELECT
+    sql LIKE '%CREATE TABLE "default".rsp_sql_roundtrip%',
+    sql LIKE '%PARTITIONED BY (dt)%',
+    sql LIKE '%''type''=''HIVE''%' AND sql LIKE '%''format''=''csv''%',
+    sql LIKE '%''delimiter''=''|''%',
+    sql LIKE '%''quote''=''"''%',
+    sql LIKE '%''escape''=''\''%',
+    sql LIKE '%''header''=true%',
+    sql LIKE '%''owner''=''alice''%',
+    sql LIKE '%''department''=''engineering''%' AND sql LIKE '%''cost_center''=''cc-100''%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_roundtrip';
+----
+true	true	true	true	true	true	true	true	true
+
+#---------------------------------------------------------------------------
+# Error cases — the sql column carries the "Not supported: ..." reason inline for formats,
+# SerDes, or SerDe parameters our CREATE path can not round-trip, so a bulk catalog scan
+# never breaks on a single bad table.
+#---------------------------------------------------------------------------
+# fixture_delta is a Delta table
+query I
+SELECT sql FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'fixture_delta';
+----
+Not supported: table format 'DELTA'
+
+# fixture_orc is a Hive table stored as ORC
+query I
+SELECT sql FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'fixture_orc';
+----
+Not supported: SerDe 'org.apache.hadoop.hive.ql.io.orc.OrcSerde' for Hive tables
+
+# fixture_text_null_format has serialization.null.format in SerDe.Parameters
+query I
+SELECT sql FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'fixture_text_null_format';
+----
+Not supported: SerDe parameter 'serialization.null.format' for Hive tables
+
+# fixture_openx_json_ignore_malformed carries ignore.malformed.json
+query I
+SELECT sql FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'fixture_openx_json_ignore_malformed';
+----
+Not supported: SerDe parameter 'ignore.malformed.json' for Hive tables
+
+# fixture_openx_json_unsupported carries mapping.*, dots.in.keys, case.insensitive
+query I
+SELECT sql FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'fixture_openx_json_unsupported';
+----
+<REGEX>:Not supported: SerDe parameter '(mapping\.name|dots\.in\.keys|case\.insensitive)' for Hive tables
+
+#---------------------------------------------------------------------------
+# Standard LazySimple csv — the sql column has a valid CREATE TABLE statement
+#---------------------------------------------------------------------------
+query I
+SELECT sql LIKE '%CREATE TABLE "default".fixture_text_default%'
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'fixture_text_default';
+----
+true

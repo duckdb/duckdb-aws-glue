@@ -14,16 +14,16 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@b8d325c37e82160886579880707493bd358c0e62 # v2.0-cyanoptera 2026-10-22 pin
     with:
-      ci_tools_version: 969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+      ci_tools_version: b8d325c37e82160886579880707493bd358c0e62 # v2.0-cyanoptera 2026-10-22 pin
       exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw'
       extension_name: glue
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@b8d325c37e82160886579880707493bd358c0e62 # v2.0-cyanoptera 2026-10-22 pin
     with:
-      ci_tools_version: 969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+      ci_tools_version: b8d325c37e82160886579880707493bd358c0e62 # v2.0-cyanoptera 2026-10-22 pin
       extension_name: glue
       format_checks: 'format'
