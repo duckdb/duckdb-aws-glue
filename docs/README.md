@@ -209,7 +209,12 @@ their codec themselves.
   and must not be listed; the bucketing and sort columns must be listed. It returns the columns as stored in Glue
   (Glue type names). The data files are not rewritten: parquet, json and avro files are matched by name (a renamed
   column reads as NULL), csv files by position, so a csv table keeps its number of columns, each may only be widened
-  and giving it a new name renames it.
+  and giving it a new name renames it. `add := true` is Hive's `ADD COLUMNS`: the columns are appended to the current
+  ones, and none of them may exist yet.
+- A partition declares its own columns, which keep the types they had when the partition was created when the
+  table's columns change later. `glue_replace_columns(..., partition := {dt: '2016-05-14'})` replaces the columns of
+  that partition instead of the table's (UpdatePartition), with the same rules against the partition's current
+  columns, so a partition can be brought to the table's columns. It returns the partition's columns.
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.

@@ -1,0 +1,138 @@
+# name: test/sql/hive/ddl/alter_column/alter_partition_columns.test
+# description: glue_replace_columns with partition := changes the columns of a partition, and with add := appends
+# group: [alter_column]
+
+#              columns, to the table's or to a partition's
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.apcol_orders;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.apcol_lines;
+
+statement ok
+CREATE TABLE my_datalake.default.apcol_orders (id INTEGER, v INTEGER, dt VARCHAR) PARTITIONED BY (dt)
+WITH (format = 'parquet');
+
+statement ok
+INSERT INTO my_datalake.default.apcol_orders VALUES (1, 10, 'p1');
+
+statement ok
+ALTER TABLE my_datalake.default.apcol_orders ALTER COLUMN v TYPE BIGINT;
+
+statement ok
+ALTER TABLE my_datalake.default.apcol_orders ADD COLUMN extra VARCHAR;
+
+query T
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.apcol_orders', {dt: 'p1'});
+----
+[id int, v int]
+
+# the partition's columns are brought to the table's; the table is unchanged
+query T
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_replace_columns('my_datalake.default.apcol_orders', {id: 'INTEGER', v: 'BIGINT'}, partition := {dt: 'p1'});
+----
+[id int, v bigint]
+
+query T
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.apcol_orders', {dt: 'p1'});
+----
+[id int, v bigint]
+
+query T
+SELECT list(column_name || ' ' || data_type ORDER BY column_index) FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'apcol_orders';
+----
+[id INTEGER, v BIGINT, extra VARCHAR, dt VARCHAR]
+
+# as for the table, a partition's column may only be widened: its files keep their types
+statement error
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {id: 'INTEGER', v: 'SMALLINT'}, partition := {dt: 'p1'});
+----
+<REGEX>:.*can not change column 'v' of partition \[p1\] of table 'default.apcol_orders' from BIGINT to SMALLINT.*
+
+statement error
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {id: 'INTEGER'}, partition := {dt: 'nope'});
+----
+<REGEX>:.*Partition \[nope\] does not exist in Glue table 'default.apcol_orders'.*
+
+statement error
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {id: 'INTEGER'}, partition := {region: 'eu'});
+----
+<REGEX>:.*'region' is not a partition key of table 'default.apcol_orders'.*
+
+statement ok
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {extra: 'VARCHAR'}, partition := {dt: 'p1'}, add := true);
+
+query T
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.apcol_orders', {dt: 'p1'});
+----
+[id int, v bigint, extra string]
+
+statement error
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {v: 'BIGINT'}, partition := {dt: 'p1'}, add := true);
+----
+<REGEX>:.*partition \[p1\] of table 'default.apcol_orders' already has a column 'v'.*
+
+statement ok
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {id: 'BIGINT', v: 'BIGINT', extra: 'VARCHAR'}, partition := {dt: 'p1'});
+
+query T
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.apcol_orders', {dt: 'p1'});
+----
+[id bigint, v bigint, extra string]
+
+# without a partition, add := appends to the table's columns
+statement ok
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {a: 'INTEGER', b: 'DECIMAL(10, 2)'}, add := true);
+
+statement ok
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {id: 'BIGINT', v: 'BIGINT', extra: 'VARCHAR', a: 'BIGINT', b: 'DECIMAL(10, 2)'});
+
+query T
+SELECT list(column_name || ' ' || data_type ORDER BY column_index) FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'apcol_orders';
+----
+[id BIGINT, v BIGINT, extra VARCHAR, a BIGINT, 'b DECIMAL(10,2)', dt VARCHAR]
+
+query IIT
+SELECT id, v, dt FROM my_datalake.default.apcol_orders;
+----
+1	10	p1
+
+# csv files are read by position: a partition keeps its number of columns, add := appends
+statement ok
+CREATE TABLE my_datalake.default.apcol_lines (id INTEGER, s VARCHAR, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.apcol_lines VALUES (1, 'a', 'p1');
+
+statement error
+CALL glue_replace_columns('my_datalake.default.apcol_lines', {id: 'BIGINT'}, partition := {dt: 'p1'});
+----
+<REGEX>:.*stored as csv, which is read by position, so partition \[p1\] of table 'default.apcol_lines' must keep its 2 columns.*
+
+statement ok
+CALL glue_replace_columns('my_datalake.default.apcol_lines', {extra: 'VARCHAR'}, partition := {dt: 'p1'}, add := true);
+
+query T
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.apcol_lines', {dt: 'p1'});
+----
+[id int, s string, extra string]
+
+statement ok
+DROP TABLE my_datalake.default.apcol_orders;
+
+statement ok
+DROP TABLE my_datalake.default.apcol_lines;

@@ -10,6 +10,7 @@
 #include "duckdb/parallel/task_executor.hpp"
 
 #include <chrono>
+#include <functional>
 #include <thread>
 
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
@@ -23,12 +24,14 @@
 
 namespace duckdb {
 
-void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                   const string &table_name, const vector<string> &values, const string &location) {
+//! UpdatePartition with the partition's storage descriptor as 'change' leaves it, everything else as it is
+static void UpdatePartitionStorage(ClientContext &context, GlueCatalog &catalog,
+                                   const std::shared_ptr<Aws::Glue::GlueClient> &client, const string &database_name,
+                                   const string &table_name, const vector<string> &values,
+                                   const std::function<void(Aws::Glue::Model::StorageDescriptor &)> &change) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdatePartition");
 	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetPartitionRequest get_request;
 	SetCatalogId(get_request, catalog);
 	get_request.SetDatabaseName(database_name);
@@ -45,7 +48,7 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 	}
 	auto &partition = get_outcome.GetResult().GetPartition();
 	auto storage_descriptor = partition.GetStorageDescriptor();
-	storage_descriptor.SetLocation(location);
+	change(storage_descriptor);
 	Aws::Glue::Model::PartitionInput input;
 	input.SetValues(partition.GetValues());
 	input.SetStorageDescriptor(storage_descriptor);
@@ -61,6 +64,20 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 		ThrowGlueError(outcome, StringUtil::Format("UpdatePartition '%s.%s' [%s]", database_name, table_name,
 		                                           PartitionValuesToString(values)));
 	}
+}
+
+void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                   const string &table_name, const vector<string> &values, const string &location) {
+	UpdatePartitionStorage(context, catalog, GetClient(context, catalog), database_name, table_name, values,
+	                       [&](Aws::Glue::Model::StorageDescriptor &storage) { storage.SetLocation(location); });
+}
+
+void GlueAPI::SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                  const string &table_name, const vector<string> &values,
+                                  const vector<GlueColumn> &columns) {
+	UpdatePartitionStorage(
+	    context, catalog, GetClient(context, catalog), database_name, table_name, values,
+	    [&](Aws::Glue::Model::StorageDescriptor &storage) { storage.SetColumns(ToAwsColumns(columns)); });
 }
 
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,

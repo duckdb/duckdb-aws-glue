@@ -460,6 +460,9 @@ void GlueSetTableLocationScan(ClientContext &context, TableFunctionInput &data, 
 struct GlueReplaceColumnsBindData : public TableFunctionData {
 	GluePartitionTarget target;
 	vector<GlueColumn> columns;
+	//! The partition whose columns are replaced instead of the table's, when 'for_partition' is set
+	bool for_partition = false;
+	vector<string> partition;
 
 	//! The checks in bind are against the table as it is then: a prepared statement binds again on every execution
 	bool SupportStatementCache() const override {
@@ -494,31 +497,58 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 	optional_ptr<const Value> comments;
 	// as in Hive, the comments of the columns that stay are dropped unless keep_comments is set
 	bool keep_comments = false;
+	// Hive's ADD COLUMNS: the columns are appended to the current ones
+	bool add = false;
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
 		if (name == "comments") {
 			comments = option.second;
 		} else if (name == "keep_comments") {
 			keep_comments = !option.second.IsNull() && option.second.GetValue<bool>();
+		} else if (name == "add") {
+			add = !option.second.IsNull() && option.second.GetValue<bool>();
+		} else if (name == "partition" && !option.second.IsNull()) {
+			result->for_partition = true;
+			result->partition = ParsePartitionSpec("glue_replace_columns", result->target, option.second);
 		}
 	}
 	if (comments && !IsStringStruct(*comments)) {
 		throw BinderException("glue_replace_columns: 'comments' must be a struct of column name to comment");
 	}
+	// the columns being replaced: the table's, or those the partition declares
+	auto replaced = table.columns;
+	string target_name = "table '" + result->target.TableName() + "'";
+	if (result->for_partition) {
+		GluePartitionDetails partition;
+		if (!GlueAPI::GetPartition(context, *result->target.catalog, table.schema_name, table.name, result->partition,
+		                           partition)) {
+			throw CatalogException("Partition [%s] does not exist in Glue table '%s'",
+			                       StringUtil::Join(result->partition, ", "), result->target.TableName());
+		}
+		replaced = std::move(partition.columns);
+		target_name = "partition [" + StringUtil::Join(result->partition, ", ") + "] of table '" +
+		              result->target.TableName() + "'";
+	}
 	case_insensitive_map_t<idx_t> current;
-	for (idx_t i = 0; i < table.columns.size(); i++) {
-		current[table.columns[i].name] = i;
+	for (idx_t i = 0; i < replaced.size(); i++) {
+		current[replaced[i].name] = i;
 	}
 	auto &column_names = StructType::GetChildTypes(columns.type());
 	auto &column_types = StructValue::GetChildren(columns);
 	// csv files are read by position, the other formats by name; other SerDes are refused
 	bool by_position = table.GetFileFormat() == HiveFileFormat::CSV;
-	if (by_position && column_names.size() != table.columns.size()) {
-		throw BinderException("glue_replace_columns: table '%s' is stored as csv, which is read by position, so it "
+	if (by_position && !add && column_names.size() != replaced.size()) {
+		throw BinderException("glue_replace_columns: table '%s' is stored as csv, which is read by position, so %s "
 		                      "must keep its %d columns",
-		                      result->target.TableName(), table.columns.size());
+		                      result->target.TableName(), target_name, replaced.size());
 	}
 	case_insensitive_map_t<idx_t> given;
+	if (add) {
+		for (auto &column : replaced) {
+			given[column.name] = result->columns.size();
+			result->columns.push_back(column);
+		}
+	}
 	for (idx_t i = 0; i < column_names.size(); i++) {
 		GlueColumn column;
 		column.name = column_names[i].first.GetIdentifierName();
@@ -531,12 +561,16 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 		auto type = GlueTypes::ToLogicalType(column.type);
 		// a column that stays must keep a type its existing files can be read with, as for ALTER COLUMN TYPE
 		optional_ptr<const GlueColumn> previous;
-		if (by_position) {
-			previous = &table.columns[i];
+		if (add) {
+			if (current.find(column.name) != current.end()) {
+				throw BinderException("glue_replace_columns: %s already has a column '%s'", target_name, column.name);
+			}
+		} else if (by_position) {
+			previous = &replaced[i];
 		} else {
 			auto existing = current.find(column.name);
 			if (existing != current.end()) {
-				previous = &table.columns[existing->second];
+				previous = &replaced[existing->second];
 			}
 		}
 		if (previous) {
@@ -549,9 +583,9 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 			}
 			auto from = GlueTypes::ToLogicalType(previous->type);
 			if (!GlueSchemaEntry::IsAllowedHiveTypeChange(from, type)) {
-				throw BinderException("glue_replace_columns: can not change column '%s' of table '%s' from %s to %s: "
+				throw BinderException("glue_replace_columns: can not change column '%s' of %s from %s to %s: "
 				                      "existing files keep their types, only widening changes are supported",
-				                      previous->name, result->target.TableName(), from.ToString(), type.ToString());
+				                      previous->name, target_name, from.ToString(), type.ToString());
 			}
 		}
 		for (auto &key : table.partition_keys) {
@@ -586,16 +620,29 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 			                      result->target.TableName(), table.DescribeBucketing(), column);
 		}
 	};
-	for (auto &column : table.bucket_columns) {
-		require_kept(column);
-	}
-	for (auto &column : table.sort_columns) {
-		require_kept(column.name);
+	if (!result->for_partition) {
+		for (auto &column : table.bucket_columns) {
+			require_kept(column);
+		}
+		for (auto &column : table.sort_columns) {
+			require_kept(column.name);
+		}
 	}
 	names = {"columns"};
 	return_types = {LogicalType::LIST(LogicalType::STRUCT(
 	    {{"name", LogicalType::VARCHAR}, {"type", LogicalType::VARCHAR}, {"comment", LogicalType::VARCHAR}}))};
 	return std::move(result);
+}
+
+static Value ColumnsValue(const LogicalType &type, const vector<GlueColumn> &columns) {
+	vector<Value> result;
+	for (auto &column : columns) {
+		result.push_back(
+		    Value::STRUCT({{"name", Value(column.name)},
+		                   {"type", Value(column.type)},
+		                   {"comment", column.comment.empty() ? Value(LogicalType::VARCHAR) : Value(column.comment)}}));
+	}
+	return Value::LIST(ListType::GetChildType(type), std::move(result));
 }
 
 void GlueReplaceColumnsScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
@@ -609,6 +656,15 @@ void GlueReplaceColumnsScan(ClientContext &context, TableFunctionInput &data, Da
 	auto &table = bind_data.target.table;
 	// keeps the refreshed entry alive while its columns are read below
 	Transaction::Get(context, catalog);
+	if (bind_data.for_partition) {
+		GlueAPI::SetPartitionColumns(context, catalog, table.schema_name, table.name, bind_data.partition,
+		                             bind_data.columns);
+		GluePartitionDetails partition;
+		GlueAPI::GetPartition(context, catalog, table.schema_name, table.name, bind_data.partition, partition);
+		output.data[0].Append(ColumnsValue(output.data[0].GetType(), partition.columns));
+		output.CheckCardinality(1);
+		return;
+	}
 	GlueAPI::UpdateTableColumns(context, catalog, table.schema_name, table.name, bind_data.columns);
 	auto schema = catalog.GetSchemas().GetEntry(context, table.schema_name);
 	if (!schema) {
@@ -616,14 +672,7 @@ void GlueReplaceColumnsScan(ClientContext &context, TableFunctionInput &data, Da
 		                       bind_data.target.TableName());
 	}
 	auto &updated = schema->Cast<GlueSchemaEntry>().RefreshTable(context, table.name);
-	vector<Value> columns;
-	for (auto &column : updated.table_info.columns) {
-		columns.push_back(
-		    Value::STRUCT({{"name", Value(column.name)},
-		                   {"type", Value(column.type)},
-		                   {"comment", column.comment.empty() ? Value(LogicalType::VARCHAR) : Value(column.comment)}}));
-	}
-	output.data[0].Append(Value::LIST(ListType::GetChildType(output.data[0].GetType()), std::move(columns)));
+	output.data[0].Append(ColumnsValue(output.data[0].GetType(), updated.table_info.columns));
 	output.CheckCardinality(1);
 }
 
@@ -1007,6 +1056,8 @@ TableFunction GetGlueReplaceColumnsFunction() {
 	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
 		options.Add("comments", LogicalType::ANY);
 		options.Add("keep_comments", LogicalType::BOOLEAN);
+		options.Add("partition", LogicalType::ANY);
+		options.Add("add", LogicalType::BOOLEAN);
 	});
 	return function;
 }

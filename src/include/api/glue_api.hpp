@@ -91,6 +91,10 @@ public:
 	//! Point a partition at another location, throws a CatalogException if the partition does not exist
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const vector<string> &values, const string &location);
+	//! Replace the data columns a partition declares, throws a CatalogException if the partition does not exist
+	static void SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                const string &table_name, const vector<string> &values,
+	                                const vector<GlueColumn> &columns);
 	//! Fetch a single partition by its values, returns false if it does not exist
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result);
