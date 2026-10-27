@@ -261,20 +261,25 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 	schemas.Scan(context, [&](CatalogEntry &schema) { callback(schema.Cast<GlueSchemaEntry>()); });
 }
 
-optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction transaction,
-                                                           const EntryLookupInfo &schema_lookup,
-                                                           OnEntryNotFound if_not_found) {
-	auto &schema_name = schema_lookup.GetEntryName();
-	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db]
+//! Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db]
+static vector<string> DatabasePath(const vector<Identifier> &components, const string &catalog_name) {
 	vector<string> path;
-	for (auto &component : schema_lookup.GetQualifiedName().Path()) {
+	for (auto &component : components) {
 		if (!component.empty()) {
 			path.push_back(component.GetIdentifierName());
 		}
 	}
-	if (path.size() > 1 && StringUtil::CIEquals(path[0], GetName().GetIdentifierName())) {
+	if (path.size() > 1 && StringUtil::CIEquals(path[0], catalog_name)) {
 		path.erase(path.begin());
 	}
+	return path;
+}
+
+optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction transaction,
+                                                           const EntryLookupInfo &schema_lookup,
+                                                           OnEntryNotFound if_not_found) {
+	auto &schema_name = schema_lookup.GetEntryName();
+	auto path = DatabasePath(schema_lookup.GetQualifiedName().Path(), GetName().GetIdentifierName());
 	if (path.size() > 1) {
 		if (if_not_found == OnEntryNotFound::RETURN_NULL) {
 			return nullptr;
@@ -293,6 +298,60 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 		                       schema_name);
 	}
 	return &entry->Cast<SchemaCatalogEntry>();
+}
+
+CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transaction,
+                                                       const EntryLookupInfo &lookup_info) {
+	if (lookup_info.GetAtClause() && !SupportsTimeTravel()) {
+		return {nullptr, nullptr, ErrorData(BinderException("Catalog type does not support time travel"))};
+	}
+	CatalogEntryLookup result {nullptr, nullptr, ErrorData()};
+	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY &&
+	    TryLookupTableBeforeSchema(transaction, lookup_info, result)) {
+		return result;
+	}
+	// as Catalog::TryLookupEntryInternal, which is private
+	auto &full_path = lookup_info.GetQualifiedName().Path();
+	vector<Identifier> schema_path(full_path.begin(), full_path.end() - 1);
+	auto schema_lookup = EntryLookupInfo::SchemaLookup(lookup_info, std::move(schema_path));
+	result.schema = LookupSchema(transaction, schema_lookup, OnEntryNotFound::RETURN_NULL);
+	if (result.schema) {
+		result.entry = result.schema->LookupEntry(transaction, lookup_info);
+	}
+	return result;
+}
+
+bool GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+                                             CatalogEntryLookup &result) {
+	auto &full_path = lookup_info.GetQualifiedName().Path();
+	auto path = DatabasePath(vector<Identifier>(full_path.begin(), full_path.end() - 1), GetName().GetIdentifierName());
+	if (path.size() != 1) {
+		return false;
+	}
+	// Glue keeps database names in lower case, as GetDatabase would name the schema
+	GlueDatabaseInfo database;
+	database.name = StringUtil::Lower(path[0]);
+	if (schemas.GetLoadedEntry(database.name)) {
+		return false;
+	}
+	auto schema = schemas.CreateSchemaEntry(database, false);
+	auto entry = schema->LookupEntry(transaction, lookup_info);
+	if (!entry) {
+		// the table or its database is missing: GetDatabase tells which, without asking for the table again
+		auto loaded = schemas.GetEntry(transaction.GetContext(), database.name);
+		if (loaded) {
+			result.schema = &loaded->Cast<SchemaCatalogEntry>();
+		}
+		return true;
+	}
+	auto added = schemas.AddEntryIfAbsent(std::move(schema));
+	if (!added) {
+		// loaded meanwhile: the regular lookup finds the table in that entry, from the cache
+		return false;
+	}
+	result.schema = &added->Cast<SchemaCatalogEntry>();
+	result.entry = entry;
+	return true;
 }
 
 //! "<12-digit account>" or "<12-digit account>:..."

@@ -107,6 +107,13 @@ private:
 	//! key a database parameter
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);
 
+	//! Looks a table up before its database: finding the table proves the database exists, saving GetDatabase
+	CatalogEntryLookup TryLookupEntryInternal(CatalogTransaction transaction,
+	                                          const EntryLookupInfo &lookup_info) override;
+	//! Whether the table-first lookup settled the lookup into 'result'; false leaves it to the regular lookup
+	bool TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+	                                CatalogEntryLookup &result);
+
 private:
 	//! for reading - the fetched catalog id or account id from ATTACH
 	string KnownCatalogId();
