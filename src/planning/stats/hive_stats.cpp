@@ -58,8 +58,8 @@ struct HiveTableSample {
 // Cardinality sample
 //===--------------------------------------------------------------------===//
 //! The uncompressed size a gzip file records in its last four bytes (modulo 4 GiB, and of its last member only)
-static optional_idx GzipUncompressedSize(FileSystem &fs, const string &path) {
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+static optional_idx GzipUncompressedSize(FileSystem &fs, const OpenFileInfo &file) {
+	auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ);
 	if (!handle) {
 		return optional_idx();
 	}
@@ -97,13 +97,13 @@ static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const 
 	auto gzip = IsFileCompressed(file.path, FileCompressionType::GZIP);
 	optional_idx gzip_size;
 	if (gzip) {
-		gzip_size = GzipUncompressedSize(fs, file.path);
+		gzip_size = GzipUncompressedSize(fs, file);
 		if (!gzip_size.IsValid()) {
 			return optional_idx();
 		}
 	}
 	auto compression = gzip ? FileCompressionType::GZIP : FileCompressionType::UNCOMPRESSED;
-	auto handle = fs.OpenFile(file.path, FileFlags::FILE_FLAGS_READ | compression);
+	auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | compression);
 	if (!handle) {
 		return optional_idx();
 	}

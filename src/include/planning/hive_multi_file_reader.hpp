@@ -34,6 +34,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	HiveJSONOptions json_options;
 	//! The partition keys, in order
 	vector<string> partition_keys;
+	//! When set, the file secret every listing is made with; every file a listing lists carries it to its open
+	string file_secret;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;

@@ -99,18 +99,21 @@ shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) 
 }
 
 shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
-                                                              bool cache_in_connection) {
+                                                              bool cache_in_connection, const string &file_secret) {
 	auto key = directory;
 	StringUtil::RTrim(key, "/");
-	if (cache_in_connection) {
+	if (cache_in_connection && file_secret.empty()) {
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
 		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, key);
 	}
 	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &listing = directory_listings[key];
+	// the files of a listing carry its file secret, so only reads with the same file secret share it
+	auto &listing = directory_listings[file_secret.empty() ? key : key + '\0' + file_secret];
 	if (!listing) {
+		FileGlobInput input(FileGlobOptions::ALLOW_EMPTY);
+		input.file_secret = file_secret;
 		auto &fs = FileSystem::GetFileSystem(context);
-		listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
+		listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", input));
 	}
 	return listing;
 }
