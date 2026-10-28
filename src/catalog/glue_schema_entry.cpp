@@ -520,12 +520,17 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		case OnCreateConflict::ERROR_ON_CONFLICT:
 			throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view_name,
 			                       database_info.name);
-		default:
-			if (!existing->Cast<GlueView>().IsDuckDBView()) {
+		default: {
+			auto glue_view = dynamic_cast<GlueView *>(existing.get());
+			if (!glue_view) {
+				throw CatalogException("\"%s\" is not a Glue view and can not be replaced", view_name);
+			}
+			if (!glue_view->IsDuckDBView()) {
 				throw CatalogException(
 				    "Glue view \"%s\" was not written by DuckDB; replace it from the engine that wrote it", view_name);
 			}
 			break;
+		}
 		}
 	}
 	if (info.binding_mode == CreateViewBindingMode::SKIP_BINDING) {
@@ -953,9 +958,15 @@ void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		                       info.type == CatalogType::VIEW_ENTRY ? "View" : "Table", table_name, database_info.name);
 	}
 	CheckEntryType(existing, info.type, table_name, "drop");
-	if (existing->type == CatalogType::VIEW_ENTRY && !existing->Cast<GlueView>().IsDuckDBView()) {
-		throw CatalogException("Glue view \"%s\" was not written by DuckDB; drop it from the engine that wrote it",
-		                       table_name);
+	if (existing->type == CatalogType::VIEW_ENTRY) {
+		auto glue_view = dynamic_cast<GlueView *>(existing.get());
+		if (!glue_view) {
+			throw CatalogException("\"%s\" is not a Glue view and can not be dropped", table_name);
+		}
+		if (!glue_view->IsDuckDBView()) {
+			throw CatalogException("Glue view \"%s\" was not written by DuckDB; drop it from the engine that wrote it",
+			                       table_name);
+		}
 	}
 	GlueAPI::DeleteTable(context, glue_catalog, database_info.name, table_name);
 	tables.RemoveEntry(table_name);

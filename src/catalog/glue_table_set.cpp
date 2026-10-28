@@ -10,11 +10,15 @@
 
 #include "core/glue_types.hpp"
 #include "api/glue_api.hpp"
+#include "api/glue_api_util.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_table_loader.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 #include "duckdb/transaction/transaction.hpp"
+
+#include <aws/core/utils/json/JsonSerializer.h>
 
 namespace duckdb {
 
@@ -135,6 +139,11 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 }
 
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
+	auto governed_table_loader = GovernedGlueTableLoader::Find(context);
+	if (governed_table_loader) {
+		auto loaded = GetGovernedEntry(context, *governed_table_loader, lookup.GetEntryName());
+		return loaded ? &loaded->governed_entry.get() : nullptr;
+	}
 	auto &name = lookup.GetEntryName();
 	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
 	// is started before entry_lock is taken, the order RetireEntry takes the locks in
@@ -194,6 +203,45 @@ const GlueTableInfo &GlueTableSet::GetTableInfo(const CatalogEntry &entry) {
 		return entry.Cast<GlueView>().table_info;
 	}
 	return entry.Cast<GlueTable>().table_info;
+}
+
+static GlueLoadGovernedTableRequest GetLoadGovernedTableRequest(ClientContext &context, GlueCatalog &catalog,
+                                                                const string &database_name, const string &table_name) {
+	auto credentials = GetClientCredentials(context, catalog);
+	GlueLoadGovernedTableRequest request;
+	request.catalog_name = catalog.options.name;
+	request.catalog_id = catalog.options.catalog_id;
+	request.database_name = database_name;
+	request.table_name = table_name;
+	request.region = catalog.options.region;
+	request.key_id = ToStdString(credentials.GetAWSAccessKeyId());
+	request.secret = ToStdString(credentials.GetAWSSecretKey());
+	request.session_token = ToStdString(credentials.GetSessionToken());
+	return request;
+}
+
+optional_ptr<GovernedCatalogEntry> GlueTableSet::GetGovernedEntry(ClientContext &context,
+                                                                  GovernedGlueTableLoader &loader, const string &name) {
+	auto &transaction = GlueTransaction::Get(context, catalog);
+	auto &database_name = schema.database_info.name;
+	auto &governed_entries = transaction.governed_entries[database_name];
+	auto loaded = governed_entries.find(name);
+	if (loaded != governed_entries.end()) {
+		return &loaded->second;
+	}
+	auto request = GetLoadGovernedTableRequest(context, catalog, database_name, name);
+	unique_ptr<CatalogEntry> raw;
+	auto build_entry = [&](const string &table_json) -> CatalogEntry & {
+		Aws::Utils::Json::JsonValue json(Aws::String(table_json.c_str(), table_json.size()));
+		auto table = ToTableInfo(Aws::Glue::Model::Table(json), database_name);
+		raw = CreateEntry(table);
+		return *raw;
+	};
+	auto governed_entry = loader.Load(context, request, build_entry);
+	if (!governed_entry) {
+		return nullptr;
+	}
+	return &governed_entries.emplace(name, GovernedCatalogEntry {std::move(raw), *governed_entry}).first->second;
 }
 
 void GlueTableSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {

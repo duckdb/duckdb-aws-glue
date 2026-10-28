@@ -54,3 +54,10 @@ if(BUILD_UNITTESTS
    AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
   add_subdirectory(test/unittest)
 endif()
+
+# The table loader the governance tests under test/sql/governance load with
+# 'require glue_test_loader'. Test-only, so linked into unittest alone, the way
+# DuckDB links debug_fs
+if(BUILD_UNITTESTS AND NOT CLANG_TIDY)
+  add_subdirectory(test/extension/glue_test_loader)
+endif()
