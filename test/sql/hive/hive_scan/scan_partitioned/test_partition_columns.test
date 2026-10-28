@@ -1,0 +1,58 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_columns.test
+# description: Partitions whose columns another engine left different from their table's are read with the table's
+# group: [scan_partitioned]
+
+#              columns: parquet files by name, csv files by position
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# fixture_partition_columns (scripts/docker-compose.yml) is a parquet table (id int, v int); its partitions declare v
+# as the table's type, as a narrower type, under an older name, and after a column before it was dropped
+statement ok
+COPY (SELECT 1::INTEGER AS id, 10::INTEGER AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_columns/dt=same/data.parquet';
+
+statement ok
+COPY (SELECT 2::INTEGER AS id, 20::SMALLINT AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_columns/dt=smallint/data.parquet';
+
+statement ok
+COPY (SELECT 3::INTEGER AS id, 30::INTEGER AS old_v) TO 's3://glue-test/warehouse/fixture/fixture_partition_columns/dt=renamed/data.parquet';
+
+statement ok
+COPY (SELECT 4::INTEGER AS id, 'x' AS gone, 40::INTEGER AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_columns/dt=dropped/data.parquet';
+
+query T
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.fixture_partition_columns', {dt: 'smallint'});
+----
+[id int, v smallint]
+
+# a renamed column reads as NULL: the file has no column of the new name
+query TII
+SELECT dt, id, v FROM my_datalake.default.fixture_partition_columns ORDER BY id;
+----
+same	1	10
+smallint	2	20
+renamed	3	NULL
+dropped	4	40
+
+query T
+SELECT DISTINCT typeof(v) FROM my_datalake.default.fixture_partition_columns;
+----
+INTEGER
+
+# fixture_partition_columns_csv is a csv table (id int, s string) with a partition written before s was added
+query TIT
+SELECT dt, id, s FROM my_datalake.default.fixture_partition_columns_csv ORDER BY id;
+----
+same	1	a
+fewer	2	NULL
