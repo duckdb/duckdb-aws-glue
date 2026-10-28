@@ -6,6 +6,7 @@
 #include "core/glue_info.hpp"
 
 #include "duckdb/common/pair.hpp"
+#include "duckdb/common/set.hpp"
 #include "duckdb/common/enums/set_scope.hpp"
 
 #include <memory>
@@ -106,6 +107,14 @@ public:
 	//! Unregister a partition (the data files are left in place), returns false if it does not exist
 	static bool DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            const string &table_name, const vector<string> &values);
+	//! Unregister partitions (BatchDeletePartition, the data files are left in place). Partitions that do not exist
+	//! are skipped; throws for the first partition Glue refuses, after retrying the errors that may pass.
+	static void BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                  const string &table_name, const vector<vector<string>> &partitions);
+	//! Which of 'partitions' exist (BatchGetPartition)
+	static set<vector<string>> ExistingPartitions(ClientContext &context, GlueCatalog &catalog,
+	                                              const string &database_name, const string &table_name,
+	                                              const vector<vector<string>> &partitions);
 	//! Change the values of a partition, keeping its location and everything else (UpdatePartition). Throws a
 	//! CatalogException if the partition does not exist or a partition with the new values already exists.
 	static void RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
