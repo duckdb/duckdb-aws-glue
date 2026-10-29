@@ -339,7 +339,9 @@ ALTER TABLE my_datalake.default.orders PARTITION (dt = '2016-05-16', country = '
 ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
 ```
 
-Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
+Actions of one kind can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`):
+several adds, several drops, several table `SET LOCATION`s, or partition `SET LOCATION`s of different partitions. A
+statement that combines kinds or renames more than one partition is refused. The statement
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
 statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
 may be partially qualified; it is resolved like in a query.

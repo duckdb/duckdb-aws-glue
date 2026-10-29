@@ -252,7 +252,7 @@ static Aws::Glue::Model::TableInput ToViewTableInput(const GlueViewInfo &view) {
 }
 
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
-                            const GlueTableInfo &bound,
+                            const GlueTableInfo &bound_table,
                             const std::function<void(Aws::Glue::Model::TableInput &)> &modify);
 
 GlueCreateOutcome GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
@@ -276,14 +276,14 @@ GlueCreateOutcome GlueAPI::CreateView(ClientContext &context, GlueCatalog &catal
 }
 
 void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view,
-                         const GlueTableInfo &bound) {
+                         const GlueTableInfo &bound_table) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateView");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	// CREATE OR REPLACE keeps what is not the definition: the description, owner and parameters other engines or
 	// users set stay, the SQL, the columns and our own parameters are replaced
-	UpdateGlueTable(client, catalog, bound, [&](Aws::Glue::Model::TableInput &table_input) {
+	UpdateGlueTable(client, catalog, bound_table, [&](Aws::Glue::Model::TableInput &table_input) {
 		SetViewDefinition(table_input, view);
 		auto parameters = table_input.GetParameters();
 		SetViewParameters(parameters, view);
@@ -291,12 +291,12 @@ void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const Glu
 	});
 }
 
-//! UpdateTable replaces the whole definition: build the TableInput from the Table 'bound' was fetched as, let
+//! UpdateTable replaces the whole definition: build the TableInput from the Table 'bound_table' was fetched as, let
 //! 'modify' change it, and send it back
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
-                            const GlueTableInfo &bound,
+                            const GlueTableInfo &bound_table,
                             const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
-	auto &table = FetchedTable(bound);
+	auto &table = bound_table.GetFetchedTable();
 
 	Aws::Glue::Model::TableInput table_input;
 	table_input.SetName(table.GetName());
@@ -338,7 +338,7 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 
 	Aws::Glue::Model::UpdateTableRequest update_request;
 	SetCatalogId(update_request, catalog);
-	update_request.SetDatabaseName(bound.schema_name);
+	update_request.SetDatabaseName(bound_table.schema_name);
 	update_request.SetTableInput(table_input);
 	// Glue refuses the update if the table changed since it was fetched, instead of overwriting that change
 	if (table.VersionIdHasBeenSet()) {
@@ -349,43 +349,44 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 		if (update_outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::CONCURRENT_MODIFICATION) {
 			throw TransactionException("Glue table \"%s.%s\" was changed by another client since it was read, run "
 			                           "the statement again",
-			                           bound.schema_name, bound.name);
+			                           bound_table.schema_name, bound_table.name);
 		}
-		ThrowGlueError(update_outcome, StringUtil::Format("UpdateTable '%s.%s'", bound.schema_name, bound.name));
+		ThrowGlueError(update_outcome,
+		               StringUtil::Format("UpdateTable '%s.%s'", bound_table.schema_name, bound_table.name));
 	}
 }
 
-void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
                                  const vector<GlueColumn> &columns) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, bound, [&](Aws::Glue::Model::TableInput &table_input) {
+	UpdateGlueTable(client, catalog, bound_table, [&](Aws::Glue::Model::TableInput &table_input) {
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetColumns(ToAwsColumns(columns));
 		table_input.SetStorageDescriptor(storage_descriptor);
 	});
 }
 
-void GlueAPI::UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+void GlueAPI::UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
                                        const vector<GlueColumn> &partition_keys) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, bound, [&](Aws::Glue::Model::TableInput &table_input) {
+	UpdateGlueTable(client, catalog, bound_table, [&](Aws::Glue::Model::TableInput &table_input) {
 		table_input.SetPartitionKeys(ToAwsColumns(partition_keys));
 	});
 }
 
-void GlueAPI::UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+void GlueAPI::UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
                                      const string &description) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, bound, [&](Aws::Glue::Model::TableInput &table_input) {
+	UpdateGlueTable(client, catalog, bound_table, [&](Aws::Glue::Model::TableInput &table_input) {
 		// Glue has no explicit "unset Description"; set it to the given value (empty clears it on the next GetTable)
 		table_input.SetDescription(description);
 		// Mirror the description in Parameters.comment: the comment lives in both locations
@@ -399,26 +400,26 @@ void GlueAPI::UpdateTableDescription(ClientContext &context, GlueCatalog &catalo
 	});
 }
 
-void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
                                const string &location) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, bound, [&](Aws::Glue::Model::TableInput &table_input) {
+	UpdateGlueTable(client, catalog, bound_table, [&](Aws::Glue::Model::TableInput &table_input) {
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetLocation(location);
 		table_input.SetStorageDescriptor(storage_descriptor);
 	});
 }
 
-void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
                                     const vector<pair<string, string>> &set, const vector<string> &unset) {
 	// Reached only through ALTER TABLE, which the binder refuses on a read-only attach before it gets here.
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, bound, [&](Aws::Glue::Model::TableInput &table_input) {
+	UpdateGlueTable(client, catalog, bound_table, [&](Aws::Glue::Model::TableInput &table_input) {
 		auto parameters = table_input.GetParameters();
 		for (auto &key : unset) {
 			parameters.erase(key);

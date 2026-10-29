@@ -25,12 +25,6 @@ struct GlueFetchedPartition {
 	Aws::Glue::Model::Partition raw;
 };
 
-//! The Table a GlueTableInfo was projected from; an InternalException if it was not fetched from Glue
-const Aws::Glue::Model::Table &FetchedTable(const GlueTableInfo &table);
-//! The Partition a GluePartitionDetails was projected from; an InternalException if it was not fetched from Glue
-const Aws::Glue::Model::Partition &FetchedPartition(const GluePartitionDetails &partition, const string &database_name,
-                                                    const string &table_name);
-
 string ToStdString(const Aws::String &input);
 unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> &input);
 vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input);

@@ -11,6 +11,15 @@
 #include "core/readers/hive_csv_options.hpp"
 #include "core/readers/hive_json_options.hpp"
 
+namespace Aws {
+namespace Glue {
+namespace Model {
+class Table;
+class Partition;
+} // namespace Model
+} // namespace Glue
+} // namespace Aws
+
 namespace duckdb {
 
 //! A table / partition as the Glue SDK returned it, kept with the projection so that a write can be built from it
@@ -109,6 +118,8 @@ public:
 	bool IsView() const {
 		return table_type == GlueTableType::VIRTUAL_VIEW;
 	}
+	//! The Table this projection was made from; an InternalException if it was not fetched from Glue
+	const Aws::Glue::Model::Table &GetFetchedTable() const;
 	//! The table format and what it was derived from (GlueTableFormat::Detect)
 	GlueTableFormat GetFormat() const;
 	//! Whether 'other' is the same Glue version of the table; false when either version is unknown
@@ -200,6 +211,10 @@ struct GluePartitionDetails : public GluePartitionInfo {
 	unordered_map<string, string> parameters;
 	//! The Partition object this projection was made from
 	shared_ptr<const GlueFetchedPartition> fetched;
+
+public:
+	//! The Partition this projection was made from; an InternalException if it was not fetched from Glue
+	const Aws::Glue::Model::Partition &GetFetchedPartition(const string &database_name, const string &table_name) const;
 };
 
 } // namespace duckdb

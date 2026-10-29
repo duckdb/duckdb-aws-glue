@@ -29,7 +29,7 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 	CheckWritable(catalog, "UpdatePartition");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	auto &fetched = FetchedPartition(partition, database_name, table_name);
+	auto &fetched = partition.GetFetchedPartition(database_name, table_name);
 	auto storage_descriptor = fetched.GetStorageDescriptor();
 	storage_descriptor.SetLocation(location);
 	Aws::Glue::Model::PartitionInput input;
@@ -106,7 +106,7 @@ bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, cons
 	auto &table_name = table.name;
 
 	// A partition carries its own StorageDescriptor: the table's, with the partition's location
-	auto descriptor = FetchedTable(table).GetStorageDescriptor();
+	auto descriptor = table.GetFetchedTable().GetStorageDescriptor();
 	descriptor.SetLocation(partition.location);
 
 	Aws::Glue::Model::PartitionInput input;
@@ -161,7 +161,7 @@ string GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, co
 	CheckWritable(catalog, "UpdatePartition");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	auto &fetched = FetchedPartition(partition, database_name, table_name);
+	auto &fetched = partition.GetFetchedPartition(database_name, table_name);
 
 	Aws::Glue::Model::PartitionInput input;
 	input.SetValues(ToAwsValues(new_values));
@@ -374,7 +374,7 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 	auto &table_name = table.name;
 
 	// A partition carries its own StorageDescriptor: the table's, with the partition's location
-	auto table_descriptor = FetchedTable(table).GetStorageDescriptor();
+	auto table_descriptor = table.GetFetchedTable().GetStorageDescriptor();
 
 	// BatchCreatePartition accepts at most 100 partitions per call. The SDK retries a failed request, not the single
 	// partitions a successful response refuses, so those are sent again here when the error may pass.

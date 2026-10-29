@@ -89,20 +89,20 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &sc
 	return result;
 }
 
-const Aws::Glue::Model::Table &FetchedTable(const GlueTableInfo &table) {
-	if (!table.fetched) {
-		throw InternalException("Table '%s.%s' was not fetched from Glue", table.schema_name, table.name);
+const Aws::Glue::Model::Table &GlueTableInfo::GetFetchedTable() const {
+	if (!fetched) {
+		throw InternalException("Table '%s.%s' was not fetched from Glue", schema_name, name);
 	}
-	return table.fetched->raw;
+	return fetched->raw;
 }
 
-const Aws::Glue::Model::Partition &FetchedPartition(const GluePartitionDetails &partition, const string &database_name,
-                                                    const string &table_name) {
-	if (!partition.fetched) {
-		throw InternalException("Partition [%s] of '%s.%s' was not fetched from Glue",
-		                        PartitionValuesToString(partition.values), database_name, table_name);
+const Aws::Glue::Model::Partition &GluePartitionDetails::GetFetchedPartition(const string &database_name,
+                                                                             const string &table_name) const {
+	if (!fetched) {
+		throw InternalException("Partition [%s] of '%s.%s' was not fetched from Glue", PartitionValuesToString(values),
+		                        database_name, table_name);
 	}
-	return partition.fetched->raw;
+	return fetched->raw;
 }
 
 string PartitionValuesToString(const vector<string> &values) {

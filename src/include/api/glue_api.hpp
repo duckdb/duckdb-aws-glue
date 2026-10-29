@@ -68,31 +68,31 @@ public:
 	//! partition keys in 'table'
 	static GlueCreateOutcome CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);
 	static GlueCreateOutcome CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
-	//! Replace the definition of an existing view (CREATE OR REPLACE VIEW). 'bound' is the view as fetched; the
+	//! Replace the definition of an existing view (CREATE OR REPLACE VIEW). 'bound_table' is the view as fetched; the
 	//! definition is rewritten from the Table it carries, nothing is fetched again.
 	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view,
-	                       const GlueTableInfo &bound);
+	                       const GlueTableInfo &bound_table);
 	//! Replace the (data) columns of a table, keeping everything else of its Glue definition as is. Used for
-	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata. 'bound' is the table
-	//! as fetched; the definition is rewritten from the Table it carries, nothing is fetched again.
-	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata. 'bound_table' is the
+	//! table as fetched; the definition is rewritten from the Table it carries, nothing is fetched again.
+	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
 	                               const vector<GlueColumn> &columns);
 	//! Replace the partition keys of a table, keeping everything else of its Glue definition as is. Only the names,
 	//! types and comments of the partition keys are overwritten; the StorageDescriptor and registered partitions are
 	//! untouched. Used for COMMENT ON COLUMN on a partition key.
-	static void UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+	static void UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
 	                                     const vector<GlueColumn> &partition_keys);
 	//! Replace the description of a table (Glue's Table.Description), keeping everything else of its Glue definition
 	//! as is. An empty description clears it.
-	static void UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+	static void UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
 	                                   const string &description);
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
-	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
 	                             const string &location);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
 	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
-	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound_table,
 	                                  const vector<pair<string, string>> &set, const vector<string> &unset);
 	//! Point a partition at another location. 'partition' is the partition as fetched; it is rewritten from the
 	//! Partition it carries, nothing is fetched again.
