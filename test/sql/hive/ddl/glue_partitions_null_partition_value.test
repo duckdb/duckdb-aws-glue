@@ -53,7 +53,8 @@ SELECT location FROM glue_partitions('my_datalake.default.gp_nullpart');
 # ===========================================================================
 # The assertion that matters. A reader that did not special-case the sentinel would either surface the literal
 # '__HIVE_DEFAULT_PARTITION__' (impossible here, the column is INTEGER) or fail to cast it and NULL it for the wrong
-# reason -- which is indistinguishable from this, and is exactly why the uncastable case has its own test.
+# reason -- which is indistinguishable from this on the typed column; partition_values tells the two apart (end of
+# this file).
 
 query I
 SELECT k IS NULL FROM glue_partitions('my_datalake.default.gp_nullpart');
@@ -132,16 +133,22 @@ SELECT id FROM my_datalake.default.gp_nullpart WHERE k = 5;
 2
 
 # ===========================================================================
-# known limitation, asserted rather than left implicit
+# the raw values tell the NULL partition from a value the type cannot hold
 # ===========================================================================
-# On this surface a NULL partition value is indistinguishable from a partition value the column's type cannot hold:
-# both read NULL. See glue_partitions_uncastable_value.test. Recorded here so the ambiguity is visible from the
-# NULL side too, and so that adding a raw-value column later has a test to change rather than a silence to fill.
+# The typed column is NULL for both; partition_values holds the strings Glue stores, the sentinel for the NULL
+# partition. A partition whose value does not fit the key's type cannot be registered through this extension
+# (glue_add_partition casts first); test/unittest/glue_partitions_test.cpp registers one through the API and sees
+# partition_values = [abc] next to a NULL k.
+query III
+SELECT k, partition_values, partition_values[1] = '__HIVE_DEFAULT_PARTITION__' FROM glue_partitions('my_datalake.default.gp_nullpart') ORDER BY k NULLS FIRST;
+----
+NULL	[__HIVE_DEFAULT_PARTITION__]	true
+5	[5]	false
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.gp_nullpart') WHERE k IS NULL;
+SELECT typeof(partition_values) FROM glue_partitions('my_datalake.default.gp_nullpart') LIMIT 1;
 ----
-1
+VARCHAR[]
 
 statement ok
 DROP TABLE my_datalake.default.gp_nullpart;

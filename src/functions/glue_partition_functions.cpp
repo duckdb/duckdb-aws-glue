@@ -261,11 +261,16 @@ unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctio
 		return_types.push_back(type);
 	}
 	names.emplace_back("location");
-	// location_1 (or the next free number) when a partition key is called location; the keys keep their names
+	// the strings as Glue stores them: 'abc' on an INT key is NULL above but 'abc' here
+	names.emplace_back("partition_values");
+	// numbered like duplicate result columns (location_1) when a partition key has the name; the keys keep their names
 	auto deduplicated = names;
 	QueryResult::DeduplicateColumns(deduplicated);
-	names.back() = deduplicated.back();
+	for (idx_t i = table.partition_keys.size(); i < names.size(); i++) {
+		names[i] = deduplicated[i];
+	}
 	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
 	auto load_partitions = [&]() {
 		return make_shared_ptr<const vector<GluePartitionInfo>>(
 		    GlueAPI::GetPartitions(context, *result->target.catalog, table.schema_name, table.name));
@@ -294,6 +299,13 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 			output.data[k].Append(value);
 		}
 		output.data[keys.size()].Append(Value(partition.location));
+		auto &raw_column = output.data[keys.size() + 1];
+		vector<Value> raw_values;
+		raw_values.reserve(partition.values.size());
+		for (auto &str_value : partition.values) {
+			raw_values.emplace_back(str_value);
+		}
+		raw_column.Append(Value::LIST(ListType::GetChildType(raw_column.GetType()), std::move(raw_values)));
 		count++;
 	}
 }

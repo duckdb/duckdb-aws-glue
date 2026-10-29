@@ -317,7 +317,7 @@ query.
 
 | function | Hive statement |
 |----------|------------------|
-| `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` (numbered like a duplicate result column, `location_1`, when a partition key is called `location`) |
+| `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` and `partition_values`, the strings Glue stores (`__HIVE_DEFAULT_PARTITION__` for NULL); a typed column is NULL both for the NULL partition and for a value the key's type cannot hold, `partition_values` tells them apart. Both are numbered like a duplicate result column (`location_1`) when a partition key has their name |
 | `glue_get_partition_response('cat.db.t', {dt: '2016-05-14', country: 'IN'})` | `DESCRIBE FORMATTED ... PARTITION (...)`: the partition's location, SerDe, columns and parameters, and its complete Glue definition in `response` |
 | `CALL glue_add_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, location := 's3://...', if_not_exists := false)` | `ALTER TABLE ADD [IF NOT EXISTS] PARTITION (...) [LOCATION ...]`; without `location` the partition lives at `<table location>/dt=2016-05-14/country=IN` |
 | `CALL glue_drop_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, if_exists := false)` | `ALTER TABLE DROP [IF EXISTS] PARTITION (...)`; the data files stay in S3 |
@@ -343,6 +343,19 @@ Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
 statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
 may be partially qualified; it is resolved like in a query.
+
+`glue_partitions` lists every registered partition with a typed column per partition key, its `location` and
+`partition_values`, the strings Glue stores. A typed column is NULL for the NULL partition (Glue stores
+`__HIVE_DEFAULT_PARTITION__`) and for a value the key's type cannot hold, such as `abc` registered by another tool on
+an integer key; the latter fails every filtered read of the table, and `partition_values` is how to find it, one
+condition per partition key:
+
+```sql
+SELECT location, partition_values
+FROM glue_partitions('my_datalake.default.orders')
+WHERE (dt IS NULL) <> (partition_values[1] = '__HIVE_DEFAULT_PARTITION__')
+   OR (country IS NULL) <> (partition_values[2] = '__HIVE_DEFAULT_PARTITION__');
+```
 
 Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
 Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so
