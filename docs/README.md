@@ -76,8 +76,10 @@ Text tables are read the way their SerDe reads them:
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
   NULL string. Writes need a single-byte delimiter.
 - As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
-  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
-  their own. `hive_scan()` uses plain `read_csv` rules.
+  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe and SerDe
+  properties: a scan that reaches a partition whose own InputFormat, SerDe or SerDe properties read its files
+  differently (a csv partition of a parquet table, another delimiter) fails with an error naming the partition instead
+  of reading it as the table's format. `hive_scan()` uses plain `read_csv` rules.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 

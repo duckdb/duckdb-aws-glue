@@ -55,8 +55,7 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	if (!GetPartition(context, catalog, database_name, table_name, values, details)) {
 		return false;
 	}
-	result.values = std::move(details.values);
-	result.location = std::move(details.location);
+	result = std::move(static_cast<GluePartitionInfo &>(details));
 	return true;
 }
 
@@ -85,6 +84,7 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	}
 	auto &storage_descriptor = partition.GetStorageDescriptor();
 	result.location = ToStdString(storage_descriptor.GetLocation());
+	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
 	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 	result.columns = ToColumns(storage_descriptor.GetColumns());
@@ -200,8 +200,9 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 		SetCatalogId(request, catalog);
 		request.SetDatabaseName(database_name);
 		request.SetTableName(table_name);
-		// Only the values and the location of a partition are used. The column schema every partition repeats is a
-		// large part of the response, and fewer bytes per partition means more partitions per page.
+		// The values, the location and the storage format of a partition are used, not its column schema: the schema
+		// every partition repeats is a large part of the response, and fewer bytes per partition means more partitions
+		// per page.
 		request.SetExcludeColumnSchema(true);
 		request.SetMaxResults(GLUE_PARTITIONS_PAGE_SIZE);
 		if (total_segments > 1) {
@@ -223,7 +224,11 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 			for (auto &value : partition.GetValues()) {
 				info.values.push_back(ToStdString(value));
 			}
-			info.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+			auto &storage_descriptor = partition.GetStorageDescriptor();
+			info.location = ToStdString(storage_descriptor.GetLocation());
+			info.input_format = ToStdString(storage_descriptor.GetInputFormat());
+			info.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
+			info.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 			result.push_back(std::move(info));
 		}
 		next_token = partitions.GetNextToken();
