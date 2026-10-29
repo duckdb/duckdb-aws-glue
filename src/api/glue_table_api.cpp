@@ -4,6 +4,8 @@
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_context_state.hpp"
 
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/glue/model/CreateTableRequest.h>
@@ -448,6 +450,64 @@ void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const st
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
 	}
+}
+
+namespace {
+
+//! Registry key of GlueTableCleanup
+static constexpr const char *GLUE_TABLE_CLEANUP = "glue_table_cleanup";
+
+//! Drops a just-created table from Glue if its statement does not commit. TransactionCommit keeps the table,
+//! TransactionRollback (any failure, including partition registration in a parent operator) drops it. Both remove
+//! this cleanup from the registry, so it only acts on the statement that created it. The Glue client is captured up
+//! front because the hooks run after the transaction has ended, when GetClient cannot read the secret.
+class GlueTableCleanup : public ClientContextState {
+public:
+	GlueTableCleanup(std::shared_ptr<Aws::Glue::GlueClient> client_p, GlueCatalog &catalog_p, string database_name_p,
+	                 string table_name_p)
+	    : client(std::move(client_p)), catalog(catalog_p), database_name(std::move(database_name_p)),
+	      table_name(std::move(table_name_p)) {
+	}
+
+	void TransactionCommit(MetaTransaction &, ClientContext &context) override {
+		// Committed: keep the table. Remove this cleanup from the registry.
+		context.registered_state->Remove(GLUE_TABLE_CLEANUP);
+	}
+
+	void TransactionRollback(MetaTransaction &, ClientContext &context, optional_ptr<ErrorData>) override {
+		// Rolled back: drop the table it created, then remove this cleanup from the registry.
+		try {
+			Aws::Glue::Model::DeleteTableRequest request;
+			SetCatalogId(request, catalog);
+			request.SetDatabaseName(database_name);
+			request.SetName(table_name);
+			auto outcome = client->DeleteTable(request);
+			if (!outcome.IsSuccess() && !IsEntityNotFound(outcome)) {
+				ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
+			}
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			DUCKDB_LOG_WARNING(context, "Table cleanup: could not drop Glue table '%s.%s' after failure: %s",
+			                   database_name, table_name, error.RawMessage());
+		}
+		context.registered_state->Remove(GLUE_TABLE_CLEANUP);
+	}
+
+private:
+	std::shared_ptr<Aws::Glue::GlueClient> client;
+	GlueCatalog &catalog;
+	string database_name;
+	string table_name;
+};
+
+} // namespace
+
+void GlueAPI::RegisterTableCleanup(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                   const string &table_name) {
+	// Capture a Glue client for the cleanup to drop the table with when the statement fails.
+	auto client = GetClient(context, catalog);
+	context.registered_state->Insert(
+	    GLUE_TABLE_CLEANUP, make_shared_ptr<GlueTableCleanup>(std::move(client), catalog, database_name, table_name));
 }
 
 } // namespace duckdb
