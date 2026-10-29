@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "planning/hive_multi_file_reader.hpp"
@@ -54,6 +55,9 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 				                       "TABLE IF NOT EXISTS",
 				                       table_info.name);
 			}
+			// Drop the table if this statement does not commit
+			GlueAPI::RegisterTableCleanup(context, catalog.Cast<GlueCatalog>(), table_info.schema_name,
+			                              table_info.name);
 			table_created = true;
 		}
 	}
