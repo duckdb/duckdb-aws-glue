@@ -78,6 +78,12 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 	glue_tables.clear();
 	samples.clear();
 	directory_listings.clear();
+	scan_count = 0;
+}
+
+idx_t HiveQueryCache::NextScanId() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return ++scan_count;
 }
 
 shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {

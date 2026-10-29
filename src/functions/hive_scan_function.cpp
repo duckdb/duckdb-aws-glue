@@ -9,6 +9,7 @@
 #include "duckdb/main/database.hpp"
 
 #include "planning/hive_multi_file_reader.hpp"
+#include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
@@ -115,6 +116,7 @@ void ParsePartitions(HiveScanInfo &info, const Value &partitions) {
 unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindInput &input,
                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto scan_info = make_shared_ptr<HiveScanInfo>();
+	scan_info->scan_id = HiveQueryCache::Get(context)->NextScanId();
 	scan_info->root_location = input.inputs[0].GetValue<string>();
 	StringUtil::RTrim(scan_info->root_location, "/");
 	scan_info->table_name = scan_info->root_location;

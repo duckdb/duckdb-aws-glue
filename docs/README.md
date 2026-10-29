@@ -400,6 +400,31 @@ SELECT request.type, request.url, request.headers['x-amz-target'], response.stat
 
 `SET glue_network_calls_via_duckdb = false` switches back to the SDK's own HTTP client.
 
+`glue_requests()` lists the Glue requests in the `HTTP` log, retries and pages included: `operation` (the
+`X-Amz-Target`, e.g. `AWSGlue.GetPartitions`), `status`, `reason`, `start_time`, `duration_ms` and the
+`connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
+logged.
+
+The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
+`scan_id` that numbers the scans of a query from 1:
+
+- `partitions`: the table's `partitions` were loaded, taking `duration_ms`;
+- `plan`: of `partitions`, `partitions_read` are read, with `listings` S3 listings; `detail` is `root` when they are
+  listed in one listing of the table location, else `partitions`;
+- `listing`: one listing (`detail`: `table`, `root` or `partition`) of `partitions_read` partitions found `files`
+  data files in `duration_ms`;
+- `sample`: the cardinality sample listed `files` files and measured one in `duration_ms` (`files` is NULL when
+  nothing was listed: avro tables are not sampled). The scan reuses that listing, so a `listing` of the same
+  directory then takes next to no time. Every scan of the table in the query shares the one sample.
+
+```sql
+CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');
+-- ... run queries ...
+SELECT operation, count(*), sum(duration_ms) FROM glue_requests() GROUP BY operation;
+SELECT "table", scan_id, event, partitions, partitions_read, listings, files, duration_ms, detail
+FROM duckdb_logs_parsed('GlueScan');
+```
+
 ## Testing
 
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:
