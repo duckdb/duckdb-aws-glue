@@ -494,6 +494,12 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 
 	// no Glue call here: PREPARE and prepared statement rebinds plan more than once, the copy creates the table
 	auto &schema = op.schema.Cast<GlueSchemaEntry>();
+	if (op.info->Base().on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT &&
+	    GlueSchemaEntry::ParseCreateTableOptions(context, op.info->Base()).overwrite) {
+		// the files are deleted before the table is created, so a failed replace would leave neither
+		throw NotImplementedException("CREATE OR REPLACE TABLE ... AS with option 'overwrite' is not supported: its "
+		                              "files would be deleted before the table is replaced");
+	}
 	auto &catalog = schema.catalog.Cast<GlueCatalog>();
 	// Catalog::CreateTable would check this, but the copy creates the table through the schema entry
 	auto supported = catalog.SupportsCreateTable(*op.info);

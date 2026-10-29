@@ -29,6 +29,8 @@ struct GlueCreateTableOptions {
 	vector<string> bucket_columns;
 	int32_t number_of_buckets = -1;
 	vector<GlueColumn> sort_columns;
+	//! CREATE TABLE AS only: delete the data files already at the location (overwrite = true)
+	bool overwrite = false;
 	//! Every other option is stored as a table parameter in Glue
 	unordered_map<string, string> parameters;
 };

@@ -46,9 +46,11 @@ public:
 	                        GlueDatabaseInfo &result, string *raw_json = nullptr);
 	//! List all tables of a database; none when the database no longer exists or its tables may not be listed.
 	//! With 'single_page' only Glue's first page is fetched and 'has_more' reports whether the database holds
-	//! tables beyond it; a refused permission throws instead of returning none.
+	//! tables beyond it. With 'single_page' or 'throw_if_denied', a refused permission throws instead of returning
+	//! none.
 	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                       bool single_page = false, optional_ptr<bool> has_more = nullptr);
+	                                       bool single_page = false, optional_ptr<bool> has_more = nullptr,
+	                                       bool throw_if_denied = false);
 	//! Returns false if the database holds no tables (or views), otherwise true with the name of one of them
 	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            string &table_name);
