@@ -8,9 +8,8 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "functions/hive_reader_call.hpp"
+#include "glue_test_util.hpp"
 
-#include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <set>
@@ -18,14 +17,6 @@
 using namespace duckdb;
 
 namespace {
-
-unique_ptr<QueryResult> Run(Connection &con, const string &sql) {
-	auto result = con.Query(sql);
-	if (result->HasError()) {
-		FAIL(result->GetError() + "\n" + sql);
-	}
-	return result;
-}
 
 Value Scalar(Connection &con, const string &sql) {
 	auto result = Run(con, sql);
@@ -61,15 +52,6 @@ int64_t Differences(Connection &con, const string &a, const string &b) {
 	return differences;
 }
 
-string Env(const char *name, const string &fallback) {
-	auto value = std::getenv(name);
-	return value ? string(value) : fallback;
-}
-
-string Unique() {
-	return std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 1000000000);
-}
-
 struct TestDirectory {
 	explicit TestDirectory(const string &name)
 	    : path((std::filesystem::temp_directory_path() / ("unittest_glue_" + name + "_" + Unique())).string()) {
@@ -81,10 +63,6 @@ struct TestDirectory {
 	}
 	string path;
 };
-
-string Quote(const string &text) {
-	return Value(text).ToSQLString();
-}
 
 void Write(Connection &con, const string &select, const string &path, const string &options) {
 	if (!StringUtil::StartsWith(path, "s3://")) {
@@ -407,43 +385,6 @@ TEST_CASE("A scan that is not a Hive scan has no reader call", "[hive_reader_cal
 	REQUIRE(!HiveScanGetReaderCall(scan.Get()).has_value());
 }
 
-namespace {
-
-//! Only the local moto of make glue-fixture: the Glue table tests create and drop tables
-string LocalGlueEndpoint() {
-	auto endpoint = Env("GLUE_ENDPOINT", "");
-	if (StringUtil::StartsWith(endpoint, "http://localhost:") ||
-	    StringUtil::StartsWith(endpoint, "http://127.0.0.1:")) {
-		return endpoint;
-	}
-	return string();
-}
-
-//! Dropped when the test ends, also when it fails
-class GlueTables {
-public:
-	GlueTables(Connection &con_p, string prefix_p) : con(con_p), prefix(std::move(prefix_p)) {
-	}
-	~GlueTables() {
-		for (auto &name : names) {
-			con.Query("DROP TABLE IF EXISTS lake.default." + name);
-		}
-	}
-
-public:
-	string Add(const string &suffix) {
-		names.push_back(prefix + suffix);
-		return names.back();
-	}
-
-private:
-	Connection &con;
-	string prefix;
-	vector<string> names;
-};
-
-} // namespace
-
 TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_catalog]") {
 	auto endpoint = LocalGlueEndpoint();
 	if (endpoint.empty()) {
@@ -454,10 +395,7 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	Connection con(db);
 	auto unique = Unique();
 	auto location = Env("DEFAULT_S3_LOCATION", "s3://glue-test/warehouse") + "/unittest_glue/" + unique;
-	Run(con, "CREATE SECRET (TYPE S3, KEY_ID 'minio', SECRET 'minio123', REGION 'us-east-1', ENDPOINT " +
-	             Quote(Env("S3_ENDPOINT", "localhost:9100")) + ", USE_SSL false, URL_STYLE 'path')");
-	Run(con, "ATTACH " + Quote(Env("GLUE_CATALOG_ID", "123456789012")) + " AS lake (TYPE glue, ENDPOINT " +
-	             Quote(endpoint) + ", DEFAULT_LOCATION " + Quote(location) + ")");
+	AttachLocalGlue(con, endpoint, location);
 	GlueTables tables(con, "urc_" + unique + "_");
 	// parquet: a nested column, typed keys, a NULL partition and a partition outside the table location
 	auto parquet = tables.Add("parquet");

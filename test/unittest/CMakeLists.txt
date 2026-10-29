@@ -1,6 +1,6 @@
-# Catch tests of functions/hive_reader_call.hpp, which no SQL reaches; built
-# only on request (make test-cpp)
-add_executable(unittest_glue EXCLUDE_FROM_ALL main.cpp
+# Catch tests of functions/hive_reader_call.hpp, which no SQL reaches, and of
+# Glue states only the API reaches; built only on request (make test-cpp)
+add_executable(unittest_glue EXCLUDE_FROM_ALL main.cpp glue_partitions_test.cpp
                                               hive_reader_call_test.cpp)
 target_include_directories(unittest_glue
                            PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
