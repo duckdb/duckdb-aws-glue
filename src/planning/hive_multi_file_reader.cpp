@@ -19,6 +19,7 @@
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -754,6 +755,20 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["nullstr"] = Value(scan_info->csv_options.null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
+		{
+			// Hive reads a line of any length, read_csv none longer than max_line_size (2 MB by default)
+			idx_t max_line_size = HIVE_CSV_DEFAULT_MAX_LINE_SIZE;
+			Value setting;
+			if (context.TryGetCurrentSetting("hive_csv_max_line_size", setting) && !setting.IsNull()) {
+				max_line_size = UBigIntValue::Get(setting);
+			}
+			param_map["max_line_size"] = Value::BIGINT(NumericCast<int64_t>(max_line_size));
+			// a line has to fit in one of the reader's buffers, which hold 32 MB by default
+			auto default_buffer_size = CSVReaderOptions().buffer_size_option.GetValue();
+			if (max_line_size > default_buffer_size) {
+				param_map["buffer_size"] = Value::BIGINT(NumericCast<int64_t>(max_line_size));
+			}
+		}
 		if (scan_info->csv_options.serde_fields) {
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);

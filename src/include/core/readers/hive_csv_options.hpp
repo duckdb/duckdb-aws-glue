@@ -9,6 +9,10 @@ class Serializer;
 class Deserializer;
 struct LogicalType;
 
+//! The longest line a scan of a csv table reads by default (hive_csv_max_line_size): read_csv's buffers hold 32 MB
+//! and each thread reads a quarter of one, so a line up to this size changes neither
+static constexpr idx_t HIVE_CSV_DEFAULT_MAX_LINE_SIZE = 8000000;
+
 //! How a field read as text becomes a value of its column's type
 enum class HiveFieldConversion : uint8_t {
 	//! the text itself, for a string column

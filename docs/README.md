@@ -61,6 +61,9 @@ Text tables are read the way their SerDe reads them:
   details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
   (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
+- A line may be up to `hive_csv_max_line_size` bytes long (default 8000000; Hive has no limit); a longer line fails
+  the query. Up to the default the reader's buffers and how a file is split between threads are unchanged; a larger
+  limit makes each thread read at least that many bytes.
 - OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
   `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
   its column is NULL; either property enables both. Other JsonSerDe properties that change how the files are read
@@ -284,12 +287,12 @@ of a Glue table or of a `hive_scan()` call, using only core DuckDB types:
 
 - `HiveScanGetReaderCall(get)`: the reader (`read_parquet`, `read_csv`, `read_json` or `read_avro`), its named
   parameters and the scan's data columns as expressions over the reader's columns. The parameters are those the scan
-  bound the reader with (a text table's dialect, header lines and NULL spelling, `hive_csv_parallel` as the planning
-  session had it), plus the data columns as `schema` for Parquet and Avro and `hive_partitioning := false`. A column
-  of a SerDe text table is the field read as text and converted with `TRY_CAST` (`CAST` without
-  `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde boolean), of the
-  field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into `read_csv`,
-  which would convert the text itself and strictly.
+  bound the reader with (a text table's dialect, header lines and NULL spelling, `hive_csv_parallel` and
+  `hive_csv_max_line_size` as the planning session had them), plus the data columns as `schema` for Parquet and Avro and
+  `hive_partitioning := false`. A column of a SerDe text table is the field read as text and converted with `TRY_CAST`
+  (`CAST` without `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde
+  boolean), of the field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into
+  `read_csv`, which would convert the text itself and strictly.
 - `HiveScanGetFilePartitionValues(get, path)`: the values of the partition a listed file belongs to, as constants of
   the partition columns' types. The path is the file's as the scan listed it, or another spelling of it that DuckDB's
   `Path` normalizes to it (`s3://b//x` or `s3://b/./x` for `s3://b/x`).

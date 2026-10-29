@@ -8,6 +8,7 @@
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "catalog/glue_attach.hpp"
+#include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
 #include "api/glue_api.hpp"
@@ -109,6 +110,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "break inside a quoted field needs: the parallel scanner refuses such a field together "
 	                          "with the NULL padding of short rows. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
+	config.AddExtensionOption("hive_csv_max_line_size",
+	                          "The longest line, in bytes, a scan of a csv table reads; a longer line fails the query. "
+	                          "Hive reads a line of any length. Up to 8000000 the reader's buffers and how a file is "
+	                          "split between threads are unchanged; a larger limit makes each thread read at least "
+	                          "this many bytes. Default 8000000.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_CSV_DEFAULT_MAX_LINE_SIZE));
 
 	config.AddExtensionOption(
 	    "glue_debug_fail_partition_registration",
