@@ -1,0 +1,82 @@
+# name: test/sql/hive/dml/insert/insert_partition_schema_mismatch.test
+# description: INSERT refuses the existing partitions whose column types differ from the table's, as Hive does
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_schema_drift;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_schema_drift (id INTEGER, v INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift VALUES (1, 10, 'a');
+
+# the table's column changes, the existing partition keeps the schema it was created with
+statement ok
+ALTER TABLE my_datalake.default.ins_schema_drift ALTER COLUMN v TYPE BIGINT;
+
+query I
+SELECT [c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.ins_schema_drift', {dt: 'a'});
+----
+[int, int]
+
+# a bigint file in a partition that declares 'v' as int would not match what the partition declares
+statement error
+INSERT INTO my_datalake.default.ins_schema_drift VALUES (2, 20000000000, 'a');
+----
+partition [a] declares column 'v' as 'int', but the table declares column 'v' as 'bigint'
+
+# a new partition is created with the table's schema
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift VALUES (3, 30000000000, 'b');
+
+# nothing was written to 'a'
+query III
+SELECT id, v, dt FROM my_datalake.default.ins_schema_drift ORDER BY id;
+----
+1	10	a
+3	30000000000	b
+
+# a column added to the table: partition 'b' lacks it, but agrees on the columns it declares, so it is written to
+statement ok
+ALTER TABLE my_datalake.default.ins_schema_drift ADD COLUMN score DOUBLE;
+
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift (id, v, score, dt) VALUES (4, 40, 4.5, 'b');
+
+# 'a' still differs in 'v'
+statement error
+INSERT INTO my_datalake.default.ins_schema_drift (id, v, score, dt) VALUES (5, 50, 5.5, 'a');
+----
+partition [a] declares column 'v' as 'int', but the table declares column 'v' as 'bigint'
+
+# rows for other partitions in the same INSERT are refused with it
+statement error
+INSERT INTO my_datalake.default.ins_schema_drift (id, v, score, dt) VALUES (6, 60, 6.5, 'c'), (7, 70, 7.5, 'a');
+----
+partition [a] declares column 'v' as 'int', but the table declares column 'v' as 'bigint'
+
+query IIII
+SELECT id, v, score, dt FROM my_datalake.default.ins_schema_drift WHERE dt IN ('a', 'b') ORDER BY id;
+----
+1	10	NULL	a
+3	30000000000	NULL	b
+4	40	4.5	b
+
+statement ok
+DROP TABLE my_datalake.default.ins_schema_drift;

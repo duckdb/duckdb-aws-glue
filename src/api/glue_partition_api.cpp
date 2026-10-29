@@ -10,6 +10,7 @@
 #include "duckdb/parallel/task_executor.hpp"
 
 #include <chrono>
+#include <type_traits>
 #include <thread>
 
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
@@ -18,6 +19,7 @@
 #include <aws/glue/model/GetPartitionRequest.h>
 #include <aws/glue/model/GetPartitionsRequest.h>
 #include <aws/glue/model/GetTableRequest.h>
+#include <aws/glue/model/Partition.h>
 #include <aws/glue/model/Segment.h>
 #include <aws/glue/model/UpdatePartitionRequest.h>
 
@@ -239,20 +241,39 @@ static constexpr idx_t GLUE_DEFAULT_PARTITION_SEGMENTS = 8;
 //! The maximum Glue accepts for Segment::TotalSegments
 static constexpr idx_t GLUE_MAX_PARTITION_SEGMENTS = 10;
 
+//! The values and the location of a partition of a GetPartitions response
+static void ReadPartition(const Aws::Glue::Model::Partition &partition, GluePartitionInfo &result) {
+	for (auto &value : partition.GetValues()) {
+		result.values.push_back(ToStdString(value));
+	}
+	result.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+}
+
+//! A partition of a GetPartitions response with its storage descriptor and parameters
+static void ReadPartition(const Aws::Glue::Model::Partition &partition, GluePartitionDetails &result) {
+	ReadPartition(partition, static_cast<GluePartitionInfo &>(result));
+	auto &storage_descriptor = partition.GetStorageDescriptor();
+	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
+	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
+	result.columns = ToColumns(storage_descriptor.GetColumns());
+	result.parameters = ToStdMap(partition.GetParameters());
+}
+
 //! One chain of GetPartitions requests: pages through the partitions of segment 'segment_number' (the whole table
 //! when 'total_segments' is 1) and appends them to 'result'
+template <class PARTITION>
 static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
                                   const string &database_name, const string &table_name, int segment_number,
-                                  int total_segments, vector<GluePartitionInfo> &result) {
+                                  int total_segments, vector<PARTITION> &result) {
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetPartitionsRequest request;
 		SetCatalogId(request, catalog);
 		request.SetDatabaseName(database_name);
 		request.SetTableName(table_name);
-		// Only the values and the location of a partition are used. The column schema every partition repeats is a
-		// large part of the response, and fewer bytes per partition means more partitions per page.
-		request.SetExcludeColumnSchema(true);
+		// GluePartitionInfo holds only the values and the location of a partition. The column schema every partition
+		// repeats is a large part of the response, and fewer bytes per partition means more partitions per page.
+		request.SetExcludeColumnSchema(std::is_same<PARTITION, GluePartitionInfo>::value);
 		request.SetMaxResults(GLUE_PARTITIONS_PAGE_SIZE);
 		if (total_segments > 1) {
 			Aws::Glue::Model::Segment segment;
@@ -269,22 +290,20 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 		}
 		auto &partitions = outcome.GetResult();
 		for (auto &partition : partitions.GetPartitions()) {
-			GluePartitionInfo info;
-			for (auto &value : partition.GetValues()) {
-				info.values.push_back(ToStdString(value));
-			}
-			info.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+			PARTITION info;
+			ReadPartition(partition, info);
 			result.push_back(std::move(info));
 		}
 		next_token = partitions.GetNextToken();
 	} while (!next_token.empty());
 }
 
+template <class PARTITION>
 class FetchPartitionSegmentTask : public BaseExecutorTask {
 public:
 	FetchPartitionSegmentTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
 	                          const GlueCatalog &catalog, const string &database_name, const string &table_name,
-	                          int segment_number, int total_segments, vector<GluePartitionInfo> &result)
+	                          int segment_number, int total_segments, vector<PARTITION> &result)
 	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), database_name(database_name),
 	      table_name(table_name), segment_number(segment_number), total_segments(total_segments), result(result) {
 	}
@@ -307,7 +326,7 @@ private:
 	const string &table_name;
 	int segment_number;
 	int total_segments;
-	vector<GluePartitionInfo> &result;
+	vector<PARTITION> &result;
 };
 
 //! The number of GetPartitions requests to run at the same time: the setting when it is given, otherwise one request
@@ -328,27 +347,26 @@ static int GetPartitionSegmentCount(ClientContext &context, const GlueCatalog &c
 	return static_cast<int>(segments);
 }
 
-vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCatalog &catalog,
-                                                 const string &database_name, const string &table_name) {
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
+template <class PARTITION>
+static vector<PARTITION> FetchPartitions(ClientContext &context, GlueCatalog &catalog, Aws::Glue::GlueClient &client,
+                                         const string &database_name, const string &table_name) {
 	auto total_segments = GetPartitionSegmentCount(context, catalog);
-	vector<vector<GluePartitionInfo>> segment_results(NumericCast<idx_t>(total_segments));
+	vector<vector<PARTITION>> segment_results(NumericCast<idx_t>(total_segments));
 
 	if (total_segments == 1) {
-		FetchPartitionSegment(*client, catalog, database_name, table_name, 0, 1, segment_results[0]);
+		FetchPartitionSegment(client, catalog, database_name, table_name, 0, 1, segment_results[0]);
 	} else {
 		// the segments do not overlap, so their requests can run at the same time
 		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
 		for (int segment = 0; segment < total_segments; segment++) {
-			executor.ScheduleTask(make_uniq<FetchPartitionSegmentTask>(
-			    executor, context, *client, catalog, database_name, table_name, segment, total_segments,
+			executor.ScheduleTask(make_uniq<FetchPartitionSegmentTask<PARTITION>>(
+			    executor, context, client, catalog, database_name, table_name, segment, total_segments,
 			    segment_results[NumericCast<idx_t>(segment)]));
 		}
 		executor.WorkOnTasks();
 	}
 
-	vector<GluePartitionInfo> result;
+	vector<PARTITION> result;
 	unordered_set<string> seen;
 	for (auto &segment_result : segment_results) {
 		for (auto &partition : segment_result) {
@@ -361,6 +379,20 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 		}
 	}
 	return result;
+}
+
+vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCatalog &catalog,
+                                                 const string &database_name, const string &table_name) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	return FetchPartitions<GluePartitionInfo>(context, catalog, *client, database_name, table_name);
+}
+
+vector<GluePartitionDetails> GlueAPI::GetPartitionDetails(ClientContext &context, GlueCatalog &catalog,
+                                                          const string &database_name, const string &table_name) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	return FetchPartitions<GluePartitionDetails>(context, catalog, *client, database_name, table_name);
 }
 
 //! Errors of single partitions in a BatchCreatePartition response that may pass when the partition is sent again

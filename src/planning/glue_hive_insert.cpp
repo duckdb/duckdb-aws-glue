@@ -118,9 +118,44 @@ static string RelativePartitionPath(const string &table_location, const string &
 	return StringUtil::Join(components, "/");
 }
 
+//! A Glue type string compared as Hive compares column types: case and whitespace do not matter
+static string NormalizedHiveType(const string &type) {
+	string result;
+	for (auto c : type) {
+		if (!StringUtil::CharacterIsSpace(c)) {
+			result += StringUtil::CharacterToLower(c);
+		}
+	}
+	return result;
+}
+
+//! Compared as the DuckDB types they read as, so 'int' and 'integer' agree; unparsable types as strings
+static bool SameColumnType(const string &a, const string &b) {
+	try {
+		return GlueTypes::ToLogicalType(StringUtil::Lower(a)) == GlueTypes::ToLogicalType(StringUtil::Lower(b));
+	} catch (std::exception &) {
+		return NormalizedHiveType(a) == NormalizedHiveType(b);
+	}
+}
+
+//! The first data column an existing partition declares with another type than the table, matched by position as
+//! Hive matches them. A partition that declares fewer columns than the table (columns added to the table later) is
+//! written as the table is, so it only has to agree on the columns it declares.
+static optional_idx FindPartitionSchemaMismatch(const vector<GlueColumn> &table_columns,
+                                                const vector<GlueColumn> &partition_columns) {
+	for (idx_t i = 0; i < MinValue(table_columns.size(), partition_columns.size()); i++) {
+		if (!SameColumnType(table_columns[i].type, partition_columns[i].type)) {
+			return i;
+		}
+	}
+	return optional_idx();
+}
+
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
-//! at other locations, which are written to their own location. 'partition_directories' receives the directories of
-//! those partitions with their Glue values.
+//! at other locations, which are written to their own location, and the existing partitions whose column types differ
+//! from the table's, which a row may not be written to: files of the table's types in them would not match what the
+//! partition declares. 'partition_directories' receives the directories of the partitions at other locations with
+//! their Glue values.
 static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, optional_ptr<GlueTable> existing_table,
                                                   const GlueTableInfo &table_info, const string &location,
                                                   const vector<Identifier> &names, const vector<LogicalType> &types,
@@ -146,7 +181,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	}
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
-	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	// with the column schema of every partition, to refuse writing into a partition whose schema differs
+	auto partitions = GlueAPI::GetPartitionDetails(context, glue_catalog, table_info.schema_name, table_info.name);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
 	for (auto &partition : partitions) {
 		if (partition.values.size() != partition_columns.size()) {
@@ -169,8 +205,9 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			    ExpressionType::COMPARE_NOT_DISTINCT_FROM, make_uniq<BoundReferenceExpression>(types[column_index], i),
 			    make_uniq<BoundConstantExpression>(std::move(value))));
 		}
+		auto mismatch = FindPartitionSchemaMismatch(table_info.columns, partition.columns);
 		auto relative_path = RelativePartitionPath(location, partition.location);
-		if (relative_path == hive_directory) {
+		if (!mismatch.IsValid() && relative_path == hive_directory) {
 			continue;
 		}
 		BoundCaseCheck check;
@@ -181,7 +218,25 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			conjunction->GetChildrenMutable() = std::move(conditions);
 			check.when_expr = std::move(conjunction);
 		}
-		if (relative_path.empty()) {
+		if (mismatch.IsValid()) {
+			auto &table_column = table_info.columns[mismatch.GetIndex()];
+			auto &partition_column = partition.columns[mismatch.GetIndex()];
+			auto message = StringUtil::Format(
+			    "Writing to Hive table '%s.%s' failed: partition [%s] declares column '%s' as '%s', but the table "
+			    "declares column '%s' as '%s'. The table schema changed after the partition was created, and "
+			    "inserting into a partition whose column types differ from the table's is not supported",
+			    table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
+			    partition_column.name, partition_column.type, table_column.name, table_column.type);
+			ErrorData error;
+			vector<unique_ptr<Expression>> error_children;
+			error_children.push_back(make_uniq<BoundConstantExpression>(Value(message)));
+			auto raise = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("error"),
+			                                                std::move(error_children), error);
+			if (!raise) {
+				error.Throw();
+			}
+			check.then_expr = BoundCastExpression::AddCastToType(context, std::move(raise), LogicalType::VARCHAR);
+		} else if (relative_path.empty()) {
 			// the copy rejects a partition path that is not below its target
 			check.then_expr = make_uniq<BoundConstantExpression>(Value(partition.location));
 		} else {
