@@ -1,0 +1,98 @@
+# name: test/sql/hive/dml/formats/json/test_json_key_case.test
+# description: JSON keys match the columns ignoring case like the Hive and OpenX JsonSerDe, unless case.insensitive=FALSE
+# group: [json]
+
+require httpfs
+
+require json
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.json_key_case;
+
+# a Hive JsonSerDe table; Glue stores the column and struct field names in lower case, as Athena does
+statement ok
+CREATE TABLE my_datalake.default.json_key_case (userid INTEGER, url VARCHAR, "user" STRUCT(userid INTEGER))
+WITH (format = 'json');
+
+# data written by another engine with mixed-case keys
+statement ok
+COPY (SELECT * FROM (VALUES
+	('{"userid":1,"url":"a"}'),
+	('{"userId":2,"URL":"b","user":{"userId":20}}'),
+	('{"USERID":3,"Url":"c","USER":{"USERID":30}}')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/json_key_case/data.json'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER '\t');
+
+query III
+SELECT userid, url, "user" FROM my_datalake.default.json_key_case ORDER BY userid;
+----
+1	a	NULL
+2	b	{'userid': 20}
+3	c	{'userid': 30}
+
+query I
+SELECT "user".userid FROM my_datalake.default.json_key_case ORDER BY userid;
+----
+NULL
+20
+30
+
+# keys that differ only in case are duplicate keys
+statement ok
+COPY (SELECT * FROM (VALUES ('{"userid":4,"URL":"d","Url":"e"}')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/json_key_case/duplicate.json'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER '\t');
+
+statement error
+SELECT * FROM my_datalake.default.json_key_case;
+----
+has duplicate key "Url"
+
+statement ok
+DROP TABLE my_datalake.default.json_key_case;
+
+# the OpenX JsonSerDe with case.insensitive=FALSE matches keys exactly
+statement ok
+COPY (SELECT * FROM (VALUES ('{"userid":1}'), ('{"userId":2}'), ('{"USERID":3}')) t(line))
+TO '{DEFAULT_S3_LOCATION}/fixture/fixture_openx_json_case_sensitive/data.json'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER '\t');
+
+query I
+SELECT userid FROM my_datalake.default.fixture_openx_json_case_sensitive;
+----
+1
+NULL
+NULL
+
+# a serialized plan keeps the setting
+statement ok
+SET debug_verify_serializer = true;
+
+query I
+SELECT userid FROM my_datalake.default.fixture_openx_json_case_sensitive;
+----
+1
+NULL
+NULL
+
+statement ok
+SET debug_verify_serializer = false;
+
+# hive_scan reads json the Hive way
+query I
+SELECT userid FROM hive_scan('{DEFAULT_S3_LOCATION}/fixture/fixture_openx_json_case_sensitive', schema := {userid: 'INTEGER'}, format := 'json') ORDER BY userid;
+----
+1
+2
+3

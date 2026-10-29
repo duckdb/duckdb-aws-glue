@@ -47,7 +47,8 @@
 			"reason": "needs the OpenX JSON fixture tables that scripts/docker-compose.yml creates in the local Glue",
 			"paths": [
 				"test/sql/hive/dml/insert/insert_into_openx_json_table.test",
-				"test/sql/hive/dml/formats/json/test_json_serde_properties.test"
+				"test/sql/hive/dml/formats/json/test_json_serde_properties.test",
+				"test/sql/hive/dml/formats/json/test_json_key_case.test"
 			]
 		},
 		{

@@ -160,6 +160,5 @@ SELECT id, name FROM my_datalake.default.fixture_openx_json_unsupported;
 query I
 SELECT message FROM duckdb_logs WHERE message LIKE '%fixture_openx_json_unsupported%' ORDER BY message;
 ----
-Glue table 'default.fixture_openx_json_unsupported': SerDe property 'case.insensitive' is not applied when reading
 Glue table 'default.fixture_openx_json_unsupported': SerDe property 'dots.in.keys' is not applied when reading
 Glue table 'default.fixture_openx_json_unsupported': SerDe property 'mapping.name' is not applied when reading
