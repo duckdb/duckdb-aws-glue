@@ -91,6 +91,25 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 	return make_uniq<BoundCaseExpression>(std::move(refused), std::move(raise), std::move(text));
 }
 
+//! A text field with the escape character and the field delimiter escaped, as LazySimpleSerDe writes them
+static unique_ptr<Expression> EscapedTextField(ClientContext &context, unique_ptr<Expression> text,
+                                               const string &escape, const string &delimiter) {
+	FunctionBinder function_binder(context);
+	for (auto &special : {escape, delimiter}) {
+		vector<unique_ptr<Expression>> children;
+		children.push_back(std::move(text));
+		children.push_back(make_uniq<BoundConstantExpression>(Value(special)));
+		children.push_back(make_uniq<BoundConstantExpression>(Value(escape + special)));
+		ErrorData error;
+		text = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("replace"),
+		                                          std::move(children), error);
+		if (!text) {
+			error.Throw();
+		}
+	}
+	return text;
+}
+
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
@@ -298,18 +317,26 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		copy_options[Identifier("header")] = {Value::BOOLEAN(header_lines == 1)};
 		copy_options[Identifier("delimiter")] = {Value(delimiter)};
 		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
-		copy_options[Identifier("escape")] = {Value(table_info.GetEscapeCharacter())};
+		// LazySimpleSerDe's escape is written by EscapedTextField: DuckDB escapes only inside quotes
+		auto escape = quoted ? string() : table_info.GetEscapeCharacter();
+		copy_options[Identifier("escape")] = {Value(quoted ? table_info.GetEscapeCharacter() : string())};
 		copy_options[Identifier("nullstr")] = {Value(null_string)};
 		if (quoted) {
 			// as Hive writes OpenCSVSerde files, so that an escape character in a value is escaped too
 			copy_options[Identifier("force_quote")] = {Value("*")};
 		}
 		// every data column is written as text, refused where a field of the table's files can not hold it
-		string forbidden = quoted ? "\n\r" : "\n\r" + delimiter;
-		auto reason = quoted ? string("holds a line break")
-		                     : StringUtil::Format("holds the field delimiter '%s' or a line break, or is the table's "
-		                                          "NULL string '%s'",
-		                                          DelimiterToString(delimiter), null_string);
+		string forbidden = quoted || !escape.empty() ? "\n\r" : "\n\r" + delimiter;
+		string reason;
+		if (quoted) {
+			reason = "holds a line break";
+		} else if (!escape.empty()) {
+			reason = StringUtil::Format("holds a line break or is the table's NULL string '%s'", null_string);
+		} else {
+			reason = StringUtil::Format("holds the field delimiter '%s' or a line break, or is the table's NULL string "
+			                            "'%s'",
+			                            DelimiterToString(delimiter), null_string);
+		}
 		vector<unique_ptr<Expression>> select_list;
 		vector<LogicalType> projected_types;
 		for (idx_t i = 0; i < names.size(); i++) {
@@ -322,6 +349,9 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 				// only unquoted fields can not tell the NULL string from NULL
 				column =
 				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
+				if (!escape.empty()) {
+					column = EscapedTextField(context, std::move(column), escape, delimiter);
+				}
 				copy_types[i] = LogicalType::VARCHAR;
 			}
 			projected_types.push_back(column->GetReturnType());

@@ -463,17 +463,29 @@ statement ok
 DROP TABLE my_datalake.default.formats_csv_bad;
 
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'escape.delim' = '\');
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'escape.delim' = ',');
 
 statement error
 SELECT * FROM my_datalake.default.formats_csv_bad;
 ----
-has 'escape.delim' set, which DuckDB can not read or write
+has its field delimiter as 'escape.delim', which DuckDB can not read or write
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'escape.delim' = '\',
+    'serialization.escape.crlf' = 'true');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+has 'serialization.escape.crlf' set, which DuckDB can not read or write
 
 statement error
 INSERT INTO my_datalake.default.formats_csv_bad VALUES (1);
 ----
-has 'escape.delim' set, which DuckDB can not read or write
+has 'serialization.escape.crlf' set, which DuckDB can not read or write
 
 statement ok
 DROP TABLE my_datalake.default.formats_csv_bad;
