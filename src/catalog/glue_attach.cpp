@@ -103,6 +103,7 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 			                                    catalog->options.path);
 		}
 	}
+	catalog->AttachIcebergCatalog(context);
 	return std::move(catalog);
 }
 

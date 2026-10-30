@@ -1,0 +1,98 @@
+# name: test/sql/iceberg/types.test
+# description: column types of Iceberg tables in Glue: what is read back, and what the Glue listing reports
+# group: [iceberg]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_types;
+
+statement ok
+CREATE TABLE my_datalake.default.ice_types (
+    b BOOLEAN, i INTEGER, l BIGINT, f FLOAT, d DOUBLE, dec DECIMAL(10,2), dt DATE, ts TIMESTAMP, tstz TIMESTAMPTZ,
+    t TIME, s VARCHAR, bl BLOB, u UUID, li INTEGER[], st STRUCT(a INTEGER, b VARCHAR), m MAP(VARCHAR, INTEGER)
+) WITH (table_type = 'iceberg');
+
+statement ok
+INSERT INTO my_datalake.default.ice_types VALUES
+    (true, 1, 2, 1.5, 2.5, 3.25, '2024-01-02', '2024-01-02 03:04:05', '2024-01-02 03:04:05+00', '03:04:05', 'str',
+     '\xAA'::BLOB, '00000000-0000-0000-0000-000000000001', [1, 2], {'a': 1, 'b': 'x'}, MAP {'k': 1}),
+    (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+
+query IIIIIIIIIIIIIIII
+SELECT * FROM my_datalake.default.ice_types ORDER BY i NULLS LAST;
+----
+true	1	2	1.5	2.5	3.25	2024-01-02	2024-01-02 03:04:05	2024-01-02 03:04:05+00	03:04:05	str	\xAA	00000000-0000-0000-0000-000000000001	[1, 2]	{'a': 1, 'b': x}	{k=1}
+NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+# DESCRIBE and scans use the schema of the Iceberg catalog
+query II
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.ice_types);
+----
+b	BOOLEAN
+i	INTEGER
+l	BIGINT
+f	FLOAT
+d	DOUBLE
+dec	DECIMAL(10,2)
+dt	DATE
+ts	TIMESTAMP
+tstz	TIMESTAMP WITH TIME ZONE
+t	TIME
+s	VARCHAR
+bl	BLOB
+u	UUID
+li	INTEGER[]
+st	STRUCT(a INTEGER, b VARCHAR)
+m	MAP(VARCHAR, INTEGER)
+
+# the listing uses the columns Glue stores for the table, in Glue's types: TIMESTAMPTZ is a timestamp, TIME and
+# UUID are strings
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'ice_types' ORDER BY column_index;
+----
+b	BOOLEAN
+i	INTEGER
+l	BIGINT
+f	FLOAT
+d	DOUBLE
+dec	DECIMAL(10,2)
+dt	DATE
+ts	TIMESTAMP
+tstz	TIMESTAMP
+t	VARCHAR
+s	VARCHAR
+bl	BLOB
+u	VARCHAR
+li	INTEGER[]
+st	STRUCT(a INTEGER, b VARCHAR)
+m	MAP(VARCHAR, INTEGER)
+
+query II
+SELECT response.StorageDescriptor.Columns[12].Type::VARCHAR, response.StorageDescriptor.Columns[14].Type::VARCHAR
+FROM glue_get_table_response('my_datalake.default.ice_types');
+----
+varbyte	list<int>
+
+statement ok
+DROP TABLE my_datalake.default.ice_types;

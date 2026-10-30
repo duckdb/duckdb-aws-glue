@@ -1,0 +1,75 @@
+# name: test/sql/iceberg/default_table_type.test
+# description: SET glue_default_table_type = 'iceberg' makes CREATE TABLE and CTAS without 'table_type' create Iceberg
+# group: [iceberg]
+
+#              tables; an explicit table_type = 'hive' still creates a Hive table
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_default_create;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_default_ctas;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_default_hive;
+
+statement ok
+SET glue_default_table_type = 'iceberg';
+
+statement ok
+CREATE TABLE my_datalake.default.ice_default_create (id INTEGER, name VARCHAR);
+
+statement ok
+CREATE TABLE my_datalake.default.ice_default_ctas AS SELECT 1 AS id, 'a' AS name;
+
+statement ok
+CREATE TABLE my_datalake.default.ice_default_hive (id INTEGER) WITH (table_type = 'hive');
+
+# Hive-only options are refused for the default table type too
+statement error
+CREATE TABLE my_datalake.default.ice_default_bad (id INTEGER) WITH (format = 'csv');
+----
+CREATE TABLE option 'format' is only supported for Hive tables
+
+query II
+SELECT table_name, tags['table_type'] FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND table_name LIKE 'ice_default_%' ORDER BY table_name;
+----
+ice_default_create	ICEBERG
+ice_default_ctas	ICEBERG
+ice_default_hive	HIVE
+
+query II
+SELECT id, name FROM my_datalake.default.ice_default_ctas;
+----
+1	a
+
+statement ok
+DROP TABLE my_datalake.default.ice_default_create;
+
+statement ok
+DROP TABLE my_datalake.default.ice_default_ctas;
+
+statement ok
+DROP TABLE my_datalake.default.ice_default_hive;

@@ -19,6 +19,12 @@ unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> 
 vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input) {
 	vector<GlueColumn> result;
 	for (auto &column : input) {
+		// Glue keeps the columns of earlier schemas of an Iceberg table, marked as no longer current
+		auto &parameters = column.GetParameters();
+		auto current = parameters.find("iceberg.field.current");
+		if (current != parameters.end() && current->second == "false") {
+			continue;
+		}
 		GlueColumn glue_column;
 		glue_column.name = ToStdString(column.GetName());
 		glue_column.type = ToStdString(column.GetType());

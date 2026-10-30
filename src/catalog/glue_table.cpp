@@ -229,6 +229,11 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 			                              table_info.schema_name, table_info.name);
 		}
 		return GetHiveScanFunction(context, bind_data, table_info);
+	case GlueFormat::ICEBERG:
+		// only reached when loading it from the Iceberg catalog failed at lookup: loading it again reports the error
+		catalog.Cast<GlueCatalog>().GetIcebergTable(context, table_info.schema_name, table_info.name);
+		throw CatalogException("Iceberg table '%s.%s' could not be loaded when the query was bound, run it again",
+		                       table_info.schema_name, table_info.name);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
 		                              "glue_get_table_response() to inspect its definition",

@@ -17,6 +17,7 @@
 #include <aws/core/Aws.h>
 #include <mutex>
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 
 namespace duckdb {
@@ -67,6 +68,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "not write one: INSERT into it and CREATE TABLE ... AS with these options are refused. "
 	                          "Default false.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	config.AddExtensionOption("glue_default_table_type",
+	                          "The table type CREATE TABLE and CREATE TABLE ... AS create in a Glue catalog when the "
+	                          "statement has no 'table_type' option: 'hive' (default) or 'iceberg'.",
+	                          LogicalType::VARCHAR, Value("hive"), GlueSchemaEntry::CheckDefaultTableType);
 	config.AddExtensionOption(
 	    "experimental_glue_view_enable_external_catalogs",
 	    "Allow Glue views over tables of other kinds of catalogs, stored by the catalog's type and "

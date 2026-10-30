@@ -1,0 +1,141 @@
+# name: test/sql/combined_table_types/listing.test
+# description: Hive tables, Iceberg tables and views are listed together under the Glue catalog
+# group: [combined_table_types]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_list_hive;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_list_iceberg;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_list_view;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.mix_list_schema CASCADE;
+
+statement ok
+CREATE TABLE my_datalake.default.mix_list_hive (id INTEGER, part VARCHAR) PARTITIONED BY (part);
+
+statement ok
+CREATE TABLE my_datalake.default.mix_list_iceberg (id INTEGER, name VARCHAR) WITH (table_type = 'iceberg');
+
+statement ok
+CREATE VIEW my_datalake.default.mix_list_view AS
+SELECT h.id FROM my_datalake.default.mix_list_hive h JOIN my_datalake.default.mix_list_iceberg i USING (id);
+
+query III
+SELECT name, database, schema FROM (SHOW ALL TABLES) WHERE name LIKE 'mix_list_%' ORDER BY name;
+----
+mix_list_hive	my_datalake	default
+mix_list_iceberg	my_datalake	default
+mix_list_view	my_datalake	default
+
+query II
+SELECT table_name, tags['table_type'] FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND table_name LIKE 'mix_list_%' ORDER BY table_name;
+----
+mix_list_hive	HIVE
+mix_list_iceberg	ICEBERG
+
+query I
+SELECT view_name FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'mix_list_%';
+----
+mix_list_view
+
+query III
+SELECT table_name, table_type, table_catalog FROM information_schema.tables
+WHERE table_name LIKE 'mix_list_%' ORDER BY table_name;
+----
+mix_list_hive	BASE TABLE	my_datalake
+mix_list_iceberg	BASE TABLE	my_datalake
+mix_list_view	VIEW	my_datalake
+
+query III
+SELECT table_name, column_name, data_type FROM information_schema.columns
+WHERE table_catalog = 'my_datalake' AND table_name IN ('mix_list_hive', 'mix_list_iceberg')
+ORDER BY table_name, ordinal_position;
+----
+mix_list_hive	id	INTEGER
+mix_list_hive	part	VARCHAR
+mix_list_iceberg	id	INTEGER
+mix_list_iceberg	name	VARCHAR
+
+query I
+SELECT string_agg(name, ',' ORDER BY name) FROM (SHOW TABLES FROM my_datalake.default) WHERE name LIKE 'mix_list_%';
+----
+mix_list_hive,mix_list_iceberg,mix_list_view
+
+# both kinds of tables in a database created by DuckDB
+statement ok
+CREATE SCHEMA my_datalake.mix_list_schema;
+
+statement ok
+CREATE TABLE my_datalake.mix_list_schema.hive_t (id INTEGER);
+
+statement ok
+CREATE TABLE my_datalake.mix_list_schema.iceberg_t (id INTEGER) WITH (table_type = 'iceberg');
+
+statement ok
+INSERT INTO my_datalake.mix_list_schema.iceberg_t SELECT * FROM range(3);
+
+query II
+SELECT table_name, tags['table_type'] FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND schema_name = 'mix_list_schema' ORDER BY table_name;
+----
+hive_t	HIVE
+iceberg_t	ICEBERG
+
+query I
+SELECT count(*) FROM my_datalake.mix_list_schema.iceberg_t;
+----
+3
+
+statement error
+DROP SCHEMA my_datalake.mix_list_schema;
+----
+<REGEX>:.*mix_list_schema.*
+
+statement ok
+DROP TABLE my_datalake.mix_list_schema.hive_t;
+
+statement ok
+DROP TABLE my_datalake.mix_list_schema.iceberg_t;
+
+statement ok
+DROP SCHEMA my_datalake.mix_list_schema;
+
+statement ok
+DROP VIEW my_datalake.default.mix_list_view;
+
+statement ok
+DROP TABLE my_datalake.default.mix_list_hive;
+
+statement ok
+DROP TABLE my_datalake.default.mix_list_iceberg;
+
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE name LIKE 'mix_list_%';
+----
+0

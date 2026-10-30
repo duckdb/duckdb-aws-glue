@@ -1,0 +1,153 @@
+# name: test/sql/combined_table_types/transactions.test
+# description: explicit transactions can read Hive tables, but can not use Iceberg tables at all
+# group: [combined_table_types]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_txn_hive;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_txn_iceberg;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_txn_iceberg_new;
+
+statement ok
+CREATE TABLE my_datalake.default.mix_txn_hive (id INTEGER);
+
+statement ok
+CREATE TABLE my_datalake.default.mix_txn_iceberg (id INTEGER) WITH (table_type = 'iceberg');
+
+statement ok
+INSERT INTO my_datalake.default.mix_txn_iceberg VALUES (1);
+
+statement ok
+INSERT INTO my_datalake.default.mix_txn_hive VALUES (1);
+
+# a transaction can read a Hive table, but not an Iceberg table
+statement ok
+BEGIN;
+
+query I
+SELECT * FROM my_datalake.default.mix_txn_hive;
+----
+1
+
+statement error
+SELECT * FROM my_datalake.default.mix_txn_hive JOIN my_datalake.default.mix_txn_iceberg USING (id);
+----
+<REGEX>:.*TransactionContext Error.*Transaction support is not provided for Glue catalogs.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+INSERT INTO my_datalake.default.mix_txn_iceberg SELECT * FROM my_datalake.default.mix_txn_hive;
+----
+<REGEX>:.*TransactionContext Error.*Transaction support is not provided for Glue catalogs.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+INSERT INTO my_datalake.default.mix_txn_hive SELECT * FROM my_datalake.default.mix_txn_iceberg;
+----
+<REGEX>:.*TransactionContext Error.*Transaction support is not provided for Glue catalogs.*
+
+statement ok
+ROLLBACK;
+
+# creating an Iceberg table in a transaction is refused before anything is created
+statement ok
+BEGIN;
+
+statement error
+CREATE TABLE my_datalake.default.mix_txn_iceberg_new (id INTEGER) WITH (table_type = 'iceberg');
+----
+<REGEX>:.*TransactionContext Error.*Transaction support is not provided for Glue catalogs.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CREATE TABLE my_datalake.default.mix_txn_iceberg_new WITH (table_type = 'iceberg') AS SELECT 1 AS id;
+----
+<REGEX>:.*TransactionContext Error.*Transaction support is not provided for Glue catalogs.*
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'mix_txn_iceberg_new';
+----
+0
+
+statement ok
+BEGIN;
+
+statement error
+DROP TABLE my_datalake.default.mix_txn_iceberg;
+----
+<REGEX>:.*TransactionContext Error.*Transaction support is not provided for Glue catalogs.*
+
+statement ok
+ROLLBACK;
+
+# the listing in a transaction still shows both kinds of tables
+statement ok
+BEGIN;
+
+query I
+SELECT string_agg(table_name, ',' ORDER BY table_name) FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND table_name LIKE 'mix_txn_%';
+----
+mix_txn_hive,mix_txn_iceberg
+
+statement ok
+COMMIT;
+
+# auto-commit statements use both
+query I
+INSERT INTO my_datalake.default.mix_txn_iceberg SELECT id + 1 FROM my_datalake.default.mix_txn_iceberg;
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.mix_txn_iceberg;
+----
+2
+
+statement ok
+DROP TABLE my_datalake.default.mix_txn_hive;
+
+statement ok
+DROP TABLE my_datalake.default.mix_txn_iceberg;

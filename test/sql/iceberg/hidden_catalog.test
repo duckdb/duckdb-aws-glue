@@ -1,0 +1,235 @@
+# name: test/sql/iceberg/hidden_catalog.test
+# description: Iceberg tables are served by a hidden Iceberg catalog that is attached with the Glue catalog and never listed
+# group: [iceberg]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_hidden;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_hidden_hive;
+
+statement ok
+CREATE TABLE my_datalake.default.ice_hidden (id INTEGER) WITH (table_type = 'iceberg');
+
+statement ok
+CREATE TABLE my_datalake.default.ice_hidden_hive (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.ice_hidden VALUES (1);
+
+# none of the listings show the hidden catalog
+query I
+SELECT count(*) FROM duckdb_databases() WHERE database_name LIKE '%iceberg%';
+----
+0
+
+query I
+SELECT DISTINCT database FROM (SHOW ALL TABLES) WHERE name LIKE 'ice_hidden%';
+----
+my_datalake
+
+query II
+SELECT name, database FROM (SHOW ALL TABLES) WHERE name LIKE 'ice_hidden%' ORDER BY name;
+----
+ice_hidden	my_datalake
+ice_hidden_hive	my_datalake
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name NOT IN ('my_datalake', 'memory', 'system', 'temp');
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name LIKE '%iceberg%';
+----
+0
+
+query I
+SELECT DISTINCT table_catalog FROM information_schema.tables WHERE table_name LIKE 'ice_hidden%';
+----
+my_datalake
+
+# the table is reported in the catalog it was looked up in
+query I
+SELECT count(*) FROM (SHOW TABLES FROM my_datalake.default) WHERE name = 'ice_hidden';
+----
+1
+
+#---------------------------------------------------------------------------
+# DETACH detaches the hidden catalog as well, and a new ATTACH works
+#---------------------------------------------------------------------------
+statement ok
+DETACH my_datalake;
+
+query I
+SELECT count(*) FROM duckdb_databases() WHERE database_name NOT IN ('memory', 'system', 'temp');
+----
+0
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT * FROM my_datalake.default.ice_hidden;
+----
+1
+
+# two Glue catalogs each have their own hidden catalog
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_other_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query II
+SELECT a.id, b.id FROM my_datalake.default.ice_hidden a, my_other_datalake.default.ice_hidden b;
+----
+1	1
+
+statement ok
+DETACH my_other_datalake;
+
+query I
+SELECT * FROM my_datalake.default.ice_hidden;
+----
+1
+
+#---------------------------------------------------------------------------
+# ATTACH OR REPLACE replaces the hidden catalog with the Glue catalog
+#---------------------------------------------------------------------------
+statement ok
+attach or replace '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT * FROM my_datalake.default.ice_hidden;
+----
+1
+
+# a failed ATTACH leaves no hidden catalog behind
+statement error
+attach '{GLUE_CATALOG_ID}' as my_failed_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA 'ice_hidden_missing');
+----
+<REGEX>:.*default_schema 'ice_hidden_missing' does not exist.*
+
+query I
+SELECT count(*) FROM duckdb_databases() WHERE database_name NOT IN ('my_datalake', 'memory', 'system', 'temp');
+----
+0
+
+#---------------------------------------------------------------------------
+# a statement that fails after an Iceberg lookup does not break later lookups
+#---------------------------------------------------------------------------
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement error
+CREATE TABLE my_datalake.default.ice_hidden (id INTEGER) WITH (table_type = 'iceberg');
+----
+<REGEX>:.*Catalog Error.*Table with name "ice_hidden" already exists.*
+
+query I
+SELECT * FROM my_datalake.default.ice_hidden;
+----
+1
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement error
+SELECT error('boom') FROM my_datalake.default.ice_hidden;
+----
+<REGEX>:.*boom.*
+
+query I
+SELECT * FROM my_datalake.default.ice_hidden;
+----
+1
+
+#---------------------------------------------------------------------------
+# a read-only Glue catalog has a read-only Iceberg catalog
+#---------------------------------------------------------------------------
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    READ_ONLY
+);
+
+query I
+SELECT * FROM my_datalake.default.ice_hidden;
+----
+1
+
+statement error
+INSERT INTO my_datalake.default.ice_hidden VALUES (2);
+----
+<REGEX>:.*read-only.*
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT count(*) FROM my_datalake.default.ice_hidden;
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.ice_hidden;
+
+statement ok
+DROP TABLE my_datalake.default.ice_hidden_hive;

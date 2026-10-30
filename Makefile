@@ -37,6 +37,14 @@ test-local:
 CLOUD_TEST_CONFIG ?= test/configs/cloud_glue.json
 test-cloud:
 	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-config $(CLOUD_TEST_CONFIG) 'test/sql/*'
+# duckdb-iceberg's catalog_agnostic tests against the Iceberg tables of a live Glue catalog (see
+# test/configs/cloud_glue_iceberg.json). They run from the iceberg sources the build fetched: unittest switches to
+# --test-dir (default: this repo) and finds tests and their includes there. Slow tests are left out, as duckdb-iceberg's
+# cloud runs do
+ICEBERG_SOURCE_DIR ?= build/$(TEST_BUILD)/_deps/iceberg_extension_fc-src
+CLOUD_ICEBERG_TEST_CONFIG ?= test/configs/cloud_glue_iceberg.json
+test-cloud-iceberg:
+	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-dir $(abspath $(ICEBERG_SOURCE_DIR)) --test-config $(abspath $(CLOUD_ICEBERG_TEST_CONFIG)) 'test/sql/local/catalog_test_config_setup/catalog_agnostic/*' 'exclude:*.test_slow'
 # The C++ tests of test/unittest, whose binary a normal build skips. Its Glue table tests only run against a local
 # GLUE_ENDPOINT, so they need `make glue-fixture` first
 test-cpp:

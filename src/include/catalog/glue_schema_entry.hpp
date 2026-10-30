@@ -3,12 +3,14 @@
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
+#include "duckdb/common/enums/set_scope.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
 
 #include "core/glue_info.hpp"
 #include "catalog/glue_table_set.hpp"
 
 namespace duckdb {
+struct BoundCreateTableInfo;
 struct CreateTableInfo;
 struct SetColumnCommentInfo;
 struct SetCommentInfo;
@@ -74,6 +76,16 @@ public:
 	static GlueCreateTableOptions ParseCreateTableOptions(ClientContext &context, const CreateTableInfo &create_info);
 	//! BucketColumns, NumberOfBuckets or SortColumns (case-insensitive)
 	static bool IsBucketingOption(const string &key);
+	//! The 'table_type' option of CREATE TABLE, else the glue_default_table_type setting: HIVE or ICEBERG
+	static GlueFormat GetCreateTableFormat(ClientContext &context, const CreateTableInfo &create_info);
+	//! 'hive' or 'iceberg' (case-insensitive); 'source' names the option or setting in the error
+	static GlueFormat ParseTableType(const string &value, const string &source);
+	static void CheckDefaultTableType(ClientContext &context, SetScope scope, Value &parameter);
+	//! The existing entry when CREATE TABLE IF NOT EXISTS names one, nullptr when there is none; throws otherwise
+	optional_ptr<CatalogEntry> CheckCreateTableConflict(ClientContext &context, const CreateTableInfo &create_info);
+	//! The CREATE TABLE of an Iceberg table, rebound to the schema of the Iceberg catalog
+	unique_ptr<BoundCreateTableInfo> BindIcebergCreateTable(ClientContext &context, BoundCreateTableInfo &info,
+	                                                        SchemaCatalogEntry &iceberg_schema);
 	//! Type changes Hive can read back from the existing parquet files: widening only
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
 	//! Replace the cached entry of an altered table with what Glue stored
@@ -86,6 +98,9 @@ private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
 	                                               const GlueTableInfo *resolved_table_info);
 	static bool CatalogTypeIsSupported(CatalogType type);
+	optional_ptr<CatalogEntry> CreateIcebergTable(ClientContext &context, BoundCreateTableInfo &info);
+	//! The Glue entry of an Iceberg table, or nullptr for any other entry
+	static optional_ptr<GlueTable> AsIcebergTable(optional_ptr<CatalogEntry> entry);
 	//! The ALTER TABLE forms below rewrite the table from 'table', the bound entry's definition
 	void AlterTableProperties(ClientContext &context, const GlueTableInfo &table, AlterTableInfo &alter_table);
 	//! COMMENT ON COLUMN: Glue keeps the comment with the column
