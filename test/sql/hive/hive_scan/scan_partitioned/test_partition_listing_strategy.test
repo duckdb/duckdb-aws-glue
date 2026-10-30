@@ -1,0 +1,134 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_listing_strategy.test
+# description: The table location is listed only when listing the partitions read would take more rounds of requests, unless hive_partition_listing_threshold fixes the choice
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ls_events;
+
+statement ok
+CREATE TABLE my_datalake.default.ls_events (v INTEGER, part INTEGER) PARTITIONED BY (part);
+
+# 1100 partitions of one file each: listing the table location takes two pages, one after the other
+statement ok
+INSERT INTO my_datalake.default.ls_events SELECT i, i % 1100 FROM range(2200) t(i);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CREATE MACRO listings() AS TABLE
+    SELECT count(*) FILTER (WHERE prefix LIKE '%/ls_events/part=%') AS partition_scoped,
+           count(*) FILTER (WHERE prefix NOT LIKE '%/ls_events/part=%') AS root_scoped
+    FROM (
+        SELECT url_decode(regexp_extract(request.url, 'prefix=([^&]*)', 1)) AS prefix
+        FROM duckdb_logs_parsed('HTTP')
+        WHERE request.url LIKE '%list-type=2%'
+    );
+
+# 16 at a time on DuckDB's threads: 12 partitions are one round, fewer than the two pages of the location
+statement ok
+SET threads = 16;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 511;
+----
+24	25332
+
+query II
+SELECT * FROM listings();
+----
+12	0
+
+# 40 partitions are three rounds, so the location is listed instead
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 539;
+----
+80	85560
+
+query II
+SELECT * FROM listings();
+----
+0	2
+
+# 64 at a time on threads of their own: the 40 partitions are one round
+statement ok
+SET hive_partition_listing_concurrency = 64;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 539;
+----
+80	85560
+
+query II
+SELECT * FROM listings();
+----
+40	0
+
+# and 100 partitions two rounds, as many as the pages of the location, which is listed then
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 599;
+----
+200	219900
+
+query II
+SELECT * FROM listings();
+----
+0	2
+
+statement ok
+RESET hive_partition_listing_concurrency;
+
+# hive_partition_listing_threshold fixes the choice instead: 12 partitions read are at least 10
+statement ok
+SET hive_partition_listing_threshold = 10;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 511;
+----
+24	25332
+
+query II
+SELECT * FROM listings();
+----
+0	2
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+RESET threads;
+
+statement ok
+DROP TABLE my_datalake.default.ls_events;
+

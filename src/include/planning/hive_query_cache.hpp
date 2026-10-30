@@ -26,6 +26,13 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
+//! A directory's recursive listing, fetched a page at a time as it is read
+struct HiveDirectoryListingEntry {
+	annotated_mutex lock;
+	//! Null until some scan first asks for this directory
+	shared_ptr<MultiFileList> listing DUCKDB_GUARDED_BY(lock);
+};
+
 //! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
 //! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
 //! every scan listing the same directory) and the table samples
@@ -50,7 +57,7 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
-	unordered_map<string, shared_ptr<MultiFileList>> directory_listings DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
 };
 
 //! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table

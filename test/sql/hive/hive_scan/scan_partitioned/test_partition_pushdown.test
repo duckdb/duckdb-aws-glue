@@ -23,6 +23,11 @@ DROP TABLE IF EXISTS my_datalake.default.pp_orders;
 statement ok
 SET enable_external_file_cache=false;
 
+# partitions listed one by one are listed as many at a time as there are threads, which decides when that beats the
+# table location's listing: the same on every machine
+statement ok
+SET threads = 16;
+
 statement ok
 CREATE TABLE my_datalake.default.pp_orders (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
 
