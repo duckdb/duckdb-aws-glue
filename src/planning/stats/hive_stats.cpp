@@ -185,12 +185,24 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		// format overhead, so it is the least misleading one, and a file of a partition the scan does not read is
 		// not opened. The others listed only count with their sizes.
 		unordered_set<idx_t> reading;
+		// nor one of a partition stored differently than the table: the scan's reader can not open it
+		unordered_set<idx_t> unreadable;
 		if (!info.partition_keys.empty()) {
 			auto partition_indexes = files.PartitionIndexes();
 			reading.insert(partition_indexes->begin(), partition_indexes->end());
+			auto partitions = info.Partitions(context);
+			for (idx_t i = 0; i < partitions->size(); i++) {
+				if (!info.PartitionStorageMismatch((*partitions)[i]).empty()) {
+					unreadable.insert(i);
+				}
+			}
 		}
+		auto readable = [&](const OpenFileInfo &file) {
+			return info.partition_keys.empty() || unreadable.count(info.GetPartitionIndexOfFile(file.path)) == 0;
+		};
 		auto measurable = [&](const OpenFileInfo &file) {
-			return info.partition_keys.empty() || reading.count(info.GetPartitionIndexOfFile(file.path)) > 0;
+			return info.partition_keys.empty() ||
+			       (readable(file) && reading.count(info.GetPartitionIndexOfFile(file.path)) > 0);
 		};
 		optional_idx measured;
 		idx_t measured_size = 0;
@@ -236,7 +248,15 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 				}
 			}
 		}
-		auto &file = listed[measured.IsValid() ? measured.GetIndex() : 0];
+		for (idx_t i = 0; i < listed.size() && !measured.IsValid(); i++) {
+			if (readable(listed[i])) {
+				measured = i;
+			}
+		}
+		if (!measured.IsValid()) {
+			return sample;
+		}
+		auto &file = listed[measured.GetIndex()];
 		sample.file_bytes = ListedFileSize(file);
 		sample.file_rows = RowsInFile(context, bind_data, info, file);
 	} catch (std::exception &ex) {

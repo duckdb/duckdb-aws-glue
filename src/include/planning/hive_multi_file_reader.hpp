@@ -30,6 +30,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The columns of the table: data columns first, partition keys last
 	vector<Identifier> names;
 	vector<LogicalType> types;
+	//! The Glue definition of the table, null for a hive_scan
+	shared_ptr<const GlueTableInfo> table_definition;
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
 	HiveCSVOptions csv_options;
@@ -60,6 +62,15 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The same, or nothing when the file list has not listed 'path'
 	optional_idx FindPartitionIndexOfFile(const string &path) const;
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
+	//! Throws unless the partition's own storage format reads its files as the scan's reader does: Hive reads every
+	//! partition with its own SerDe, and the scan binds one reader for the table
+	void CheckPartitionStorage(const GluePartitionInfo &partition) const;
+	//! The error CheckPartitionStorage throws for the partition, empty when it reads like the table
+	string PartitionStorageMismatch(const GluePartitionInfo &partition) const;
+	//! Throws when a data column the scan reads ('column_indexes' into 'names') is declared by the partition with a
+	//! type its files can not be read as the table's type from: matched by position for csv, by name otherwise
+	void CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
+	                           const vector<idx_t> &column_indexes) const;
 	//! A description of the table for error messages
 	string Describe() const;
 	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every

@@ -76,8 +76,10 @@ Text tables are read the way their SerDe reads them:
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
   NULL string. Writes need a single-byte delimiter.
 - As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
-  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
-  their own. `hive_scan()` uses plain `read_csv` rules.
+  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe and SerDe
+  properties: a scan that reaches a partition whose own InputFormat, SerDe or SerDe properties read its files
+  differently (a csv partition of a parquet table, another delimiter) fails with an error naming the partition instead
+  of reading it as the table's format. `hive_scan()` uses plain `read_csv` rules.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
@@ -119,6 +121,13 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
+- A partition declares its own columns, which keep the types they had when the partition was created when the
+  table's columns change later. A scan that reads a column a partition declares with a type that can not be read
+  as the table's type fails, naming the partition and both types. The columns are matched by name, by
+  position for csv tables, and only those the query reads are checked. A partition type reads as the table's when
+  `ALTER COLUMN ... TYPE` could have changed one into the other (integer widening, `float` to `double`, anything to
+  `string`), when DuckDB casts it implicitly (for example `int` to `double` or `decimal`), or between decimals;
+  `bigint` to `int`, `double` to `int` or `string` to `int` do not. Nested types are not checked.
 - Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
   `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
   (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
@@ -351,8 +360,8 @@ fetch. The pages are asked for in parallel with Glue's Segment API:
 `glue_get_partitions_segments` requests run at the same time, each over a segment of the partitions that does not
 overlap with the others. `0`, the default, uses 8 requests against AWS and 1 against a Glue compatible server given
 with `ENDPOINT` (moto ignores `Segment` and answers every segment with the whole table, so the partitions a segment
-already returned are dropped); 10 is the maximum Glue accepts. The responses leave out the column schema every
-partition would otherwise repeat, which is not used: only the partition values and the location are.
+already returned are dropped); 10 is the maximum Glue accepts. The responses include every partition's storage
+descriptor with its columns, which the scan checks the partitions it reads against.
 
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.

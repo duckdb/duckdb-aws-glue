@@ -53,6 +53,8 @@
 #include "duckdb/planner/sql_export_helpers.hpp"
 #include "core/glue_types.hpp"
 #include "functions/hive_reader_call.hpp"
+#include "duckdb/function/cast/cast_function_set.hpp"
+#include "catalog/glue_schema_entry.hpp"
 
 namespace duckdb {
 
@@ -130,6 +132,134 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 	// a file is attributed to a partition only after the partitions are loaded, and they are never replaced
 	D_ASSERT(partitions);
 	return (*partitions)[partition_index];
+}
+
+static bool SameCSVDialect(const HiveCSVOptions &a, const HiveCSVOptions &b) {
+	return a.delimiter == b.delimiter && a.quote == b.quote && a.escape == b.escape && a.skip_lines == b.skip_lines &&
+	       a.null_string == b.null_string && a.serde_fields == b.serde_fields &&
+	       a.null_for_invalid_data == b.null_for_invalid_data && a.false_unless_true == b.false_unless_true;
+}
+
+string HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
+	if (!table_definition) {
+		return string();
+	}
+	auto &table = *table_definition;
+	auto &input_format = partition.input_format.empty() ? table.input_format : partition.input_format;
+	auto &serde_library = partition.serde_library.empty() ? table.serde_library : partition.serde_library;
+	if (StringUtil::CIEquals(input_format, table.input_format) &&
+	    StringUtil::CIEquals(serde_library, table.serde_library) &&
+	    (partition.serde_library.empty() || partition.serde_parameters == table.serde_parameters)) {
+		return string();
+	}
+	auto partition_storage = table;
+	partition_storage.input_format = input_format;
+	partition_storage.serde_library = serde_library;
+	if (!partition.serde_library.empty()) {
+		partition_storage.serde_parameters = partition.serde_parameters;
+	}
+	string stored_as;
+	auto format = GlueTableFormat::Detect(partition_storage);
+	if (!format.IsHive()) {
+		stored_as = format.Describe(partition_storage);
+	} else {
+		try {
+			auto partition_format = partition_storage.GetFileFormat();
+			if (IsTextFileFormat(partition_format)) {
+				partition_storage.CheckTextSerdeSupported(partition_format);
+			}
+			if (partition_format != file_format) {
+				stored_as = HiveFileFormatToString(partition_format);
+			} else if (partition_format == HiveFileFormat::CSV &&
+			           !SameCSVDialect(partition_storage.GetCSVOptions(), csv_options)) {
+				stored_as = "csv with another dialect";
+			} else if (partition_format == HiveFileFormat::JSON &&
+			           partition_storage.GetJSONOptions().ignore_errors != json_options.ignore_errors) {
+				stored_as = "json with other SerDe properties";
+			}
+		} catch (NotImplementedException &) {
+			stored_as = "an unsupported format";
+		}
+	}
+	if (stored_as.empty()) {
+		return string();
+	}
+	vector<string> spec;
+	for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
+		spec.push_back(partition_keys[i] + "=" + partition.values[i]);
+	}
+	return StringUtil::Format("Partition [%s] of Hive table '%s' is stored as %s (InputFormat '%s', SerDe '%s'), but "
+	                          "the table as %s (SerDe '%s'): partitions stored in a format other than the table's can "
+	                          "not be read yet",
+	                          StringUtil::Join(spec, ", "), Describe(), stored_as, input_format, serde_library,
+	                          HiveFileFormatToString(file_format), table.serde_library);
+}
+
+void HiveScanInfo::CheckPartitionStorage(const GluePartitionInfo &partition) const {
+	auto mismatch = PartitionStorageMismatch(partition);
+	if (!mismatch.empty()) {
+		throw NotImplementedException(mismatch);
+	}
+}
+
+//! Whether values of a partition column of type 'from' can be read as the table's type 'to': the changes the
+//! extension's own DDL allows, and DuckDB's implicit casts. Nested types are left to the reader.
+static bool CanReadPartitionTypeAs(ClientContext &context, const LogicalType &from, const LogicalType &to) {
+	if (from.IsNested() || to.IsNested() || GlueSchemaEntry::IsAllowedHiveTypeChange(from, to)) {
+		return true;
+	}
+	if (from.id() == LogicalTypeId::DECIMAL && to.id() == LogicalTypeId::DECIMAL) {
+		return true;
+	}
+	return CastFunctionSet::ImplicitCastCost(context, from, to) >= 0;
+}
+
+void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
+                                         const vector<idx_t> &column_indexes) const {
+	if (partition.columns.empty() || !table_definition) {
+		return;
+	}
+	auto &table_columns = table_definition->columns;
+	for (auto column_index : column_indexes) {
+		auto &name = names[column_index].GetIdentifierName();
+		optional_ptr<const GlueColumn> partition_column;
+		if (file_format == HiveFileFormat::CSV) {
+			if (column_index < partition.columns.size()) {
+				partition_column = &partition.columns[column_index];
+			}
+		} else {
+			for (auto &column : partition.columns) {
+				if (StringUtil::CIEquals(column.name, name)) {
+					partition_column = &column;
+					break;
+				}
+			}
+		}
+		if (!partition_column) {
+			continue;
+		}
+		LogicalType partition_type;
+		try {
+			partition_type = GlueTypes::ToLogicalType(StringUtil::Lower(partition_column->type));
+		} catch (std::exception &) {
+			// a type the extension can not map is left to the reader
+			continue;
+		}
+		if (CanReadPartitionTypeAs(context, partition_type, types[column_index])) {
+			continue;
+		}
+		auto table_type =
+		    column_index < table_columns.size() ? table_columns[column_index].type : types[column_index].ToString();
+		vector<string> spec;
+		for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
+			spec.push_back(partition_keys[i] + "=" + partition.values[i]);
+		}
+		throw InvalidInputException("Partition [%s] of Hive table '%s' declares column '%s' as '%s', which can not be "
+		                            "read as the table's column '%s' of type '%s': the table's columns changed after "
+		                            "the partition was created",
+		                            StringUtil::Join(spec, ", "), Describe(), partition_column->name,
+		                            partition_column->type, name, table_type);
+	}
 }
 
 string HiveScanInfo::Describe() const {
@@ -378,6 +508,10 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
 		              expanded_files);
 		return true;
+	}
+	auto partitions = scan_info->Partitions(client_context);
+	for (auto partition_index : job.partitions) {
+		scan_info->CheckPartitionStorage((*partitions)[partition_index]);
 	}
 	if (job.root) {
 		ListRoot(job.partitions);
@@ -639,7 +773,10 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	}
 	vector<GluePartitionInfo> partition_infos;
 	for (idx_t i = 0; i < partitions.size(); i++) {
-		partition_infos.push_back({std::move(partitions[i]), std::move(locations[i])});
+		GluePartitionInfo partition;
+		partition.values = std::move(partitions[i]);
+		partition.location = std::move(locations[i]);
+		partition_infos.push_back(std::move(partition));
 	}
 	info->SetPartitions(std::move(partition_infos));
 	unique_ptr<FunctionData> bind_data;
@@ -1192,6 +1329,18 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	optional_ptr<const GluePartitionInfo> partition;
 	if (!info.partition_keys.empty()) {
 		partition = &info.GetPartitionOfFile(reader_data.reader->GetFileName());
+		vector<idx_t> data_columns;
+		for (auto &column_id : global_column_ids) {
+			if (column_id.IsVirtualColumn()) {
+				continue;
+			}
+			auto column_index = column_id.GetPrimaryIndex();
+			if (info.GetPartitionKeyIndex(global_columns[column_index].name.GetIdentifierName()) ==
+			    DConstants::INVALID_INDEX) {
+				data_columns.push_back(column_index);
+			}
+		}
+		info.CheckPartitionColumns(context, *partition, data_columns);
 	}
 	auto &reader = *reader_data.reader;
 	bool file_metadata_read = false;

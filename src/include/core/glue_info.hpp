@@ -190,13 +190,17 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
-};
-
-//! A partition as GetPartition returns it: also its storage descriptor and parameters
-struct GluePartitionDetails : public GluePartitionInfo {
+	//! The partition's own StorageDescriptor.InputFormat and SerdeInfo, which Hive reads its files with and which can
+	//! differ from the table's; empty when not known (a hive_scan, a deserialized plan)
+	string input_format;
 	string serde_library;
 	unordered_map<string, string> serde_parameters;
+	//! The data columns the partition declares, which can differ from the table's; empty when not known
 	vector<GlueColumn> columns;
+};
+
+//! A partition as GetPartition returns it: also its parameters
+struct GluePartitionDetails : public GluePartitionInfo {
 	unordered_map<string, string> parameters;
 	//! The Partition object this projection was made from
 	shared_ptr<const GlueFetchedPartition> fetched;
