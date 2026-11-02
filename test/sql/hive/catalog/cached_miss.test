@@ -1,0 +1,204 @@
+# name: test/sql/hive/catalog/cached_miss.test
+# description: a cached table miss is replaced by a definition a listing, a GetTables page, glue_get_table_response or glue_partitions fetches, and is cleared by a write or a rollback
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS mutator (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+# another client: every change to Glue below goes through con2, so it never clears this connection's cache
+statement ok con2
+DROP SCHEMA IF EXISTS mutator.cached_miss CASCADE;
+
+statement ok con2
+CREATE SCHEMA mutator.cached_miss;
+
+statement ok con2
+CREATE TABLE mutator.cached_miss.present (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/present');
+
+statement ok con2
+INSERT INTO mutator.cached_miss.present VALUES (1);
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+# --- a listing replaces a cached miss: the table another client created after the miss is listed and readable
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g2 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+DROP TABLE IF EXISTS g2.cached_miss.m2;
+
+statement ok con2
+CREATE TABLE mutator.cached_miss.m2 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m2');
+
+statement ok con2
+INSERT INTO mutator.cached_miss.m2 VALUES (2);
+
+query I
+SELECT count(*) FROM (SHOW TABLES FROM g2.cached_miss) WHERE name = 'm2';
+----
+1
+
+query I
+SELECT id FROM g2.cached_miss.m2;
+----
+2
+
+# --- a GetTables page replaces a cached miss: once the schema is loaded the miss counts as a round trip, so the
+# --- next uncached lookup fetches a page, which holds the table created since; reading it then needs no GetTable
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g3 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+# a lookup in a database not loaded yet loads it from the table lookup and does not count towards batching
+statement ok
+DROP TABLE IF EXISTS g3.cached_miss.m3_schema;
+
+statement ok
+DROP TABLE IF EXISTS g3.cached_miss.m3;
+
+statement ok con2
+CREATE TABLE mutator.cached_miss.m3 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m3');
+
+statement ok con2
+INSERT INTO mutator.cached_miss.m3 VALUES (3);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM g3.cached_miss.present;
+----
+1
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM g3.cached_miss.m3;
+----
+3
+
+query I
+SELECT glue_calls('GetTable');
+----
+0
+
+# --- glue_get_table_response replaces a cached miss
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g4 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+DROP TABLE IF EXISTS g4.cached_miss.m4;
+
+statement ok con2
+CREATE TABLE mutator.cached_miss.m4 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m4');
+
+statement ok con2
+INSERT INTO mutator.cached_miss.m4 VALUES (4);
+
+query I
+SELECT table_name FROM glue_get_table_response('g4.cached_miss.m4');
+----
+m4
+
+query I
+SELECT id FROM g4.cached_miss.m4;
+----
+4
+
+# --- glue_partitions replaces a cached miss
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g4p (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+DROP TABLE IF EXISTS g4p.cached_miss.m4p;
+
+statement ok con2
+CREATE TABLE mutator.cached_miss.m4p (id INTEGER, p VARCHAR) PARTITIONED BY (p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m4p');
+
+statement ok con2
+INSERT INTO mutator.cached_miss.m4p VALUES (44, 'a');
+
+query I
+SELECT p FROM glue_partitions('g4p.cached_miss.m4p');
+----
+a
+
+query I
+SELECT id FROM g4p.cached_miss.m4p;
+----
+44
+
+# --- without a listing or a write the miss stays until this connection writes, as a cached table does
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g5 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+DROP TABLE IF EXISTS g5.cached_miss.m5;
+
+statement ok con2
+CREATE TABLE mutator.cached_miss.m5 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m5');
+
+statement ok con2
+INSERT INTO mutator.cached_miss.m5 VALUES (5);
+
+statement error
+SELECT id FROM g5.cached_miss.m5;
+----
+<REGEX>:.*does not exist.*
+
+# the failed statement rolled back, which clears the cache: the next lookup asks Glue and finds the table
+query I
+SELECT id FROM g5.cached_miss.m5;
+----
+5
+
+# --- a write through this connection clears a cached miss
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g6 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+DROP TABLE IF EXISTS g6.cached_miss.m6;
+
+statement ok con2
+CREATE TABLE mutator.cached_miss.m6 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m6');
+
+statement ok con2
+INSERT INTO mutator.cached_miss.m6 VALUES (6);
+
+statement ok
+CREATE TABLE g6.cached_miss.w6 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/w6');
+
+query I
+SELECT id FROM g6.cached_miss.m6;
+----
+6
+
+statement ok con2
+DROP SCHEMA mutator.cached_miss CASCADE;

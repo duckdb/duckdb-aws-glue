@@ -40,6 +40,11 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", name.Schema().GetIdentifierName(),
 		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
 	}
+	// the definition Glue just returned replaces a cached miss, so a later bind of the table finds it
+	auto &cache = *GlueTransaction::Get(context, *result.catalog).cache;
+	auto fetched = make_shared_ptr<const GlueTableInfo>(result.table);
+	cache.GetTable(
+	    name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(), [&fetched]() { return fetched; }, true);
 	if (result.table.IsView()) {
 		ThrowIsView(function_name, result.TableName(), require_partitions);
 	}

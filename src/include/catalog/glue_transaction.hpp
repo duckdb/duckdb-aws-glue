@@ -37,14 +37,17 @@ public:
 		Catalog &catalog;
 	};
 
+	//! 'replace_miss' is for callers that already hold a definition Glue just returned (listings, GetTables
+	//! pages): it replaces a cached miss, while a cached table still wins
 	shared_ptr<const GlueTableInfo> GetTable(const string &database_name, const string &table_name,
-	                                         const std::function<shared_ptr<const GlueTableInfo>()> &load) {
+	                                         const std::function<shared_ptr<const GlueTableInfo>()> &load,
+	                                         bool replace_miss = false) {
 		shared_ptr<CacheEntry<GlueTableInfo>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			entry = FindEntry(tables, database_name + "\n" + table_name);
 		}
-		return Resolve(*entry, load);
+		return Resolve(*entry, load, replace_miss);
 	}
 	shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(const string &database_name, const string &table_name,
@@ -55,6 +58,11 @@ public:
 			entry = FindEntry(partitions, database_name + "\n" + table_name);
 		}
 		return Resolve(*entry, load);
+	}
+	//! Whether GetTable would answer from the cache (a table or a known miss) without calling Glue
+	bool HasTable(const string &database_name, const string &table_name) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		return IsLoaded(tables, database_name + "\n" + table_name);
 	}
 	void Clear() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
@@ -75,8 +83,11 @@ private:
 	template <class T>
 	struct CacheEntry {
 		annotated_mutex load_lock;
-		//! Null until a load succeeds; a failed load leaves it null so the next reference retries
+		//! Null until a load succeeds, and after one that found nothing (Glue has no such table)
 		shared_ptr<const T> value DUCKDB_GUARDED_BY(load_lock);
+		//! Set once a load returns, a null result included, so a miss is not fetched again until the cache is
+		//! cleared; a load that throws leaves it unset and the next reference retries
+		bool loaded DUCKDB_GUARDED_BY(load_lock) = false;
 	};
 
 	//! Keys fold case (Glue database/table names are case-insensitive). The map lock is only held to find or
@@ -92,13 +103,24 @@ private:
 		return slot;
 	}
 	template <class T>
-	static shared_ptr<const T> Resolve(CacheEntry<T> &entry, const std::function<shared_ptr<const T>()> &load) {
+	static shared_ptr<const T> Resolve(CacheEntry<T> &entry, const std::function<shared_ptr<const T>()> &load,
+	                                   bool replace_miss = false) {
 		annotated_lock_guard<annotated_mutex> guard(entry.load_lock);
-		if (entry.value) {
+		if (entry.loaded && (entry.value || !replace_miss)) {
 			return entry.value;
 		}
 		entry.value = load();
+		entry.loaded = true;
 		return entry.value;
+	}
+	template <class T>
+	static bool IsLoaded(const unordered_map<string, shared_ptr<CacheEntry<T>>> &map, const string &key) {
+		auto slot = map.find(StringUtil::Lower(key));
+		if (slot == map.end()) {
+			return false;
+		}
+		annotated_lock_guard<annotated_mutex> guard(slot->second->load_lock);
+		return slot->second->loaded;
 	}
 
 	annotated_mutex lock;
