@@ -145,7 +145,8 @@
 		{
 			"reason": "CREATE TABLE binds against the Glue catalog, and DuckDB only allows ICEBERG_FIXED columns in an Iceberg catalog",
 			"paths": [
-				"test/sql/local/catalog_test_config_setup/catalog_agnostic/create/test_create_fixed_type.test"
+				"test/sql/local/catalog_test_config_setup/catalog_agnostic/create/test_create_fixed_type.test",
+				"test/sql/local/catalog_test_config_setup/catalog_agnostic/create/default/test_create_default_fixed.test"
 			]
 		},
 		{
