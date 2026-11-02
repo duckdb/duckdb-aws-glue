@@ -93,7 +93,10 @@ idx_t HiveScanInfo::GetPartitionKeyIndex(const string &name) const {
 shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientContext &context) const {
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
 	if (!partitions) {
-		if (partition_keys.empty() || catalog_name.empty()) {
+		if (projection) {
+			// Athena ignores the registered partitions of such a table
+			partitions = make_shared_ptr<const vector<GluePartitionInfo>>(projection->Derive(context));
+		} else if (partition_keys.empty() || catalog_name.empty()) {
 			// unpartitioned, or a hive_scan that was given none
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 		} else {
@@ -267,11 +270,21 @@ string HiveScanInfo::Describe() const {
 //! files and directories; EMR and S3 tools mark a directory with a <name>_$folder$ object next to it (an object, never
 //! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
 //! file of any format the reader opens
+//! A location as the prefix of the paths below it
+static string DirectoryPrefix(const string &location) {
+	auto prefix = location;
+	StringUtil::RTrim(prefix, "/");
+	return prefix + "/";
+}
+
 bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
-	if (!StringUtil::StartsWith(file.path, prefix)) {
+	// as OwningPartition compares them: s3a:// and s3:// name the same file
+	auto path = ComparableLocation(file.path);
+	auto directory = ComparableLocation(prefix) + "/";
+	if (!StringUtil::StartsWith(path, directory)) {
 		return false;
 	}
-	auto components = StringUtil::Split(file.path.substr(prefix.size()), '/');
+	auto components = StringUtil::Split(path.substr(directory.size()), '/');
 	for (auto &component : components) {
 		if (component.empty() || component[0] == '_' || component[0] == '.') {
 			return false;
@@ -382,17 +395,29 @@ void HiveMultiFileList::PlanListings() const {
 	if (planned) {
 		return;
 	}
-	planned = true;
 	if (scan_info->partition_keys.empty()) {
+		planned = true;
 		listing_jobs.push_back(ListingJob {true, {}});
 		return;
 	}
+	auto partitions = scan_info->Partitions(client_context);
+	auto indexes = PartitionIndexes();
+	if (scan_info->projection) {
+		// derived partitions exist whether or not data does: too many of them would list S3 for hours
+		Value max_partitions;
+		if (client_context.TryGetCurrentSetting("glue_projection_max_partitions", max_partitions) &&
+		    !max_partitions.IsNull() && indexes->size() > max_partitions.GetValue<idx_t>()) {
+			throw InvalidInputException("Scan of Glue table '%s' would list %d derived partitions after pruning, more "
+			                            "than glue_projection_max_partitions (%d); filter on the partition columns or "
+			                            "raise the setting",
+			                            scan_info->Describe(), indexes->size(), max_partitions.GetValue<idx_t>());
+		}
+	}
+	planned = true;
 	// the partitions below the table root can be listed together
 	auto root = ComparableLocation(scan_info->root_location);
 	vector<idx_t> below_root;
 	vector<idx_t> elsewhere;
-	auto partitions = scan_info->Partitions(client_context);
-	auto indexes = PartitionIndexes();
 	for (auto partition_index : *indexes) {
 		auto location = ComparableLocation((*partitions)[partition_index].location);
 		// a location with an empty segment below the root ('t//p=x') holds files the root listing leaves out
@@ -595,19 +620,21 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 		reading.insert(partition_index);
 	}
 	BuildPartitionLocations();
-	auto root_prefix = root + "/";
 	auto comparable_size = ComparableLocation(root).size() + 1;
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
-		if (!IsDataFile(file, root_prefix)) {
-			continue;
-		}
 		auto partition_index = OwningPartition(file.path, comparable_size);
-		if (!partition_index.IsValid()) {
+		// hidden files are judged below the partition, as in ListPartition: a partition value may spell a '/'
+		if (!partition_index.IsValid() ||
+		    !IsDataFile(file, DirectoryPrefix((*all)[partition_index.GetIndex()].location))) {
 			continue;
 		}
 		ThrowIfLocationShared(partition_index.GetIndex(), reading);
 		if (!reading.count(partition_index.GetIndex())) {
+			continue;
+		}
+		// hidden files are judged below the partition, as in ListPartition: a partition value may spell a '/'
+		if (!IsDataFile(file, DirectoryPrefix((*all)[partition_index.GetIndex()].location))) {
 			continue;
 		}
 		AddFile(std::move(file), partition_index.GetIndex());
@@ -730,12 +757,12 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t> &partitions) const {
 	auto root = scan_info->root_location;
 	StringUtil::RTrim(root, "/");
-	auto root_prefix = root + "/";
 	auto comparable_root_size = ComparableLocation(root).size() + 1;
 	auto listing = HiveQueryCache::Get(client_context)
 	                   ->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info));
 	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
 	BuildPartitionLocations();
+	auto all = scan_info->Partitions(client_context);
 	optional_idx sampled;
 	string sampled_prefix;
 	bool in_sampled = false;
@@ -761,16 +788,13 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
 			continue;
 		}
-		if (!IsDataFile(file, root_prefix)) {
-			continue;
-		}
 		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
 		if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
 			// pages come in key order, so the sampled partition's files are all seen
 			break;
 		}
 		auto owner = OwningPartition(file.path, comparable_root_size);
-		if (!owner.IsValid()) {
+		if (!owner.IsValid() || !IsDataFile(file, DirectoryPrefix((*all)[owner.GetIndex()].location))) {
 			continue;
 		}
 		if (owner != last_partition) {
@@ -779,8 +803,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 		}
 		if (!sampled.IsValid() && reading.count(owner.GetIndex())) {
 			sampled = owner;
-			sampled_prefix =
-			    ComparableLocation((*scan_info->Partitions(client_context))[owner.GetIndex()].location) + "/";
+			sampled_prefix = ComparableLocation((*all)[owner.GetIndex()].location) + "/";
 			in_sampled = true;
 		}
 		files.push_back(file);
