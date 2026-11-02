@@ -24,6 +24,8 @@ public:
 	//! Insert a (new) schema entry into the set, replacing any existing entry with the same name
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<GlueSchemaEntry> entry);
 	void RemoveEntry(const string &name);
+	//! Invalidate the cached entry of a table in a cached schema (see GlueTableSet::InvalidateEntry)
+	void InvalidateTableEntry(const string &schema_name, const string &table_name);
 
 	//! Build a schema catalog entry from a Glue database definition
 	unique_ptr<GlueSchemaEntry> CreateSchemaEntry(const GlueDatabaseInfo &database);

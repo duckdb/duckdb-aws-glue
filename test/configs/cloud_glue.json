@@ -1,6 +1,6 @@
 {
 	"description": "A live AWS Glue Data Catalog; credentials from the AWS credential chain (AWS_PROFILE, environment, ...)",
-	"on_init": "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');",
+	"on_init": "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-north-1');",
 	"statically_loaded_extensions": [
 		"core_functions",
 		"parquet",
@@ -8,6 +8,7 @@
 		"avro",
 		"httpfs",
 		"aws",
+		"iceberg",
 		"glue"
 	],
 	"test_env": [
@@ -26,6 +27,10 @@
 		{
 			"env_name": "DEFAULT_S3_LOCATION",
 			"env_value": "s3://tom-glue-tables-test-bucket"
+		},
+		{
+			"env_name": "ICEBERG_SUPPORTED",
+			"env_value": "true"
 		}
 	],
 	"skip_tests": [
@@ -39,7 +44,6 @@
 		{
 			"reason": "needs the fixture tables that scripts/docker-compose.yml creates in the local Glue",
 			"paths": [
-				"test/sql/hive/dml/insert/insert_into_bucketed_table.test",
 				"test/sql/hive/dml/formats/csv/test_csv_serde_properties.test"
 			]
 		},

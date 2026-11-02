@@ -1,0 +1,159 @@
+# name: test/sql/iceberg/alter_table.test
+# description: ALTER TABLE on Iceberg tables in Glue goes through Glue's Iceberg REST endpoint
+# group: [iceberg]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_alter;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ice_alter_renamed;
+
+statement ok
+CREATE TABLE my_datalake.default.ice_alter (id INTEGER, name VARCHAR) WITH (table_type = 'iceberg');
+
+statement ok
+INSERT INTO my_datalake.default.ice_alter VALUES (1, 'one');
+
+# list the table so that the checks below see a cached listing being refreshed
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ice_alter';
+----
+2
+
+#---------------------------------------------------------------------------
+# ADD COLUMN
+#---------------------------------------------------------------------------
+statement ok
+ALTER TABLE my_datalake.default.ice_alter ADD COLUMN score DOUBLE;
+
+statement ok
+INSERT INTO my_datalake.default.ice_alter VALUES (2, 'two', 2.5);
+
+query III
+SELECT * FROM my_datalake.default.ice_alter ORDER BY id;
+----
+1	one	NULL
+2	two	2.5
+
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'ice_alter' ORDER BY column_index;
+----
+id	INTEGER
+name	VARCHAR
+score	DOUBLE
+
+statement ok
+ALTER TABLE my_datalake.default.ice_alter ADD COLUMN IF NOT EXISTS score DOUBLE;
+
+statement error
+ALTER TABLE my_datalake.default.ice_alter ADD COLUMN score DOUBLE;
+----
+<REGEX>:.*score.*
+
+#---------------------------------------------------------------------------
+# RENAME COLUMN
+#---------------------------------------------------------------------------
+statement ok
+ALTER TABLE my_datalake.default.ice_alter RENAME COLUMN name TO label;
+
+query III
+SELECT id, label, score FROM my_datalake.default.ice_alter ORDER BY id;
+----
+1	one	NULL
+2	two	2.5
+
+# Glue keeps the old name as a column that is no longer current; it is not listed
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index) FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'ice_alter';
+----
+id,label,score
+
+query I
+SELECT len(response.StorageDescriptor.Columns::VARIANT[]) FROM glue_get_table_response('my_datalake.default.ice_alter');
+----
+4
+
+#---------------------------------------------------------------------------
+# ALTER COLUMN TYPE: Iceberg allows widening
+#---------------------------------------------------------------------------
+statement ok
+ALTER TABLE my_datalake.default.ice_alter ALTER COLUMN id TYPE BIGINT;
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.ice_alter) WHERE column_name = 'id';
+----
+id	BIGINT
+
+statement error
+ALTER TABLE my_datalake.default.ice_alter ALTER COLUMN label TYPE INTEGER;
+----
+
+#---------------------------------------------------------------------------
+# DROP COLUMN
+#---------------------------------------------------------------------------
+statement ok
+ALTER TABLE my_datalake.default.ice_alter DROP COLUMN score;
+
+query II
+SELECT * FROM my_datalake.default.ice_alter ORDER BY id;
+----
+1	one
+2	two
+
+query I
+SELECT string_agg(column_name, ',' ORDER BY column_index) FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'ice_alter';
+----
+id,label
+
+statement ok
+ALTER TABLE my_datalake.default.ice_alter DROP COLUMN IF EXISTS score;
+
+statement error
+ALTER TABLE my_datalake.default.ice_alter DROP COLUMN missing;
+----
+<REGEX>:.*missing.*
+
+#---------------------------------------------------------------------------
+# RENAME TO: Glue's Iceberg REST endpoint does not support it
+#---------------------------------------------------------------------------
+statement error
+ALTER TABLE my_datalake.default.ice_alter RENAME TO ice_alter_renamed;
+----
+<REGEX>:.*RenameTable endpoint is not supported for Glue Catalog.*
+
+query I
+SELECT count(*) FROM my_datalake.default.ice_alter;
+----
+2
+
+statement error
+SELECT * FROM my_datalake.default.ice_alter_renamed;
+----
+<REGEX>:.*Catalog Error.*ice_alter_renamed does not exist.*
+
+statement ok
+DROP TABLE my_datalake.default.ice_alter;
