@@ -501,13 +501,18 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 	bool add = false;
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
+		// a NULL option, e.g. an unset variable, must not fall back to its default: a NULL partition would replace
+		// the table's columns instead
+		if (option.second.IsNull() && (name == "keep_comments" || name == "add" || name == "partition")) {
+			throw BinderException("glue_replace_columns: '%s' must not be NULL", name);
+		}
 		if (name == "comments") {
 			comments = option.second;
 		} else if (name == "keep_comments") {
-			keep_comments = !option.second.IsNull() && option.second.GetValue<bool>();
+			keep_comments = option.second.GetValue<bool>();
 		} else if (name == "add") {
-			add = !option.second.IsNull() && option.second.GetValue<bool>();
-		} else if (name == "partition" && !option.second.IsNull()) {
+			add = option.second.GetValue<bool>();
+		} else if (name == "partition") {
 			result->for_partition = true;
 			result->partition = ParsePartitionSpec("glue_replace_columns", result->target, option.second);
 		}

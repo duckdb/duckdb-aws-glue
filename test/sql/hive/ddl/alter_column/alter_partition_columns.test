@@ -73,6 +73,27 @@ CALL glue_replace_columns('my_datalake.default.apcol_orders', {id: 'INTEGER'}, p
 ----
 <REGEX>:.*'region' is not a partition key of table 'default.apcol_orders'.*
 
+# a NULL option, e.g. an unset variable, is refused: a NULL partition must not change the table's columns instead
+statement error
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {id: 'INTEGER'}, partition := getvariable('unset_partition'));
+----
+<REGEX>:.*glue_replace_columns: 'partition' must not be NULL.*
+
+statement error
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {extra: 'INTEGER'}, partition := {dt: 'p1'}, add := NULL);
+----
+<REGEX>:.*glue_replace_columns: 'add' must not be NULL.*
+
+statement error
+CALL glue_replace_columns('my_datalake.default.apcol_orders', {id: 'INTEGER'}, keep_comments := NULL);
+----
+<REGEX>:.*glue_replace_columns: 'keep_comments' must not be NULL.*
+
+query T
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_get_table_response('my_datalake.default.apcol_orders');
+----
+[id int, v bigint, extra string]
+
 statement ok
 CALL glue_replace_columns('my_datalake.default.apcol_orders', {extra: 'VARCHAR'}, partition := {dt: 'p1'}, add := true);
 
