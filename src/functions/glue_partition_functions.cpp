@@ -768,13 +768,23 @@ void CheckAlterSteps(const vector<GlueAlterStep> &steps) {
 	if (action == GlueAlterAction::RENAME && steps.size() > 1) {
 		throw BinderException("glue_alter_table: only one partition can be renamed per statement");
 	}
-	if (action == GlueAlterAction::SET_PARTITION_LOCATION) {
-		set<vector<string>> seen;
-		for (auto &step : steps) {
-			if (!seen.insert(step.values).second) {
-				throw BinderException("glue_alter_table: the location of partition [%s] is set more than once",
-				                      StringUtil::Join(step.values, ", "));
-			}
+	// every UpdateTable sends the VersionId of the one table definition bind fetched
+	if (action == GlueAlterAction::SET_TABLE_LOCATION && steps.size() > 1) {
+		throw BinderException("glue_alter_table: the table location can only be set once per statement");
+	}
+	set<vector<string>> seen;
+	for (auto &step : steps) {
+		if (step.values.empty() || seen.insert(step.values).second) {
+			continue;
+		}
+		auto partition = StringUtil::Join(step.values, ", ");
+		switch (action) {
+		case GlueAlterAction::ADD:
+			throw BinderException("glue_alter_table: partition [%s] is added more than once", partition);
+		case GlueAlterAction::DROP:
+			throw BinderException("glue_alter_table: partition [%s] is dropped more than once", partition);
+		default:
+			throw BinderException("glue_alter_table: the location of partition [%s] is set more than once", partition);
 		}
 	}
 }

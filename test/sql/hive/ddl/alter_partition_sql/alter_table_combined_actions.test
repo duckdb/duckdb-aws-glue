@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/alter_partition_sql/alter_table_combined_actions.test
-# description: One ALTER TABLE carries several adds, drops or table locations, but no other combination of actions
+# description: One ALTER TABLE carries several adds, drops or partition locations, but no other combination of actions
 # group: [alter_partition_sql]
 
 require httpfs
@@ -58,18 +58,52 @@ ALTER TABLE my_datalake.default.sql_orders_combined PARTITION (dt = '1') SET LOC
 ----
 <REGEX>:Binder Error.*the location of partition \[1\] is set more than once.*
 
-# the refused statements changed nothing
-query II
-SELECT dt, location LIKE '%/combined/%' FROM glue_partitions('my_datalake.default.sql_orders_combined');
+statement error
+ALTER TABLE my_datalake.default.sql_orders_combined ADD PARTITION (dt = '4') PARTITION (dt = '5') PARTITION (dt = '4');
 ----
-1	false
+<REGEX>:Binder Error.*partition \[4\] is added more than once.*
+
+statement error
+ALTER TABLE my_datalake.default.sql_orders_combined ADD IF NOT EXISTS PARTITION (dt = '4') PARTITION (dt = '4');
+----
+<REGEX>:Binder Error.*partition \[4\] is added more than once.*
 
 statement ok
+ALTER TABLE my_datalake.default.sql_orders_combined ADD PARTITION (dt = '6');
+
+statement error
+ALTER TABLE my_datalake.default.sql_orders_combined DROP PARTITION (dt = '6'), PARTITION (dt = '6');
+----
+<REGEX>:Binder Error.*partition \[6\] is dropped more than once.*
+
+statement error
+ALTER TABLE my_datalake.default.sql_orders_combined DROP IF EXISTS PARTITION (dt = '6'), PARTITION (dt = '6');
+----
+<REGEX>:Binder Error.*partition \[6\] is dropped more than once.*
+
+statement error
 ALTER TABLE my_datalake.default.sql_orders_combined SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/combined/t1'
     SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/combined/t2';
+----
+<REGEX>:Binder Error.*the table location can only be set once per statement.*
+
+# the refused statements changed nothing
+query II
+SELECT dt, location LIKE '%/combined/%' FROM glue_partitions('my_datalake.default.sql_orders_combined') ORDER BY dt;
+----
+1	false
+6	false
 
 query I
-SELECT location LIKE '%/combined/t2%' FROM glue_get_table_response('my_datalake.default.sql_orders_combined');
+SELECT location LIKE '%/combined/%' FROM glue_get_table_response('my_datalake.default.sql_orders_combined');
+----
+false
+
+statement ok
+ALTER TABLE my_datalake.default.sql_orders_combined SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/combined/t1';
+
+query I
+SELECT location LIKE '%/combined/t1%' FROM glue_get_table_response('my_datalake.default.sql_orders_combined');
 ----
 true
 
