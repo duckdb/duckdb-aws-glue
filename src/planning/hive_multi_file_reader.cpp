@@ -366,25 +366,24 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 }
 
 bool HiveMultiFileList::ExpandNextPath() const {
-	// called with the list's lock held; runs one listing per call
+	// called with the list's lock held; runs one listing per call, and a failed listing is retried by the next call
 	PlanListings();
 	if (next_job >= listing_jobs.size()) {
 		return false;
 	}
-	auto &job = listing_jobs[next_job++];
+	auto &job = listing_jobs[next_job];
 	if (scan_info->partition_keys.empty()) {
 		if (scan_info->root_location.empty()) {
 			throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 		}
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
 		              expanded_files);
-		return true;
-	}
-	if (job.root) {
+	} else if (job.root) {
 		ListRoot(job.partitions);
 	} else {
 		ListPartition(job.partitions[0]);
 	}
+	next_job++;
 	return true;
 }
 

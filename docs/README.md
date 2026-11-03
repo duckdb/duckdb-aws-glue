@@ -116,7 +116,19 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
   that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
-  the listing. Avro tables are not measured, so planning them lists nothing.
+  the listing. Avro tables are not measured, so planning them lists nothing. An unpartitioned parquet table of at
+  most `hive_footer_statistics_max_files` (default 16, at most 25) files is counted instead: the row counts in the
+  footers of all its files add up to an exact count, which the scan also reports as its maximum, as a DuckDB table
+  does (the optimizer drops a `LIMIT` larger than it).
+- A partition key's statistics are exact: the minimum, maximum and number of values of the partitions a scan reads.
+  A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
+  gets its minimum, maximum and NULLs merged from the footers of all of them, read at the same time while planning
+  (the scan reads each again when it opens the file), with the scan's reader options and shared with the row count;
+  `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file with rows
+  lacks the column, stores it as another type than the table declares, or has statistics for it that DuckDB cannot
+  read; so do the data columns of partitioned, csv, json and avro tables. An empty file is skipped. The optimizer
+  prunes on these statistics and orders joins by them: the minimum and maximum of a dimension's key let it see how
+  much a join on that key keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
