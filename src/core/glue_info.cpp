@@ -361,6 +361,12 @@ GlueTableFormat GlueTableInfo::GetFormat() const {
 	return GlueTableFormat::Detect(info);
 }
 
+bool GlueTableInfo::IsSameVersion(const GlueTableInfo &other) const {
+	// Glue's CreateTime has whole seconds: a table replaced by a view within one second keeps version and CreateTime
+	return !version_id.empty() && version_id == other.version_id && create_time_ms == other.create_time_ms &&
+	       glue_table_type == other.glue_table_type;
+}
+
 string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
 }

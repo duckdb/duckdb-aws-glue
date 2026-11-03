@@ -251,7 +251,19 @@ BEGIN;
 statement error
 CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
 ----
-<REGEX>:TransactionContext Error.*Transaction support is not provided for Glue catalogs.*
+<REGEX>:TransactionContext Error.*glue_replace_columns changes Glue, which has no transactions.*CALL glue_replace_columns\(\.\.\.\), outside BEGIN.*
+
+statement ok
+ROLLBACK;
+
+# the table-function form gets the same error, which names the function
+statement ok
+BEGIN;
+
+statement error
+SELECT * FROM glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
+----
+<REGEX>:TransactionContext Error.*glue_replace_columns changes Glue, which has no transactions.*CALL glue_replace_columns\(\.\.\.\), outside BEGIN.*
 
 statement ok
 ROLLBACK;
@@ -266,7 +278,7 @@ BEGIN;
 statement error
 EXECUTE replace_in_transaction;
 ----
-<REGEX>:TransactionContext Error.*Transaction support is not provided for Glue catalogs.*
+<REGEX>:TransactionContext Error.*glue_replace_columns changes Glue, which has no transactions.*CALL glue_replace_columns\(\.\.\.\), outside BEGIN.*
 
 statement ok
 ROLLBACK;

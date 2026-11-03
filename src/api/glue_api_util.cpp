@@ -57,6 +57,12 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &sc
 	if (table.DescriptionHasBeenSet()) {
 		result.description = ToStdString(table.GetDescription());
 	}
+	if (table.VersionIdHasBeenSet()) {
+		result.version_id = ToStdString(table.GetVersionId());
+	}
+	if (table.CreateTimeHasBeenSet()) {
+		result.create_time_ms = table.GetCreateTime().Millis();
+	}
 	auto &storage_descriptor = table.GetStorageDescriptor();
 	result.location = ToStdString(storage_descriptor.GetLocation());
 	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
@@ -79,7 +85,24 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &sc
 		result.sort_columns.push_back(std::move(sort_column));
 	}
 	result.parameters = ToStdMap(table.GetParameters());
+	result.fetched = make_shared_ptr<const GlueFetchedTable>(table);
 	return result;
+}
+
+const Aws::Glue::Model::Table &FetchedTable(const GlueTableInfo &table) {
+	if (!table.fetched) {
+		throw InternalException("Table '%s.%s' was not fetched from Glue", table.schema_name, table.name);
+	}
+	return table.fetched->raw;
+}
+
+const Aws::Glue::Model::Partition &FetchedPartition(const GluePartitionDetails &partition, const string &database_name,
+                                                    const string &table_name) {
+	if (!partition.fetched) {
+		throw InternalException("Partition [%s] of '%s.%s' was not fetched from Glue",
+		                        PartitionValuesToString(partition.values), database_name, table_name);
+	}
+	return partition.fetched->raw;
 }
 
 string PartitionValuesToString(const vector<string> &values) {

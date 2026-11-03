@@ -1,0 +1,475 @@
+# name: test/sql/hive/ddl/glue_calls_per_ddl.test
+# description: The Glue API calls each table / partition write makes, by operation. Baseline on main.
+# group: [ddl]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.calls_orders;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.calls_plain;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.calls_ctas;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.calls_orders_csv;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.calls_view;
+
+statement ok
+CREATE TABLE my_datalake.default.calls_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.calls_orders VALUES (1, 10.0, '2026-01-01'), (2, 20.0, '2026-01-02');
+
+# The Glue API calls since the last truncate_duckdb_logs(), by operation
+statement ok
+CREATE MACRO glue_calls() AS TABLE
+    SELECT regexp_extract(request.headers['x-amz-target'], 'AWSGlue\.(\w+)', 1) AS api, count(*) AS n
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.headers['x-amz-target'] IS NOT NULL
+    GROUP BY 1 ORDER BY 1;
+
+# the Glue operation is in the x-amz-target header, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage='memory');
+
+#---------------------------------------------------------------------------
+# CREATE TABLE / DROP TABLE
+#---------------------------------------------------------------------------
+# the lookup of a name that does not exist is not memoized: the binder's and the extension's probes both reach Glue
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE TABLE my_datalake.default.calls_plain (id INTEGER, name VARCHAR);
+
+query II
+FROM glue_calls();
+----
+CreateTable	1
+GetTable	3
+GetTables	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DROP TABLE my_datalake.default.calls_plain;
+
+query II
+FROM glue_calls();
+----
+DeleteTable	1
+GetTable	1
+
+#---------------------------------------------------------------------------
+# CTAS into a partitioned table
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE TABLE my_datalake.default.calls_ctas PARTITIONED BY (p) AS SELECT range AS id, range % 2 AS p FROM range(10);
+
+query II
+FROM glue_calls();
+----
+BatchCreatePartition	1
+CreateTable	1
+GetTable	4
+GetTables	1
+
+statement ok
+DROP TABLE my_datalake.default.calls_ctas;
+
+#---------------------------------------------------------------------------
+# Column DDLs through ALTER TABLE / COMMENT ON
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders ADD COLUMN qty INTEGER;
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders ALTER COLUMN qty TYPE BIGINT;
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+COMMENT ON COLUMN my_datalake.default.calls_orders.qty IS 'units ordered';
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+# a partition key is updated through the table's partition keys, not its columns
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+COMMENT ON COLUMN my_datalake.default.calls_orders.dt IS 'order date';
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders DROP COLUMN qty;
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+# RENAME COLUMN is only allowed on csv tables, whose files are read by position
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.calls_orders_csv;
+
+statement ok
+CREATE TABLE my_datalake.default.calls_orders_csv (id INTEGER, qty INTEGER) WITH (format = 'csv');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders_csv RENAME COLUMN qty TO quantity;
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+statement ok
+DROP TABLE my_datalake.default.calls_orders_csv;
+
+#---------------------------------------------------------------------------
+# Table properties and table comment
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders SET (retention_days = 30);
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders RESET (retention_days);
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+COMMENT ON TABLE my_datalake.default.calls_orders IS 'orders by day';
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+#---------------------------------------------------------------------------
+# Views: CREATE, CREATE OR REPLACE, DROP
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE VIEW my_datalake.default.calls_view AS SELECT 1 AS x;
+
+query II
+FROM glue_calls();
+----
+CreateTable	1
+GetTable	2
+GetTables	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE OR REPLACE VIEW my_datalake.default.calls_view AS SELECT 2 AS x;
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DROP VIEW my_datalake.default.calls_view;
+
+query II
+FROM glue_calls();
+----
+DeleteTable	1
+GetTable	1
+
+#---------------------------------------------------------------------------
+# INSERT that creates a partition
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+INSERT INTO my_datalake.default.calls_orders VALUES (3, 30.0, '2026-02-01');
+
+query II
+FROM glue_calls();
+----
+BatchCreatePartition	1
+GetPartitions	1
+GetTable	1
+
+#---------------------------------------------------------------------------
+# RENAME PARTITION through ALTER TABLE and through glue_rename_partition
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders PARTITION (dt = '2026-01-01') RENAME TO PARTITION (dt = '2026-01-03');
+
+query II
+FROM glue_calls();
+----
+GetPartition	2
+GetTable	1
+UpdatePartition	1
+
+# the rename kept everything but the values
+query II
+SELECT dt, location FROM glue_partitions('my_datalake.default.calls_orders') WHERE dt = '2026-01-03';
+----
+2026-01-03	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/calls_orders/dt=2026-01-01
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+CALL glue_rename_partition('my_datalake.default.calls_orders', {dt: '2026-01-03'}, {dt: '2026-01-01'});
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/calls_orders/dt=2026-01-01
+
+query II
+FROM glue_calls();
+----
+GetPartition	2
+GetTable	1
+UpdatePartition	1
+
+#---------------------------------------------------------------------------
+# SET PARTITION LOCATION through ALTER TABLE, glue_set_partition_location, and glue_alter_table with if_exists
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders PARTITION (dt = '2026-01-02') SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/calls_orders/moved';
+
+query II
+FROM glue_calls();
+----
+GetPartition	1
+GetTable	1
+UpdatePartition	1
+
+query I
+SELECT location FROM glue_partitions('my_datalake.default.calls_orders') WHERE dt = '2026-01-02';
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/calls_orders/moved
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL glue_set_partition_location('my_datalake.default.calls_orders', {dt: '2026-01-02'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/calls_orders/moved2');
+
+query II
+FROM glue_calls();
+----
+GetPartition	1
+GetTable	1
+UpdatePartition	1
+
+# if_exists skips the pre-check; only the SQL grammar never sets it
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL glue_alter_table('my_datalake.default.calls_orders',
+    [{action: 'set_partition_location', if_not_exists: NULL::BOOLEAN, if_exists: true,
+      partition: [{key: 'dt', value: '2026-01-02'}],
+      new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[],
+      location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/calls_orders/moved3'}]);
+
+query II
+FROM glue_calls();
+----
+GetPartition	1
+GetTable	1
+UpdatePartition	1
+
+#---------------------------------------------------------------------------
+# ADD PARTITION through ALTER TABLE and through glue_add_partition
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders ADD PARTITION (dt = '2026-01-04');
+
+query II
+FROM glue_calls();
+----
+BatchCreatePartition	1
+GetPartition	1
+GetTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL glue_add_partition('my_datalake.default.calls_orders', {dt: '2026-01-05'});
+
+query II
+FROM glue_calls();
+----
+CreatePartition	1
+GetTable	1
+
+#---------------------------------------------------------------------------
+# DROP PARTITION through ALTER TABLE and through glue_drop_partition
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders DROP PARTITION (dt = '2026-01-04');
+
+query II
+FROM glue_calls();
+----
+DeletePartition	1
+GetPartition	1
+GetTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL glue_drop_partition('my_datalake.default.calls_orders', {dt: '2026-01-05'});
+
+query II
+FROM glue_calls();
+----
+DeletePartition	1
+GetTable	1
+
+#---------------------------------------------------------------------------
+# SET TABLE LOCATION through glue_set_table_location and through ALTER TABLE
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL glue_set_table_location('my_datalake.default.calls_orders', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/calls_orders_moved');
+
+query II
+FROM glue_calls();
+----
+GetTable	1
+UpdateTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE my_datalake.default.calls_orders SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/calls_orders_moved2';
+
+query II
+FROM glue_calls();
+----
+GetTable	1
+UpdateTable	1
+
+#---------------------------------------------------------------------------
+# glue_replace_columns
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL glue_replace_columns('my_datalake.default.calls_orders', {id: 'BIGINT', amount: 'DOUBLE'});
+
+query II
+FROM glue_calls();
+----
+GetTable	2
+UpdateTable	1
+
+statement ok
+DROP TABLE my_datalake.default.calls_orders;

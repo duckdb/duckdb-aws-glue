@@ -2,8 +2,20 @@
 
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/types.hpp"
 
 namespace duckdb {
+
+HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) const {
+	// the whole type, not the id: an alias of VARCHAR such as JSON keeps its own conversion
+	if (type == LogicalType::VARCHAR) {
+		return HiveFieldConversion::NONE;
+	}
+	if (false_unless_true && type.id() == LogicalTypeId::BOOLEAN) {
+		return HiveFieldConversion::FALSE_UNLESS_TRUE;
+	}
+	return null_for_invalid_data ? HiveFieldConversion::TRY_CAST : HiveFieldConversion::CAST;
+}
 
 void HiveCSVOptions::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(100, "delimiter", delimiter);

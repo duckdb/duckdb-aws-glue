@@ -20,7 +20,8 @@ public:
 	explicit GlueTableSet(GlueSchemaEntry &schema);
 
 public:
-	//! The entry with this name whatever its type: callers check entry->type against what they need
+	//! The entry with this name whatever its type (callers check entry->type against what they need), replaced when
+	//! Glue holds another version of it and gone when Glue no longer has it
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup);
 	//! The entries of the given type (TABLE_ENTRY or VIEW_ENTRY)
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
@@ -30,6 +31,8 @@ public:
 
 	//! Build the catalog entry for a Glue table definition: a GlueView for a VIRTUAL_VIEW, else a GlueTable
 	unique_ptr<CatalogEntry> CreateEntry(const GlueTableInfo &table);
+	//! The definition a table or view entry was built from
+	static const GlueTableInfo &GetTableInfo(const CatalogEntry &entry);
 
 private:
 	void LoadEntries(ClientContext &context);

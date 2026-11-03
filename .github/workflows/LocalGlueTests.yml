@@ -59,6 +59,9 @@ jobs:
       - name: Run tests
         run: make test-local TEST_BUILD=release
 
+      - name: Run C++ tests
+        run: make test-cpp TEST_BUILD=release
+
       - name: Server logs
         if: always()
         run: docker compose -f scripts/docker-compose.yml logs --no-color moto | tail -200

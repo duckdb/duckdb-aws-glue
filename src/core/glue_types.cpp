@@ -288,18 +288,22 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	}
 }
 
+bool GlueTypes::PartitionValueIsNull(const string &str_value, const LogicalType &type) {
+	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+		return true;
+	}
+	// for a non-string column these are the spellings a NULL arrives as
+	return type.id() != LogicalTypeId::VARCHAR && (StringUtil::CIEquals(str_value, "NULL") || str_value.empty());
+}
+
 Value GlueTypes::PartitionValue(ClientContext &context, const string &key, const string &str_value,
                                 const LogicalType &type) {
-	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+	if (PartitionValueIsNull(str_value, type)) {
 		return Value(type);
 	}
 	if (type.id() == LogicalTypeId::VARCHAR) {
 		// verbatim: what Glue holds IS the value
 		return Value(str_value);
-	}
-	// for a non-string column these are the spellings a NULL arrives as
-	if (StringUtil::CIEquals(str_value, "NULL") || str_value.empty()) {
-		return Value(type);
 	}
 	Value value(str_value);
 	auto cast = value.TryCastAs(context, type);

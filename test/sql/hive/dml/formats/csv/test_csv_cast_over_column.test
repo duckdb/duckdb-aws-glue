@@ -1,0 +1,106 @@
+# name: test/sql/hive/dml/formats/csv/test_csv_cast_over_column.test
+# description: a cast right above a scan of a SerDe text table applies to the column as the SerDe reads it
+# group: [csv]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.csv_cast_lazy;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.csv_cast_opencsv;
+
+#---------------------------------------------------------------------------
+# LazySimpleSerDe: a field that does not parse as its column's type is NULL
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.csv_cast_lazy (id INTEGER, name VARCHAR, amount DOUBLE, p INTEGER) PARTITIONED BY (p)
+WITH (format = 'csv', delimiter = '|');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1|a|1.25'), ('2|7|oops'), ('3|9|6.75')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/csv_cast_lazy/p=7/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.csv_cast_lazy', {p: '7'});
+
+# a sort or a grouping casts an integer partition key to a narrower type right above the scan (compressed
+# materialization), a cast like the query's own
+query IIII
+SELECT id, name, amount, p FROM my_datalake.default.csv_cast_lazy ORDER BY id;
+----
+1	a	1.25	7
+2	7	NULL	7
+3	9	6.75	7
+
+query II
+SELECT p, count(*) FROM my_datalake.default.csv_cast_lazy GROUP BY p;
+----
+7	3
+
+statement error
+SELECT CAST(name AS INTEGER) FROM my_datalake.default.csv_cast_lazy;
+----
+<REGEX>:.*Could not convert string 'a' to INT32.*
+
+query I
+SELECT TRY_CAST(name AS INTEGER) AS n FROM my_datalake.default.csv_cast_lazy ORDER BY n NULLS LAST;
+----
+7
+9
+NULL
+
+# the cast applies to what the SerDe read, NULL for the field that does not parse
+query I
+SELECT CAST(amount AS INTEGER) AS n FROM my_datalake.default.csv_cast_lazy ORDER BY n NULLS LAST;
+----
+1
+7
+NULL
+
+query I
+SELECT CAST(p AS VARCHAR) AS v FROM my_datalake.default.csv_cast_lazy ORDER BY v;
+----
+7
+7
+7
+
+#---------------------------------------------------------------------------
+# OpenCSVSerde without use.null.for.invalid.data: a field that does not parse fails the query
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.csv_cast_opencsv (id INTEGER, amount DOUBLE, ok BOOLEAN) WITH (format = 'csv', quote = '"');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1,1.25,true'), ('2,oops,yes'), ('3,6.75')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/csv_cast_opencsv/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT CAST(amount AS INTEGER) FROM my_datalake.default.csv_cast_opencsv;
+----
+<REGEX>:.*Could not convert string 'oops' to DOUBLE.*
+
+# a boolean is true for 'true' and false for any other text, before the cast; a missing field is NULL
+query II
+SELECT id, CAST(ok AS VARCHAR) FROM my_datalake.default.csv_cast_opencsv ORDER BY id;
+----
+1	true
+2	false
+3	NULL
+
+statement ok
+DROP TABLE my_datalake.default.csv_cast_lazy;
+
+statement ok
+DROP TABLE my_datalake.default.csv_cast_opencsv;

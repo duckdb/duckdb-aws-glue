@@ -494,6 +494,12 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 
 	// no Glue call here: PREPARE and prepared statement rebinds plan more than once, the copy creates the table
 	auto &schema = op.schema.Cast<GlueSchemaEntry>();
+	if (op.info->Base().on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT &&
+	    GlueSchemaEntry::ParseCreateTableOptions(context, op.info->Base()).overwrite) {
+		// the files are deleted before the table is created, so a failed replace would leave neither
+		throw NotImplementedException("CREATE OR REPLACE TABLE ... AS with option 'overwrite' is not supported: its "
+		                              "files would be deleted before the table is replaced");
+	}
 	auto &catalog = schema.catalog.Cast<GlueCatalog>();
 	// Catalog::CreateTable would check this, but the copy creates the table through the schema entry
 	auto supported = catalog.SupportsCreateTable(*op.info);
@@ -581,13 +587,21 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 			partitions.emplace(directory, std::move(partition));
 			continue;
 		}
-		auto parsed = HivePartitioning::Parse(file);
-		for (auto &key : table_info.partition_keys) {
-			auto value = parsed.find(key.name);
-			if (value == parsed.end()) {
-				throw InternalException("Written file '%s' has no value for partition key '%s'", file, key.name);
+		// only the directories the copy added: the table location may hold a <key>=<value> of its own
+		auto &keys = table_info.partition_keys;
+		auto components = StringUtil::Split(directory, '/');
+		if (components.size() < keys.size()) {
+			throw InternalException("Written file '%s' has no directory for each partition key", file);
+		}
+		auto first = components.size() - keys.size();
+		for (idx_t i = 0; i < keys.size(); i++) {
+			auto &component = components[first + i];
+			auto equals = component.find('=');
+			if (equals == string::npos ||
+			    !StringUtil::CIEquals(HivePartitioning::Unescape(component.substr(0, equals)), keys[i].name)) {
+				throw InternalException("Written file '%s' has no value for partition key '%s'", file, keys[i].name);
 			}
-			partition.values.push_back(HivePartitioning::Unescape(value->second));
+			partition.values.push_back(HivePartitioning::Unescape(component.substr(equals + 1)));
 		}
 		partitions.emplace(directory, std::move(partition));
 	}
@@ -596,7 +610,18 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		to_register.push_back(entry.second);
 	}
 	try {
-		GlueAPI::BatchCreatePartitions(context, catalog, table_info.schema_name, table_info.name, to_register);
+		// an INSERT registers against the table definition it bound; a CREATE TABLE AS planned from the definition
+		// it was about to create, so the table is fetched as created
+		optional_ptr<const GlueTableInfo> registered = &table_info;
+		GlueTableInfo created;
+		if (!table_info.fetched) {
+			if (!GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, created)) {
+				throw CatalogException("Table \"%s.%s\" was created but could not be fetched afterwards",
+				                       table_info.schema_name, table_info.name);
+			}
+			registered = &created;
+		}
+		GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
 	} catch (std::exception &ex) {
 		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
 		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.

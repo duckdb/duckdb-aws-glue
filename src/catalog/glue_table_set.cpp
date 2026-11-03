@@ -70,13 +70,14 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	for (auto &table : tables) {
 		if (cache) {
-			// Without this the per reference RefreshTableInfo re-fetches every table this one request
+			// Without this the per reference GetEntry re-fetches every table this one request
 			// already returned, which makes the bulk round trip pure added cost
 			shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
 			cache->GetTable(schema.database_info.name, table.name, [&info]() { return info; });
 		}
-		if (entries.find(table.name) != entries.end()) {
-			// already loaded through a direct lookup
+		auto existing = entries.find(table.name);
+		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(table)) {
+			// already loaded through a direct lookup, and still what Glue holds
 			continue;
 		}
 		unique_ptr<CatalogEntry> entry;
@@ -91,6 +92,7 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 			                 error.RawMessage());
 			continue;
 		}
+		RetireEntry(table.name);
 		entries.emplace(table.name, std::move(entry));
 	}
 	is_loaded = true;
@@ -137,35 +139,61 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
 	// is started before entry_lock is taken, the order RetireEntry takes the locks in
 	Transaction::Get(context, catalog);
-	lock_guard<mutex> guard(entry_lock);
-	auto entry = entries.find(name);
-	if (entry != entries.end()) {
-		return entry->second.get();
-	}
 	auto cache = GlueTransactionCache::Of(context, catalog);
-	// The attach's first round-trip miss stays direct: a lone lookup must not enumerate a large database.
-	// From the second round-trip-causing miss on (round trips count across cache instances), one GetTables
-	// page warms the cache, at most once per instance - under the default scope that is once per transaction.
-	if (cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
-	    BatchTableLookups(context)) {
-		BulkLoadTableInfo(context, *cache);
+	bool cached;
+	string glue_name;
+	{
+		lock_guard<mutex> guard(entry_lock);
+		auto existing = entries.find(name);
+		cached = existing != entries.end();
+		// the lookup name may differ in case from the one Glue knows
+		glue_name = cached ? existing->second->name.GetIdentifierName() : name;
+		// The attach's first round-trip miss stays direct: a lone lookup must not enumerate a large database.
+		// From the second round-trip-causing miss on (round trips count across cache instances), one GetTables
+		// page warms the cache, at most once per instance - under the default scope that is once per transaction.
+		if (!cached && cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
+		    BatchTableLookups(context)) {
+			BulkLoadTableInfo(context, *cache);
+		}
 	}
+	bool asked_glue = false;
 	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
-		// counts round trips, not lookups: a cache hit (including a bulk-warmed one) costs nothing and must
-		// not count towards switching to bulk
-		direct_lookups++;
+		asked_glue = true;
 		GlueTableInfo table;
-		if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
+		if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, glue_name, table)) {
 			return nullptr;
 		}
 		return make_shared_ptr<const GlueTableInfo>(std::move(table));
 	};
-	auto table = cache ? cache->GetTable(schema.database_info.name, name, load) : load();
+	// the definition Glue holds, fetched once per transaction (GlueTransactionCache) and outside entry_lock, so that a
+	// Glue round trip does not hold up the lookups of other tables
+	auto table = cache ? cache->GetTable(schema.database_info.name, glue_name, load) : load();
+	lock_guard<mutex> guard(entry_lock);
+	if (!cached && asked_glue) {
+		// counts the round trips of misses, not lookups: a cache hit (including a bulk-warmed one) costs nothing and
+		// must not count towards switching to bulk
+		direct_lookups++;
+	}
 	if (!table) {
+		RetireEntry(glue_name);
 		return nullptr;
 	}
+	// another lookup may have replaced the entry while Glue was asked: compare with what is there now
+	auto existing = entries.find(table->name);
+	if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(*table)) {
+		return existing->second.get();
+	}
+	// new, or another client changed it since the entry was built: a statement that bound the old entry keeps it
+	RetireEntry(table->name);
 	auto result = entries.emplace(table->name, CreateEntry(*table));
 	return result.first->second.get();
+}
+
+const GlueTableInfo &GlueTableSet::GetTableInfo(const CatalogEntry &entry) {
+	if (entry.type == CatalogType::VIEW_ENTRY) {
+		return entry.Cast<GlueView>().table_info;
+	}
+	return entry.Cast<GlueTable>().table_info;
 }
 
 void GlueTableSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {

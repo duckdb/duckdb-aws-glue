@@ -29,6 +29,8 @@ struct GlueCreateTableOptions {
 	vector<string> bucket_columns;
 	int32_t number_of_buckets = -1;
 	vector<GlueColumn> sort_columns;
+	//! CREATE TABLE AS only: delete the data files already at the location (overwrite = true)
+	bool overwrite = false;
 	//! Every other option is stored as a table parameter in Glue
 	unordered_map<string, string> parameters;
 };
@@ -78,16 +80,20 @@ public:
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
 	//! Replace the cached entry of an altered table with what Glue stored
 	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
+	//! The definition a write rewrites: the bound entry's. Under a connection-scoped metadata cache the entry may
+	//! predate a change by another connection, so it is fetched again first.
+	const GlueTableInfo &DefinitionForWrite(ClientContext &context, const CatalogEntry &entry);
 
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
 	                                               const GlueTableInfo *resolved_table_info);
 	static bool CatalogTypeIsSupported(CatalogType type);
-	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
+	//! The ALTER TABLE forms below rewrite the table from 'table', the bound entry's definition
+	void AlterTableProperties(ClientContext &context, const GlueTableInfo &table, AlterTableInfo &alter_table);
 	//! COMMENT ON COLUMN: Glue keeps the comment with the column
-	void SetColumnComment(ClientContext &context, const string &table_name, SetColumnCommentInfo &info);
+	void SetColumnComment(ClientContext &context, const GlueTableInfo &table, SetColumnCommentInfo &info);
 	//! COMMENT ON TABLE: Glue stores it as the table's Description
-	void SetTableComment(ClientContext &context, const string &table_name, SetCommentInfo &info);
+	void SetTableComment(ClientContext &context, const GlueTableInfo &table, SetCommentInfo &info);
 
 public:
 	//! The database definition as returned by Glue

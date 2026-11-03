@@ -8,6 +8,7 @@
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "catalog/glue_attach.hpp"
+#include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
 #include "api/glue_api.hpp"
@@ -61,6 +62,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_max_retries",
+	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
+	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "
+	                          "default, leaves the SDK's own retry policy in place.",
+	                          LogicalType::BIGINT, Value::BIGINT(-1));
+
 	config.AddExtensionOption("glue_create_bucketed_tables",
 	                          "Allow CREATE TABLE ... WITH (BucketColumns = [...], NumberOfBuckets = n, SortColumns = "
 	                          "[...]) to create a bucketed (clustered) Hive table. DuckDB reads such a table but does "
@@ -109,6 +116,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "break inside a quoted field needs: the parallel scanner refuses such a field together "
 	                          "with the NULL padding of short rows. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
+	config.AddExtensionOption("hive_csv_max_line_size",
+	                          "The longest line, in bytes, a scan of a csv table reads; a longer line fails the query. "
+	                          "Hive reads a line of any length. Up to 8000000 the reader's buffers and how a file is "
+	                          "split between threads are unchanged; a larger limit makes each thread read at least "
+	                          "this many bytes. Default 8000000.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_CSV_DEFAULT_MAX_LINE_SIZE));
 
 	config.AddExtensionOption(
 	    "glue_debug_fail_partition_registration",

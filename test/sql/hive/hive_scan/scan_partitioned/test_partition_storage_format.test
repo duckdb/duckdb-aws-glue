@@ -1,0 +1,90 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_storage_format.test
+# description: Partitions stored in another format or csv dialect than their table: those that read like the table are
+# group: [scan_partitioned]
+
+#              read, a scan reaching one that does not fails naming the partition instead of misreading its files
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# fixture_partition_formats (scripts/docker-compose.yml) is a parquet table with a partition of the same storage, one
+# with another parquet InputFormat, SerDe class and SerDe property, and a csv partition (LazySimpleSerDe)
+statement ok
+COPY (SELECT 1::INTEGER AS id, 'a' AS name) TO 's3://glue-test/warehouse/fixture/fixture_partition_formats/dt=parquet/data.parquet';
+
+statement ok
+COPY (SELECT 2::INTEGER AS id, 'b' AS name) TO 's3://glue-test/warehouse/fixture/fixture_partition_formats/dt=parquet_alias/data.parquet';
+
+query IIT
+SELECT id, name, dt FROM my_datalake.default.fixture_partition_formats WHERE dt <> 'text' ORDER BY id;
+----
+1	a	parquet
+2	b	parquet_alias
+
+statement error
+SELECT * FROM my_datalake.default.fixture_partition_formats;
+----
+<REGEX>:.*Partition \[dt=text\] of Hive table 'default.fixture_partition_formats' is stored as csv \(InputFormat 'org.apache.hadoop.mapred.TextInputFormat', SerDe 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'\), but the table as parquet.*can not be read yet.*
+
+statement ok
+CALL enable_logging(level := 'WARNING', storage := 'memory');
+
+statement error
+SELECT count(*) FROM my_datalake.default.fixture_partition_formats WHERE dt = 'text';
+----
+<REGEX>:.*Partition \[dt=text\].*is stored as csv.*
+
+# estimating the scan's cardinality does not open the csv partition's files with the parquet reader
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%Could not sample%';
+----
+0
+
+statement ok
+CALL disable_logging();
+
+# the partition's storage is in its Glue definition
+query TT
+SELECT serde_library, serde_parameters['field.delim'] FROM glue_get_partition_response('my_datalake.default.fixture_partition_formats', {dt: 'text'});
+----
+org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe	,
+
+# fixture_partition_dialects is a csv table (',') with a partition of its dialect and one delimited by '|'
+query IIT
+SELECT id, name, dt FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'comma';
+----
+1	a	comma
+
+statement error
+SELECT * FROM my_datalake.default.fixture_partition_dialects;
+----
+<REGEX>:.*Partition \[dt=pipe\] of Hive table 'default.fixture_partition_dialects' is stored as csv with another dialect.*
+
+# a partition the extension registers takes the table's storage, and reads with it
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.psf_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.psf_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.psf_orders VALUES (1, 'x'), (2, 'y');
+
+query IT
+SELECT * FROM my_datalake.default.psf_orders ORDER BY id;
+----
+1	x
+2	y
+
+statement ok
+DROP TABLE my_datalake.default.psf_orders;

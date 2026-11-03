@@ -104,14 +104,27 @@ unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntr
 	// unbound on purpose: the binder derives names and types from the query on first use; the stored columns
 	// carry the column alias list of CREATE VIEW
 	CreateViewInfo info(schema, Identifier(table.name));
+	bool has_column_alias_list = StringUtil::CIEquals(table.GetParameter("duckdb_view_column_alias_list"), "true");
+	string alias_list;
 	for (auto &column : table.columns) {
+		if (!has_column_alias_list) {
+			continue;
+		}
 		info.aliases.emplace_back(column.name);
+		if (!alias_list.empty()) {
+			alias_list += ", ";
+		}
+		alias_list += SQLIdentifier::ToString(column.name);
 	}
 	if (StringUtil::CIEquals(table.GetParameter("duckdb_view_secure"), "true")) {
 		info.security_type = ViewSecurityType::SECURE_VIEW;
 	}
-	info.sql = string("CREATE ") + (info.security_type == ViewSecurityType::SECURE_VIEW ? "SECURE " : "") + "VIEW " +
-	           SQLIdentifier::ToString(table.name) + " AS " + display_sql + ";";
+	string header = string("CREATE ") + (info.security_type == ViewSecurityType::SECURE_VIEW ? "SECURE " : "") +
+	                "VIEW " + SQLIdentifier::ToString(table.schema_name) + "." + SQLIdentifier::ToString(table.name);
+	if (!alias_list.empty()) {
+		header += " (" + alias_list + ")";
+	}
+	info.sql = header + " AS " + display_sql + ";";
 	if (!table.description.empty()) {
 		info.comment = Value(table.description);
 	}

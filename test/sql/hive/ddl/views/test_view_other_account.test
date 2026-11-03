@@ -39,10 +39,16 @@ statement ok
 DROP VIEW IF EXISTS own_cat.default.oa_bad;
 
 statement ok
+DROP VIEW IF EXISTS own_cat.default.oa_loop;
+
+statement ok
 DROP TABLE IF EXISTS own_cat.default.oa_local;
 
 statement ok
 CREATE SCHEMA IF NOT EXISTS other_cat.oa_db;
+
+statement ok
+DROP VIEW IF EXISTS other_cat.oa_db.oa_back;
 
 statement ok
 DROP TABLE IF EXISTS other_cat.oa_db.oa_orders;
@@ -88,6 +94,29 @@ SELECT id FROM own_cat.default.oa_view ORDER BY id;
 ----
 2
 3
+
+# a view reading itself through a view of the other account
+statement ok
+CREATE VIEW own_cat.default.oa_loop AS SELECT 1 AS x;
+
+statement ok
+CREATE VIEW other_cat.oa_db.oa_back AS SELECT x FROM own_cat.default.oa_loop;
+
+statement error
+CREATE OR REPLACE VIEW own_cat.default.oa_loop AS SELECT x FROM other_cat.oa_db.oa_back;
+----
+Glue view "default.oa_loop" can not be created: its query reads the view itself
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('own_cat.default.oa_loop');
+----
+SELECT 1 AS x
+
+statement ok
+DROP VIEW other_cat.oa_db.oa_back;
+
+statement ok
+DROP VIEW own_cat.default.oa_loop;
 
 # the view's own "default".oa_local is read in the view's catalog, even with a catalog named "default" attached
 statement ok

@@ -1,0 +1,238 @@
+# name: test/sql/hive/hive_scan/explain_sql.test
+# description: EXPLAIN (SQL) shows a hive_scan() as the standard reader calls that read its files, one per partition, and that SQL reads the scan's rows
+# group: [hive_scan]
+
+require parquet
+
+require json
+
+require avro
+
+require glue
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 10.5, '2016-05-14'), (2, 20.5, '2016-05-14'), (3, 30.5, '2016-05-15')) t(id, amount, dt))
+TO '{TEST_DIR}/es_parquet' (FORMAT parquet, PARTITION_BY (dt));
+
+# a partition at a custom location, which is the default partition: NULL
+statement ok
+COPY (SELECT * FROM (VALUES (4, 40.5, 'x')) t(id, amount, junk))
+TO '{TEST_DIR}/es_custom' (FORMAT parquet, PARTITION_BY (junk));
+
+statement ok
+CREATE VIEW es_orders AS SELECT * FROM hive_scan('{TEST_DIR}/es_parquet',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'DATE'},
+    partitions := [
+        {dt: '2016-05-14', location: NULL},
+        {dt: '2016-05-15', location: NULL},
+        {dt: '__HIVE_DEFAULT_PARTITION__', location: '{TEST_DIR}/es_custom/junk=x'}
+    ]);
+
+#---------------------------------------------------------------------------
+# every partition is one read of its files that selects the partition's values, and the reads are UNION ALLed
+#---------------------------------------------------------------------------
+query II
+EXPLAIN (SQL) SELECT * FROM es_orders;
+----
+sql	<REGEX>:.*SELECT\s+id,\s+amount,\s+CAST\('2016-05-14' AS DATE\) AS dt\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/es_parquet/dt=2016-05-14/data_0\.parquet'\) AS VARCHAR \[\]\),.*
+
+query II
+EXPLAIN (SQL) SELECT * FROM es_orders;
+----
+sql	<REGEX>:.*SELECT\s+id,\s+amount,\s+CAST\('2016-05-15' AS DATE\) AS dt\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/es_parquet/dt=2016-05-15/data_0\.parquet'\) AS VARCHAR \[\]\),.*
+
+query II
+EXPLAIN (SQL) SELECT * FROM es_orders;
+----
+sql	<REGEX>:.*SELECT\s+id,\s+amount,\s+CAST\(NULL AS DATE\) AS dt\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/es_custom/junk=x/data_0\.parquet'\) AS VARCHAR \[\]\),.*
+
+query II
+EXPLAIN (SQL) SELECT * FROM es_orders;
+----
+sql	<REGEX>:.*\)\s+UNION ALL\s+\(.*\)\s+UNION ALL\s+\(.*
+
+query II
+EXPLAIN (SQL) SELECT * FROM es_orders;
+----
+sql	<!REGEX>:.*UNION ALL.*UNION ALL.*UNION ALL.*
+
+# the reader is called with the options the scan bound it with, the data columns as its schema and without hive
+# partitioning
+query II
+EXPLAIN (SQL) SELECT * FROM es_orders;
+----
+sql	<REGEX>:.*\(binary_as_string = CAST\(TRUE AS BOOLEAN\)\),.*\(hive_partitioning = CAST\(FALSE AS BOOLEAN\)\),\s*\("schema" = CAST\("system"\.main\."map"\("system"\.main\.list_value\('id', 'amount'\), .*'INTEGER'.*'DOUBLE'.*
+
+# a pruned partition is not read, and the filter that pruned it is restated over the reads
+query II
+EXPLAIN (SQL) SELECT id FROM es_orders WHERE dt = DATE '2016-05-15';
+----
+sql	<REGEX>:.*read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/es_parquet/dt=2016-05-15/data_0\.parquet'\).*WHERE \(r\d+\.column2 = CAST\('2016-05-15' AS DATE\)\).*
+
+query II
+EXPLAIN (SQL) SELECT id FROM es_orders WHERE dt = DATE '2016-05-15';
+----
+sql	<!REGEX>:.*(2016-05-14|junk=x|UNION).*
+
+# no partition is left: a relation of the scan's columns without rows
+query II
+EXPLAIN (SQL) SELECT * FROM es_orders WHERE dt = DATE '2000-01-01';
+----
+sql	<REGEX>:.*SELECT\s+CAST\(NULL AS INTEGER\) AS id,\s+CAST\(NULL AS DOUBLE\) AS amount,\s+CAST\(NULL AS DATE\) AS dt\s+WHERE FALSE.*
+
+query II
+EXPLAIN (SQL) SELECT * FROM es_orders WHERE dt = DATE '2000-01-01';
+----
+sql	<!REGEX>:.*read_parquet.*
+
+# an unpartitioned scan is a single read
+query II
+EXPLAIN (SQL) SELECT * FROM hive_scan('{TEST_DIR}/es_parquet/dt=2016-05-15', schema := {id: 'INTEGER', amount: 'DOUBLE'});
+----
+sql	<REGEX>:.*SELECT\s+id,\s+amount\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/es_parquet/dt=2016-05-15/data_0\.parquet'\) AS VARCHAR \[\]\),.*
+
+query II
+EXPLAIN (SQL) SELECT * FROM hive_scan('{TEST_DIR}/es_parquet/dt=2016-05-15', schema := {id: 'INTEGER', amount: 'DOUBLE'});
+----
+sql	<!REGEX>:.*UNION.*
+
+#---------------------------------------------------------------------------
+# the text and avro readers
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES (7, 'seven', 'x'), (8, NULL, 'x')) t(id, name, junk))
+TO '{TEST_DIR}/es_csv' (FORMAT csv, HEADER true, DELIMITER '|', NULLSTR 'NA', PARTITION_BY (junk));
+
+statement ok
+CREATE VIEW es_csv AS SELECT * FROM hive_scan('{TEST_DIR}/es_csv/junk=x', format := 'csv', header := true, delim := '|',
+    nullstr := 'NA', schema := {id: 'INTEGER', name: 'VARCHAR'});
+
+# the dialect: a header line is skipped, not sniffed
+query II
+EXPLAIN (SQL) SELECT * FROM es_csv;
+----
+sql	<REGEX>:.*FROM "system"\.main\.read_csv\(.*\(auto_detect = CAST\(FALSE AS BOOLEAN\)\),.*\(delim = CAST\('\|' AS VARCHAR\)\),.*\("header" = CAST\(FALSE AS BOOLEAN\)\),.*\(nullstr = CAST\('NA' AS VARCHAR\)\),.*\("skip" = CAST\(1 AS BIGINT\)\).*
+
+statement ok
+COPY (SELECT * FROM (VALUES ('{"id": 1, "name": "a"}'), ('not json'), ('{"id": 3, "name": "c"}')) t(line))
+TO '{TEST_DIR}/es_json' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', PER_THREAD_OUTPUT true);
+
+statement ok
+CREATE VIEW es_json AS SELECT * FROM hive_scan('{TEST_DIR}/es_json', format := 'json', schema := {id: 'INTEGER', name: 'VARCHAR'},
+    ignore_errors := true);
+
+query II
+EXPLAIN (SQL) SELECT * FROM es_json;
+----
+sql	<REGEX>:.*FROM "system"\.main\.read_json\(.*\(format = CAST\('newline_delimited' AS VARCHAR\)\),\s*\(hive_partitioning = CAST\(FALSE AS BOOLEAN\)\),\s*\(ignore_errors = CAST\(TRUE AS BOOLEAN\)\).*
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 10.5, '2016-05-14'), (2, 20.5, '2016-05-14'), (3, 30.5, '2016-05-15')) t(id, amount, dt))
+TO '{TEST_DIR}/es_avro' (FORMAT avro, PARTITION_BY (dt));
+
+statement ok
+CREATE VIEW es_avro AS SELECT * FROM hive_scan('{TEST_DIR}/es_avro', format := 'avro',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
+
+query II
+EXPLAIN (SQL) SELECT * FROM es_avro;
+----
+sql	<REGEX>:.*SELECT\s+id,\s+amount,\s+'2016-05-15' AS dt\s+FROM "system"\.main\.read_avro\(.*\(hive_partitioning = CAST\(FALSE AS BOOLEAN\)\),\s*\("schema" = .*
+
+#---------------------------------------------------------------------------
+# the SQL reads what the scan reads
+#---------------------------------------------------------------------------
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+query III rowsort
+SELECT * FROM es_orders;
+----
+1	10.5	2016-05-14
+2	20.5	2016-05-14
+3	30.5	2016-05-15
+4	40.5	NULL
+
+query II rowsort
+SELECT id, dt FROM es_orders WHERE dt = DATE '2016-05-15';
+----
+3	2016-05-15
+
+query I
+SELECT id FROM es_orders WHERE dt IS NULL;
+----
+4
+
+query II rowsort
+SELECT id, amount FROM es_orders WHERE amount > 15 AND dt <> DATE '2016-05-15';
+----
+2	20.5
+
+query I
+SELECT count(*) FROM es_orders WHERE dt = DATE '2000-01-01';
+----
+0
+
+query II
+SELECT count(*), sum(id) FROM es_orders;
+----
+4	10
+
+query II rowsort
+SELECT * FROM es_csv;
+----
+7	seven
+8	NULL
+
+query II rowsort
+SELECT * FROM es_json;
+----
+1	a
+3	c
+NULL	NULL
+
+query III rowsort
+SELECT * FROM es_avro WHERE dt = '2016-05-14';
+----
+1	10.5	2016-05-14
+2	20.5	2016-05-14
+
+query III rowsort
+SELECT o.id, o.dt, a.amount FROM es_orders o JOIN es_avro a ON o.id = a.id;
+----
+1	2016-05-14	10.5
+2	2016-05-14	20.5
+3	2016-05-15	30.5
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+#---------------------------------------------------------------------------
+# no reader call reads the files the way the scan does
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 1 AS id, encode('ü') AS c, '\xC3\xBC'::BLOB AS b) TO '{TEST_DIR}/es_bytes' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+# a binary column: the string columns are decoded file by file
+statement error
+EXPLAIN (SQL) SELECT * FROM hive_scan('{TEST_DIR}/es_bytes', schema := {id: 'INTEGER', c: 'VARCHAR', b: 'BLOB'});
+----
+EXPLAIN (SQL) cannot render table function "hive_scan"
+
+# a virtual column of the scan
+statement error
+EXPLAIN (SQL) SELECT id, "$path" FROM hive_scan('{TEST_DIR}/es_parquet', schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
+----
+EXPLAIN (SQL) cannot render table function "hive_scan"
+
+statement error
+EXPLAIN (SQL) SELECT id, filename FROM hive_scan('{TEST_DIR}/es_parquet', schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
+----
+EXPLAIN (SQL) cannot render table function "hive_scan"

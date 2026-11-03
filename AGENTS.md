@@ -60,7 +60,13 @@ AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 \
 - `test/configs/*.json` own the init SQL, env and skip policy. When something fails for one config only, skip the
   narrowest path there with a concrete reason instead of weakening the test; remove the skip when support lands.
   Validate config edits with `jq empty test/configs/*.json`.
-- Test targets don't build first: rebuild before running tests.
+- Test targets don't build first: rebuild before running tests (`make test-cpp` builds its own binary).
+
+C++ tests: `test/unittest/` holds Catch tests of `src/include/functions/hive_reader_call.hpp`, which no SQL reaches, in
+their own binary `unittest_glue` (extensions linked statically; a normal build skips it). `make test-cpp` builds and
+runs it. Its Glue table test only runs when `GLUE_ENDPOINT` names localhost (the target sets it), since it creates and
+drops tables. What `BindHiveScan` passes the reader and what `InitializeReader` does to a column has to show in
+`HiveScanGetReaderCall`: the tests compare the rows of its call with the scan's.
 
 Test format is DuckDB's sqllogictest (`statement ok|error`, `query I...`, `----`, `<REGEX>:` for error patterns,
 `require-env`). Slow tests use `.test_slow`. Do not add `PRAGMA enable_verification`. Test error paths, not just the
@@ -120,7 +126,8 @@ Follow DuckDB's style (`duckdb/AGENTS.md`):
 
 ## Change checklist
 
-- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/SeaweedFS).
+- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/SeaweedFS),
+  and `make test-cpp` when it touches `BindHiveScan`, `InitializeReader` or `hive_reader_call.hpp`.
 - Build change: read both the root `Makefile` and `extension-ci-tools/makefiles/duckdb_extension.Makefile`.
 - Documentation-only change: check commands statically; don't start containers or run tests.
 

@@ -30,6 +30,8 @@ public:
 	static unique_ptr<SecretEntry> GetStorageSecret(ClientContext &context, const string &secret_name);
 	//! Glue has no transactions: throw on DDL or INSERT inside an explicit (BEGIN) transaction
 	static void ThrowIfInExplicitTransaction(ClientContext &context);
+	//! The same for a glue_* function that changes Glue, naming it in the error
+	static void ThrowIfInExplicitTransaction(ClientContext &context, const char *function);
 
 	void Initialize(bool load_builtin) override;
 	string GetCatalogType() override {
@@ -61,6 +63,9 @@ public:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 	void OnDetach(ClientContext &context) override;
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
+	//! Serves a single-name equality on schema_name with one database lookup instead of listing every database
+	vector<reference<SchemaCatalogEntry>> GetSchemasForScan(ClientContext &context,
+	                                                        const SchemaScanFilters &filters) override;
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();

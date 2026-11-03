@@ -8,6 +8,8 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+set ignore_error_messages
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,

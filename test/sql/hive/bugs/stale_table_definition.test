@@ -1,0 +1,424 @@
+# name: test/sql/hive/bugs/stale_table_definition.test
+# description: a cached table or view entry is replaced at lookup when another Glue client changes its columns, partition keys, kind or SQL
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS cached_glue (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS mutator_glue (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS mutator_glue.stale_definition CASCADE;
+
+statement ok
+CREATE SCHEMA mutator_glue.stale_definition;
+
+statement ok
+DROP TABLE IF EXISTS mutator_glue.stale_definition.stale_table_definition;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_table_definition
+(id INTEGER, p VARCHAR, q VARCHAR) PARTITIONED BY (p, q)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_table_definition-old');
+
+statement ok
+INSERT INTO mutator_glue.stale_definition.stale_table_definition VALUES (1, 'P1', 'Q1');
+
+# Bind and cache the original [id, p, q] entry under this independent catalog alias.
+query III
+SELECT id, p, q FROM cached_glue.stale_definition.stale_table_definition;
+----
+1	P1	Q1
+
+# Another catalog instance replaces the same Glue name with partition keys in the opposite order.
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_table_definition;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_table_definition
+(id INTEGER, q VARCHAR, p VARCHAR) PARTITIONED BY (q, p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_table_definition-new');
+
+statement ok
+INSERT INTO mutator_glue.stale_definition.stale_table_definition VALUES (2, 'Q2', 'P2');
+
+query III
+SELECT id, p, q FROM mutator_glue.stale_definition.stale_table_definition;
+----
+2	P2	Q2
+
+# Do not pair current partition values [Q2, P2] with the cached key names [p, q]: the lookup binds the current
+# definition.
+query III
+SELECT id, p, q FROM cached_glue.stale_definition.stale_table_definition;
+----
+2	P2	Q2
+
+# INSERT writes with the current partition keys, not the cached [p, q] order.
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_table_definition;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_table_definition
+(id INTEGER, p VARCHAR, q VARCHAR) PARTITIONED BY (p, q)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_table_definition-insert');
+
+statement ok
+INSERT INTO cached_glue.stale_definition.stale_table_definition (id, p, q) VALUES (3, 'P3', 'Q3');
+
+query III
+SELECT id, p, q FROM mutator_glue.stale_definition.stale_table_definition;
+----
+3	P3	Q3
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_table_definition-insert/p=P3/q=Q3/*');
+----
+1
+
+# A same-name column whose type changed is read with the current type.
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_table_definition;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_table_definition
+(id BIGINT, p VARCHAR, q VARCHAR) PARTITIONED BY (p, q)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_table_definition-bigint');
+
+statement ok
+INSERT INTO mutator_glue.stale_definition.stale_table_definition VALUES (5000000000, 'P5', 'Q5');
+
+query II
+SELECT id, typeof(id) FROM cached_glue.stale_definition.stale_table_definition;
+----
+5000000000	BIGINT
+
+# ALTER applies to the current definition when another client replaced the cached one.
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_table_definition;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_table_definition
+(id INTEGER, label VARCHAR)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_table_definition-alter');
+
+statement ok
+ALTER TABLE cached_glue.stale_definition.stale_table_definition ADD COLUMN tag VARCHAR;
+
+query I
+SELECT column_name FROM (DESCRIBE mutator_glue.stale_definition.stale_table_definition) ORDER BY ALL;
+----
+id
+label
+tag
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_table_definition;
+
+# A stale DROP must not delete a replacement of the opposite kind.
+statement ok
+DROP VIEW IF EXISTS mutator_glue.stale_definition.stale_entry_kind;
+
+statement ok
+DROP TABLE IF EXISTS mutator_glue.stale_definition.stale_entry_kind;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_entry_kind
+(id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_entry_kind-table');
+
+query I
+SELECT count(*) FROM cached_glue.stale_definition.stale_entry_kind;
+----
+0
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_entry_kind;
+
+statement ok
+CREATE VIEW mutator_glue.stale_definition.stale_entry_kind AS SELECT 7 AS id;
+
+statement error
+DROP TABLE cached_glue.stale_definition.stale_entry_kind;
+----
+trying to drop type Table
+
+query I
+SELECT * FROM cached_glue.stale_definition.stale_entry_kind;
+----
+7
+
+# A cached view whose SQL another client replaced reads the new SQL.
+statement ok
+CREATE OR REPLACE VIEW mutator_glue.stale_definition.stale_entry_kind AS SELECT 70 AS id;
+
+query I
+SELECT * FROM cached_glue.stale_definition.stale_entry_kind;
+----
+70
+
+# A cached view is likewise refreshed when another client replaces it with a table.
+statement ok
+DROP VIEW mutator_glue.stale_definition.stale_entry_kind;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_entry_kind
+(id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_entry_kind-replacement');
+
+query I
+SELECT count(*) FROM cached_glue.stale_definition.stale_entry_kind;
+----
+0
+
+# CREATE OR REPLACE VIEW must not use a stale DuckDB-view marker to overwrite a replacement table.
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_entry_kind;
+
+statement ok
+CREATE VIEW mutator_glue.stale_definition.stale_entry_kind AS SELECT 8 AS id;
+
+query I
+SELECT * FROM cached_glue.stale_definition.stale_entry_kind;
+----
+8
+
+statement ok
+DROP VIEW mutator_glue.stale_definition.stale_entry_kind;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_entry_kind
+(id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_entry_kind-create-or-replace');
+
+statement error
+CREATE OR REPLACE VIEW cached_glue.stale_definition.stale_entry_kind AS SELECT 9 AS id;
+----
+trying to create type View
+
+query I
+SELECT count(*) FROM cached_glue.stale_definition.stale_entry_kind;
+----
+0
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_entry_kind;
+
+# A remotely deleted cached entry must not make IF NOT EXISTS CTAS a false no-op or lose its SELECT rows.
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_entry_kind
+(id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_entry_kind-deleted');
+
+query I
+SELECT count(*) FROM cached_glue.stale_definition.stale_entry_kind;
+----
+0
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_entry_kind;
+
+statement ok
+CREATE TABLE IF NOT EXISTS cached_glue.stale_definition.stale_entry_kind
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_entry_kind-recreated') AS
+SELECT range AS id FROM range(3);
+
+query II
+SELECT count(*), sum(id) FROM cached_glue.stale_definition.stale_entry_kind;
+----
+3	3
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_entry_kind-recreated/*');
+----
+1
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_entry_kind;
+
+# A cached entry looked up in another case is refreshed under the name Glue knows, with one GetTable for the query.
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_case
+(id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_case');
+
+statement ok
+INSERT INTO mutator_glue.stale_definition.stale_case VALUES (1);
+
+query I
+SELECT id FROM cached_glue.stale_definition.stale_case;
+----
+1
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM cached_glue.STALE_DEFINITION.STALE_CASE;
+----
+1
+
+query II
+SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] = 'AWSGlue.GetTable' GROUP BY 1;
+----
+AWSGlue.GetTable	1
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_case;
+
+# A listing fetched after another client replaced a table it had looked up shows the current definition.
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_listing (id INTEGER, p VARCHAR) PARTITIONED BY (p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_listing-old');
+
+query II
+SELECT id, p FROM cached_glue.stale_definition.stale_listing;
+----
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_listing;
+
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_listing (id INTEGER, q VARCHAR, p VARCHAR) PARTITIONED BY (q, p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_listing-new');
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'cached_glue' AND schema_name = 'stale_definition' AND table_name = 'stale_listing' ORDER BY column_index;
+----
+id
+q
+p
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_listing;
+
+# The entry is kept while Glue's VersionId and CreateTime are those it was built from and replaced on any change,
+# a parameter-only update included: the oid tells one entry from the next.
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_version (id INTEGER)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_version');
+
+query I
+SELECT id FROM cached_glue.stale_definition.stale_version;
+----
+
+statement ok
+SET VARIABLE first_oid = (SELECT table_oid FROM duckdb_tables() WHERE database_name = 'cached_glue' AND schema_name = 'stale_definition' AND table_name = 'stale_version');
+
+query I
+SELECT id FROM cached_glue.stale_definition.stale_version;
+----
+
+query I
+SELECT table_oid = getvariable('first_oid') FROM duckdb_tables() WHERE database_name = 'cached_glue' AND schema_name = 'stale_definition' AND table_name = 'stale_version';
+----
+true
+
+statement ok
+ALTER TABLE mutator_glue.stale_definition.stale_version SET (owner_note = 'changed');
+
+query I
+SELECT id FROM cached_glue.stale_definition.stale_version;
+----
+
+query I
+SELECT table_oid <> getvariable('first_oid') FROM duckdb_tables() WHERE database_name = 'cached_glue' AND schema_name = 'stale_definition' AND table_name = 'stale_version';
+----
+true
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_version;
+
+# Under a connection-scoped metadata cache the definition this connection fetched stays until a write clears it: a
+# table another connection replaced reads as first seen, consistently. ALTER reads the current definition from Glue.
+statement ok
+CREATE TABLE mutator_glue.stale_definition.stale_scope (id INTEGER, p VARCHAR, q VARCHAR) PARTITIONED BY (p, q)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_scope-old');
+
+statement ok
+INSERT INTO mutator_glue.stale_definition.stale_scope VALUES (1, 'P1', 'Q1');
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+query III
+SELECT id, p, q FROM cached_glue.stale_definition.stale_scope;
+----
+1	P1	Q1
+
+statement ok con2
+DROP TABLE mutator_glue.stale_definition.stale_scope;
+
+statement ok con2
+CREATE TABLE mutator_glue.stale_definition.stale_scope (id INTEGER, q VARCHAR, p VARCHAR) PARTITIONED BY (q, p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_scope-new');
+
+statement ok con2
+INSERT INTO mutator_glue.stale_definition.stale_scope VALUES (2, 'Q2', 'P2');
+
+query III
+SELECT id, p, q FROM cached_glue.stale_definition.stale_scope;
+----
+1	P1	Q1
+
+statement ok
+ALTER TABLE cached_glue.stale_definition.stale_scope ADD COLUMN tag VARCHAR;
+
+# the write cleared the connection's cache: the next query binds the current definition
+query III
+SELECT id, p, q FROM cached_glue.stale_definition.stale_scope;
+----
+2	P2	Q2
+
+query I
+SELECT column_name FROM (DESCRIBE mutator_glue.stale_definition.stale_scope) ORDER BY ALL;
+----
+id
+p
+q
+tag
+
+# SET LOCATION is a value, not derived from the stale definition: it applies to the current one and keeps what the
+# other connection changed
+query III
+SELECT id, p, q FROM cached_glue.stale_definition.stale_scope;
+----
+2	P2	Q2
+
+statement ok con2
+ALTER TABLE mutator_glue.stale_definition.stale_scope SET (owner_note = 'con2');
+
+statement ok
+CALL glue_set_table_location('cached_glue.stale_definition.stale_scope', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_scope-moved');
+
+query II
+SELECT location LIKE '%/stale_scope-moved', parameters['owner_note'] FROM glue_get_table_response('mutator_glue.stale_definition.stale_scope');
+----
+true	con2
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+statement ok
+DROP TABLE mutator_glue.stale_definition.stale_scope;
+
+statement ok
+DROP SCHEMA mutator_glue.stale_definition CASCADE;

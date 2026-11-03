@@ -17,7 +17,7 @@
 		},
 		{
 			"env_name": "GLUE_CATALOG_ID",
-			"env_value": "984506134640"
+			"env_value": "847122343688"
 		},
 		{
 			"env_name": "GLUE_ENDPOINT",
@@ -25,7 +25,7 @@
 		},
 		{
 			"env_name": "DEFAULT_S3_LOCATION",
-			"env_value": "s3://simple-s3-glue-database/glue-database-root"
+			"env_value": "s3://tom-glue-tables-test-bucket"
 		}
 	],
 	"skip_tests": [
@@ -40,14 +40,16 @@
 			"reason": "needs the fixture tables that scripts/docker-compose.yml creates in the local Glue",
 			"paths": [
 				"test/sql/hive/dml/insert/insert_into_bucketed_table.test",
-				"test/sql/hive/dml/formats/csv/test_csv_serde_properties.test"
+				"test/sql/hive/dml/formats/csv/test_csv_serde_properties.test",
+				"test/sql/hive/hive_scan/scan_partitioned/test_partition_storage_format.test"
 			]
 		},
 		{
 			"reason": "needs the OpenX JSON fixture tables that scripts/docker-compose.yml creates in the local Glue",
 			"paths": [
 				"test/sql/hive/dml/insert/insert_into_openx_json_table.test",
-				"test/sql/hive/dml/formats/json/test_json_serde_properties.test"
+				"test/sql/hive/dml/formats/json/test_json_serde_properties.test",
+				"test/sql/hive/dml/formats/json/test_json_key_case.test"
 			]
 		},
 		{

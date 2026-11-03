@@ -14,8 +14,6 @@ struct HiveTableSample;
 //! What Glue said about a table the running query scans
 struct GlueTableEntry {
 	annotated_mutex lock;
-	//! Null until the first scan of the table asks Glue
-	shared_ptr<const GlueTableInfo> table_info DUCKDB_GUARDED_BY(lock);
 	//! Null until the first scan of a partitioned table asks Glue for them
 	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
 };
@@ -28,9 +26,9 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! What the running query learned about the tables it scans, dropped when the query ends: the Glue definition and
-//! partitions of a table (asked for once however often the query scans it), the recursive listings of directories
-//! (shared by the estimate and every scan listing the same directory) and the table samples
+//! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
+//! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
+//! every scan listing the same directory) and the table samples
 class HiveQueryCache : public ClientContextState {
 public:
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);

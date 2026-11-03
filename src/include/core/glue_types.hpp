@@ -18,6 +18,9 @@ struct GlueTypes {
 	//! b'. Throws if the value can't be cast to the key's type.
 	static Value PartitionValue(ClientContext &context, const string &key, const string &str_value,
 	                            const LogicalType &type);
+	//! Whether PartitionValue reads the value Glue stores as NULL: Hive's default partition name, and for a non-string
+	//! key the spellings a NULL arrives as
+	static bool PartitionValueIsNull(const string &str_value, const LogicalType &type);
 };
 
 } // namespace duckdb
