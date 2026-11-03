@@ -26,13 +26,10 @@ namespace duckdb {
 
 //! UpdatePartition with the partition's storage descriptor as 'change' leaves it, everything else as it is.
 //! 'partition' is the partition as fetched; it is rewritten from the Partition it carries, nothing is fetched again.
-static void UpdatePartitionStorage(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+//! The caller checks that the catalog is writable before it creates the client.
+static void UpdatePartitionStorage(GlueCatalog &catalog, Aws::Glue::GlueClient &client, const string &database_name,
                                    const string &table_name, const GluePartitionDetails &partition,
                                    const std::function<void(Aws::Glue::Model::StorageDescriptor &)> &change) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
-	CheckWritable(catalog, "UpdatePartition");
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
 	auto &fetched = FetchedPartition(partition, database_name, table_name);
 	auto storage_descriptor = fetched.GetStorageDescriptor();
 	change(storage_descriptor);
@@ -46,7 +43,7 @@ static void UpdatePartitionStorage(ClientContext &context, GlueCatalog &catalog,
 	request.SetTableName(table_name);
 	request.SetPartitionValueList(ToAwsValues(partition.values));
 	request.SetPartitionInput(input);
-	auto outcome = client->UpdatePartition(request);
+	auto outcome = client.UpdatePartition(request);
 	if (!outcome.IsSuccess()) {
 		ThrowGlueError(outcome, StringUtil::Format("UpdatePartition '%s.%s' [%s]", database_name, table_name,
 		                                           PartitionValuesToString(partition.values)));
@@ -56,14 +53,22 @@ static void UpdatePartitionStorage(ClientContext &context, GlueCatalog &catalog,
 void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                    const string &table_name, const GluePartitionDetails &partition,
                                    const string &location) {
-	UpdatePartitionStorage(context, catalog, database_name, table_name, partition,
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdatePartition");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdatePartitionStorage(catalog, *client, database_name, table_name, partition,
 	                       [&](Aws::Glue::Model::StorageDescriptor &storage) { storage.SetLocation(location); });
 }
 
 void GlueAPI::SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                   const string &table_name, const GluePartitionDetails &partition,
                                   const vector<GlueColumn> &columns) {
-	UpdatePartitionStorage(context, catalog, database_name, table_name, partition,
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdatePartition");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdatePartitionStorage(catalog, *client, database_name, table_name, partition,
 	                       [&](Aws::Glue::Model::StorageDescriptor &storage) { storage.SetColumns(ToAwsColumns(columns)); });
 }
 
