@@ -68,8 +68,9 @@ void GlueAPI::SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, 
 	CheckWritable(catalog, "UpdatePartition");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdatePartitionStorage(catalog, *client, database_name, table_name, partition,
-	                       [&](Aws::Glue::Model::StorageDescriptor &storage) { storage.SetColumns(ToAwsColumns(columns)); });
+	UpdatePartitionStorage(
+	    catalog, *client, database_name, table_name, partition,
+	    [&](Aws::Glue::Model::StorageDescriptor &storage) { storage.SetColumns(ToAwsColumns(columns)); });
 }
 
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
