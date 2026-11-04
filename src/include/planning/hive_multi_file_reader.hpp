@@ -82,12 +82,21 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The partitions of the table: given at bind (hive_scan), derived from the projection, or fetched from Glue on
 	//! first use and shared with every scan of the table in the query. Never replaced, so indexes into it stay valid
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
+	//! Derive the projected partitions with the query's predicates on each key applied before the cross product;
+	//! returns per key whether its predicate dropped a value, or nothing when the partitions already existed.
+	//! Partitions() derives without predicates.
+	vector<bool> DerivePartitions(ClientContext &context,
+	                              const vector<optional_ptr<const PartitionProjection::KeyFilter>> &filters) const;
+	//! The projected partitions before any predicate, saturating at the largest idx_t; 0 for a table without a
+	//! projection
+	idx_t UnfilteredPartitions() const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
 
 private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
+	mutable idx_t unfiltered_partitions DUCKDB_GUARDED_BY(partitions_lock) = 0;
 };
 
 //! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with

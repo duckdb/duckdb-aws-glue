@@ -2,13 +2,18 @@
 #include "core/helpers.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/multiply.hpp"
+
+#include <algorithm>
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/to_string.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 
@@ -267,8 +272,7 @@ static void ParseDateKey(const GlueTableInfo &table, const string &description, 
 			                            description, interval_parameter, unit_parameter, key.name,
 			                            table.GetParameter(format_parameter));
 		}
-		unit = key.format->HasDayField() ? "DAYS" : key.format->HasMonthField() ? "MONTHS" : "YEARS";
-		TryParseIntervalUnit(unit, 1, key.step);
+		key.step = key.format->FinestUnit();
 	}
 }
 
@@ -278,6 +282,14 @@ unique_ptr<PartitionProjection> PartitionProjection::Parse(const GlueTableInfo &
 	auto result = make_uniq<PartitionProjection>();
 	result->table_description = table.schema_name + "." + table.name;
 	result->root_location = table.location;
+	result->source.schema_name = table.schema_name;
+	result->source.table_name = table.name;
+	for (auto &entry : table.parameters) {
+		auto name = StringUtil::Lower(entry.first);
+		if (StringUtil::StartsWith(name, "projection.") || name == "storage.location.template") {
+			result->source.parameters.insert(entry);
+		}
+	}
 	// Athena's check comes first: every partition column needs a projection type
 	vector<string> missing;
 	for (auto &column : table.partition_keys) {
@@ -385,27 +397,150 @@ static string FormatInteger(int64_t value, idx_t digits) {
 	return negative ? "-" + text : text;
 }
 
-vector<PartitionProjection::ProjectedValue>
-PartitionProjection::ProjectedValues(ClientContext &context, const PartitionProjectionKey &key) const {
-	vector<ProjectedValue> result;
+void PartitionProjection::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty(100, "schema_name", source.schema_name);
+	serializer.WriteProperty(101, "table_name", source.table_name);
+	serializer.WriteProperty(102, "location", root_location);
+	vector<string> partition_keys;
+	vector<LogicalType> key_types;
+	for (auto &key : keys) {
+		partition_keys.push_back(key.name);
+		key_types.push_back(key.column_type);
+	}
+	serializer.WriteProperty(103, "partition_keys", partition_keys);
+	serializer.WriteProperty(104, "key_types", key_types);
+	serializer.WriteProperty(105, "parameters", source.parameters);
+}
+
+unique_ptr<PartitionProjection> PartitionProjection::Deserialize(Deserializer &deserializer) {
+	GlueTableInfo table;
+	table.schema_name = deserializer.ReadProperty<string>(100, "schema_name");
+	table.name = deserializer.ReadProperty<string>(101, "table_name");
+	table.location = deserializer.ReadProperty<string>(102, "location");
+	for (auto &name : deserializer.ReadProperty<vector<string>>(103, "partition_keys")) {
+		GlueColumn column;
+		column.name = name;
+		table.partition_keys.push_back(std::move(column));
+	}
+	auto key_types = deserializer.ReadProperty<vector<LogicalType>>(104, "key_types");
+	table.parameters = deserializer.ReadProperty<unordered_map<string, string>>(105, "parameters");
+	return Parse(table, key_types);
+}
+
+//! Whether 'value' is one of an integer key's values (in the range and on the interval grid), and which; read
+//! leniently, since a padded key spells 7 as '07' and the predicate checks the spelling afterwards
+static bool TryIntegerValue(const PartitionProjectionKey &key, const Value &value, int64_t &result) {
+	auto integer = value.DefaultTryCastAs(LogicalType::BIGINT, nullptr, false);
+	if (!integer || integer->IsNull()) {
+		return false;
+	}
+	result = integer->GetValue<int64_t>();
+	if (result < key.range_start || result > key.range_end) {
+		return false;
+	}
+	auto offset = static_cast<uint64_t>(result) - static_cast<uint64_t>(key.range_start);
+	return offset % static_cast<uint64_t>(key.interval) == 0;
+}
+
+//! How many values an integer key has, saturating
+static idx_t IntegerCount(const PartitionProjectionKey &key) {
+	auto span = static_cast<uint64_t>(key.range_end) - static_cast<uint64_t>(key.range_start);
+	auto steps = span / static_cast<uint64_t>(key.interval);
+	return steps == NumericLimits<uint64_t>::Maximum() ? steps : steps + 1;
+}
+
+//! The span an interval covers in microseconds, at its shortest (28-day months) or longest (31-day months), saturating
+static int64_t IntervalMicros(const interval_t &interval, bool shortest) {
+	hugeint_t days = hugeint_t(interval.months) * hugeint_t(shortest ? 28 : 31) + hugeint_t(interval.days);
+	hugeint_t micros = days * hugeint_t(Interval::MICROS_PER_DAY) + hugeint_t(interval.micros);
+	hugeint_t max = hugeint_t(NumericLimits<int64_t>::Maximum());
+	return micros > max ? NumericLimits<int64_t>::Maximum() : Hugeint::Cast<int64_t>(micros);
+}
+
+PartitionProjection::KeyValues PartitionProjection::ProjectedValues(ClientContext &context,
+                                                                    const PartitionProjectionKey &key,
+                                                                    optional_ptr<const KeyFilter> filter,
+                                                                    idx_t max_kept) const {
+	KeyValues result;
+	vector<Value> constants;
+	// the values the predicate names are checked against the range instead of enumerating it; only for a column type
+	// that keeps distinct integers distinct (a FLOAT merges 16777216 and 16777217)
+	auto exact = key.column_type.IsIntegral() || key.column_type.id() == LogicalTypeId::VARCHAR;
+	if (key.type == PartitionProjectionType::INTEGER && exact && filter && filter->EqualityConstants(constants)) {
+		vector<int64_t> matches;
+		for (auto &constant : constants) {
+			int64_t match;
+			if (TryIntegerValue(key, constant, match)) {
+				matches.push_back(match);
+			}
+		}
+		std::sort(matches.begin(), matches.end());
+		matches.erase(std::unique(matches.begin(), matches.end()), matches.end());
+		for (auto match : matches) {
+			auto text = FormatInteger(match, key.digits);
+			if (!filter->Keep(text)) {
+				continue;
+			}
+			if (result.values.size() >= max_kept) {
+				result.exceeded = true;
+				break;
+			}
+			result.values.push_back(ProjectedValue {text, text});
+		}
+		result.count = IntegerCount(key);
+		return result;
+	}
+	// false once more than 'max_kept' values passed: the key's enumeration stops there
+	auto add = [&](ProjectedValue value) {
+		result.count++;
+		if (filter && !filter->Keep(value.value)) {
+			return true;
+		}
+		if (result.values.size() >= max_kept) {
+			result.exceeded = true;
+			return false;
+		}
+		result.values.push_back(std::move(value));
+		return true;
+	};
 	switch (key.type) {
 	case PartitionProjectionType::ENUM:
 		for (auto &value : key.enum_values) {
-			result.push_back(ProjectedValue {value, value});
-		}
-		break;
-	case PartitionProjectionType::INTEGER: {
-		auto current = key.range_start;
-		while (current <= key.range_end) {
-			auto text = FormatInteger(current, key.digits);
-			result.push_back(ProjectedValue {text, text});
-			context.InterruptCheck();
-			int64_t next;
-			if (!TryAddOperator::Operation(current, key.interval, next)) {
+			if (!add(ProjectedValue {value, value})) {
 				break;
 			}
-			current = next;
 		}
+		result.count = key.enum_values.size();
+		break;
+	case PartitionProjectionType::INTEGER: {
+		// the candidates: the range, tightened by the predicate's comparisons of the key (an integer column only: a
+		// text column compares text), on the interval grid
+		auto lower = key.range_start;
+		auto upper = key.range_end;
+		if (filter && key.column_type.IsIntegral()) {
+			filter->NarrowIntegerRange(lower, upper);
+		}
+		auto interval = hugeint_t(key.interval);
+		auto first = (hugeint_t(lower) - hugeint_t(key.range_start) + interval - 1) / interval * interval;
+		auto last = (hugeint_t(upper) - hugeint_t(key.range_start)) / interval * interval;
+		if (lower > upper || first > last) {
+			// no candidate
+		} else if ((last - first) / interval + 1 > Hugeint::Convert<idx_t>(max_kept)) {
+			// more candidates than the cap are never enumerated: Athena fails a scan that would generate such a column
+			result.exceeded = true;
+		} else {
+			auto current = Hugeint::Cast<int64_t>(hugeint_t(key.range_start) + first);
+			auto end = Hugeint::Cast<int64_t>(hugeint_t(key.range_start) + last);
+			while (true) {
+				auto text = FormatInteger(current, key.digits);
+				if (!add(ProjectedValue {text, text}) || current == end) {
+					break;
+				}
+				context.InterruptCheck();
+				current += key.interval;
+			}
+		}
+		result.count = IntegerCount(key);
 		break;
 	}
 	case PartitionProjectionType::DATE: {
@@ -417,12 +552,40 @@ PartitionProjection::ProjectedValues(ClientContext &context, const PartitionProj
 			                            table_description, key.name, key.format->Format(start),
 			                            key.format->Format(end));
 		}
+		auto unit = key.format->FinestUnit();
+		if (key.step.months == 0 && IntervalMicros(key.step, false) < IntervalMicros(unit, true)) {
+			// a step finer than the format's finest field lands in every directory but possibly the last: visit the
+			// directories and ask where the first step at or after each one falls, instead of walking the steps
+			auto step = hugeint_t(IntervalMicros(key.step, true));
+			auto current = start;
+			while (current <= end) {
+				auto steps = (hugeint_t(current.value) - hugeint_t(start.value) + step - hugeint_t(1)) / step;
+				if (hugeint_t(start.value) + steps * step > hugeint_t(end.value)) {
+					break;
+				}
+				auto directory = key.format->Format(current);
+				if (!add(ProjectedValue {DateValue(key, ReadBack(key, directory)), directory})) {
+					break;
+				}
+				context.InterruptCheck();
+				timestamp_t next;
+				if (!Interval::TryAdd(current, unit, next) || next <= current) {
+					break;
+				}
+				current = next;
+			}
+			break;
+		}
 		auto current = start;
+		string last_directory;
 		while (current <= end) {
 			auto directory = key.format->Format(current);
 			// a finer step than the format spells a partition several times: keep one, valued as the directory reads
-			if (result.empty() || result.back().directory != directory) {
-				result.push_back(ProjectedValue {DateValue(key, ReadBack(key, directory)), directory});
+			if (last_directory != directory) {
+				last_directory = directory;
+				if (!add(ProjectedValue {DateValue(key, ReadBack(key, directory)), directory})) {
+					break;
+				}
 			}
 			context.InterruptCheck();
 			timestamp_t next;
@@ -500,15 +663,46 @@ string PartitionProjection::Location(const vector<vector<ProjectedValue>> &key_v
 	return location;
 }
 
-vector<GluePartitionInfo> PartitionProjection::Derive(ClientContext &context) const {
+void PartitionProjection::ThrowTooManyPartitions(idx_t max_partitions) const {
+	throw InvalidInputException(
+	    "Scan of Glue table '%s' would derive more than %d partitions "
+	    "(glue_projection_max_partitions); filter on the partition columns or raise the setting",
+	    table_description, max_partitions);
+}
+
+//! a * b, saturating at the largest idx_t
+static idx_t SaturatingMultiply(idx_t a, idx_t b) {
+	idx_t result;
+	return TryMultiplyOperator::Operation<idx_t, idx_t, idx_t>(a, b, result) ? result : NumericLimits<idx_t>::Maximum();
+}
+
+PartitionProjection::Derivation PartitionProjection::Derive(ClientContext &context,
+                                                            const vector<optional_ptr<const KeyFilter>> &filters,
+                                                            idx_t max_partitions) const {
+	D_ASSERT(filters.size() == keys.size());
+	Derivation result;
+	result.unfiltered = 1;
+	idx_t derived = 1;
+	bool exceeded = false;
+	bool empty = false;
 	vector<vector<ProjectedValue>> key_values;
-	for (auto &key : keys) {
-		key_values.push_back(ProjectedValues(context, key));
-		if (key_values.back().empty()) {
-			return {};
-		}
+	for (idx_t i = 0; i < keys.size(); i++) {
+		auto values = ProjectedValues(context, keys[i], filters[i], max_partitions);
+		result.narrowed.push_back(values.values.size() < values.count);
+		result.unfiltered = SaturatingMultiply(result.unfiltered, values.count);
+		derived = SaturatingMultiply(derived, values.values.size());
+		exceeded = exceeded || values.exceeded;
+		empty = empty || (values.values.empty() && !values.exceeded);
+		key_values.push_back(std::move(values.values));
 	}
-	vector<GluePartitionInfo> partitions;
+	// a key no value of which passed empties the product whatever the other keys hold; only then is a key past the
+	// cap no error (a cap of 0 stops a key before its first value, which is not an empty key)
+	if (empty) {
+		return result;
+	}
+	if (exceeded || derived > max_partitions) {
+		ThrowTooManyPartitions(max_partitions);
+	}
 	// an odometer over the keys' values: the first key is the outermost
 	vector<idx_t> indexes(keys.size(), 0);
 	while (true) {
@@ -517,7 +711,7 @@ vector<GluePartitionInfo> PartitionProjection::Derive(ClientContext &context) co
 			partition.values.push_back(key_values[i][indexes[i]].value);
 		}
 		partition.location = Location(key_values, indexes);
-		partitions.push_back(std::move(partition));
+		result.partitions.push_back(std::move(partition));
 		context.InterruptCheck();
 		idx_t position = keys.size();
 		while (position > 0) {
@@ -527,7 +721,7 @@ vector<GluePartitionInfo> PartitionProjection::Derive(ClientContext &context) co
 			}
 			indexes[position] = 0;
 			if (position == 0) {
-				return partitions;
+				return result;
 			}
 		}
 	}

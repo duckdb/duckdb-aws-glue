@@ -111,14 +111,14 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
     is a unit without an `interval`, which still has to name a unit); otherwise
     the step is one of the format's finest field: a day with a day field, a month with a month field and no day, a year
     with only a year; a format with time fields requires both. Both bounds are truncated to the format's precision
-    first. A step finer than the format spells
-    each partition once, and a DATE or TIMESTAMP column reads the directory (`y=2021` is 2021-01-01).
+    first. A step finer than the format spells each partition once (the directories are visited, not the steps), and a
+    DATE or TIMESTAMP column reads the directory (`y=2021` is 2021-01-01).
     Stepping by months clamps the day to the month's length and carries on from there (`01-31, 02-29, 03-29, ...`),
     as Java does. `format` is a Java `DateTimeFormatter` pattern with a year field, restricted to the letters `y` `M`
     `d` `H` `m` `s` `S` with Java's rules (one letter the minimum digits, more a zero-padded width, `yy` the last two
-    digits, `MMM` / `MMMM` the English month name, `S...` the fraction truncated to the count), quoted literals (`'T'`,
-    `''` a quote) and punctuation; any other letter, `[ ] { } #`, an unterminated quote or a pattern without a year
-    field fails the scan naming it. A `DATE`
+    digits, `MMM` / `MMMM` the English month name, `S...` the fraction truncated to the count, a field that appears
+    twice reading one value), quoted literals (`'T'`, `''` a quote) and punctuation; any other letter, `[ ] { } #`, an
+    unterminated quote or a pattern without a year field fails the scan naming it. A `DATE`
     partition column reads the value as a date and a `TIMESTAMP` column as a timestamp whatever the directory
     format; a string column reads the formatted text.
   - `type = injected` is not supported: the scan fails naming the column.
@@ -128,11 +128,19 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   - A missing or malformed parameter (a key without `projection.<key>.type`, a range that is not two values or runs
     backwards, a template without a key's placeholder, ...) fails the scan with an `Invalid Input Error` naming the
     parameter or column.
-  - Filters on the partition columns prune the derived partitions before anything is listed, as for registered
-    partitions. `glue_projection_max_partitions` (default 100000) is the most derived partitions a scan may still
-    have to list after that pruning (as the planner knows it; a join filter applied when the scan starts prunes
-    later): over it the scan fails naming the count and the setting, so an open-ended date range or a wide integer
-    range does not list S3 for hours. The cross product itself is not capped.
+  - A filter on one partition column narrows that column's projected values before the cross product is derived: an
+    equality or IN on an integer key of an integer or string column is checked against the range without enumerating
+    it, a comparison (`<`, `BETWEEN`, ...) on an integer key of an integer column narrows the range arithmetically
+    (also when the constant is a wider integer than the column), and any other predicate (`hour % 2 = 1`, a comparison
+    with a non-integer constant or on a string column, a floating-point column) enumerates the key's remaining values
+    and tests each. A filter over two partition columns, or a join filter applied when the scan
+    starts, prunes the derived partitions afterwards, as for registered partitions.
+    `glue_projection_max_partitions` (default 100000) is the most partitions a scan may derive after that narrowing:
+    over it the scan fails naming the setting before anything is derived, and an integer key with more values left to
+    enumerate than the cap fails the same way before the first, so an open-ended date range or a wide integer range
+    costs neither time nor memory nor S3 listings. Athena counts its limit (Trino's `hive.max-partitions-per-scan`) the
+    same way, after the static predicates and before join filters. EXPLAIN's `Scanning Files` counts the partitions
+    kept out of every partition the parameters describe, and names no total when their product does not fit 64 bits.
   - Writes (`INSERT`, `COPY ... FROM`, `CREATE TABLE ... AS`) into such a table stay refused: the partitions they
     would register are ignored by Athena. `glue_partitions()` keeps listing the registered partitions only, as
     Athena's `SHOW PARTITIONS` does.
@@ -503,8 +511,9 @@ The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, on
 `scan_id` that numbers the scans of a query from 1:
 
 - `partitions`: the table's `partitions` were loaded, taking `duration_ms`;
-- `plan`: of `partitions`, `partitions_read` are read, with `listings` S3 listings; `detail` is `root` when they are
-  listed in one listing of the table location, else `partitions`;
+- `plan`: of `partitions` (for a projected table, every partition its parameters describe), `partitions_read` are
+  read, with `listings` S3 listings; `detail` is `root` when they are listed in one listing of the table location, else
+  `partitions`;
 - `listing`: one listing (`detail`: `table`, `root` or `partition`) of `partitions_read` partitions found `files`
   data files in `duration_ms`;
 - `sample`: the cardinality sample listed `files` files and measured one in `duration_ms` (`files` is NULL when

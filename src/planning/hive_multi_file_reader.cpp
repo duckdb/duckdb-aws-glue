@@ -8,6 +8,7 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
@@ -27,12 +28,14 @@
 #include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -91,12 +94,12 @@ idx_t HiveScanInfo::GetPartitionKeyIndex(const string &name) const {
 }
 
 shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientContext &context) const {
+	if (projection) {
+		DerivePartitions(context, vector<optional_ptr<const PartitionProjection::KeyFilter>>(partition_keys.size()));
+	}
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
 	if (!partitions) {
-		if (projection) {
-			// Athena ignores the registered partitions of such a table
-			partitions = make_shared_ptr<const vector<GluePartitionInfo>>(projection->Derive(context));
-		} else if (partition_keys.empty() || catalog_name.empty()) {
+		if (partition_keys.empty() || catalog_name.empty()) {
 			// unpartitioned, or a hive_scan that was given none
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 		} else {
@@ -108,6 +111,40 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 		}
 	}
 	return partitions;
+}
+
+vector<bool>
+HiveScanInfo::DerivePartitions(ClientContext &context,
+                               const vector<optional_ptr<const PartitionProjection::KeyFilter>> &filters) const {
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	if (partitions) {
+		return {};
+	}
+	// Athena ignores the registered partitions of such a table; the cap bounds what is derived
+	Value max_partitions;
+	idx_t cap = 100000;
+	if (context.TryGetCurrentSetting("glue_projection_max_partitions", max_partitions) && !max_partitions.IsNull()) {
+		cap = max_partitions.GetValue<idx_t>();
+	}
+	auto derived = projection->Derive(context, filters, cap);
+	unfiltered_partitions = derived.unfiltered;
+	partitions = make_shared_ptr<const vector<GluePartitionInfo>>(std::move(derived.partitions));
+	return derived.narrowed;
+}
+
+idx_t HiveScanInfo::UnfilteredPartitions() const {
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	return unfiltered_partitions;
+}
+
+//! The partitions a projected table's parameters describe, for EXPLAIN and the GlueScan log: nothing when their product
+//! does not fit 64 bits, the saturated value is no count
+static optional_idx ProjectedPartitionCount(const HiveScanInfo &info) {
+	auto count = info.UnfilteredPartitions();
+	if (count == NumericLimits<idx_t>::Maximum()) {
+		return optional_idx();
+	}
+	return optional_idx(count);
 }
 
 bool HiveScanInfo::PartitionsLoaded() const {
@@ -402,17 +439,6 @@ void HiveMultiFileList::PlanListings() const {
 	}
 	auto partitions = scan_info->Partitions(client_context);
 	auto indexes = PartitionIndexes();
-	if (scan_info->projection) {
-		// derived partitions exist whether or not data does: too many of them would list S3 for hours
-		Value max_partitions;
-		if (client_context.TryGetCurrentSetting("glue_projection_max_partitions", max_partitions) &&
-		    !max_partitions.IsNull() && indexes->size() > max_partitions.GetValue<idx_t>()) {
-			throw InvalidInputException("Scan of Glue table '%s' would list %d derived partitions after pruning, more "
-			                            "than glue_projection_max_partitions (%d); filter on the partition columns or "
-			                            "raise the setting",
-			                            scan_info->Describe(), indexes->size(), max_partitions.GetValue<idx_t>());
-		}
-	}
 	planned = true;
 	// the partitions below the table root can be listed together
 	auto root = ComparableLocation(scan_info->root_location);
@@ -443,7 +469,13 @@ void HiveMultiFileList::PlanListings() const {
 			partitions_below_root++;
 		}
 	}
-	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
+	if (scan_info->projection && partitions_below_root > 0) {
+		// the derived partitions are only the ones the filters kept; the root holds every projected one
+		partitions_below_root = MaxValue<idx_t>(partitions_below_root, scan_info->UnfilteredPartitions());
+	}
+	// a ceiling that does not overflow: the unfiltered product saturates at the largest idx_t
+	auto root_pages =
+	    partitions_below_root / S3_KEYS_PER_LIST_PAGE + (partitions_below_root % S3_KEYS_PER_LIST_PAGE != 0 ? 1 : 0);
 	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
 	auto partition_requests = below_root.size();
 	bool list_root;
@@ -467,7 +499,7 @@ void HiveMultiFileList::PlanListings() const {
 		listing_jobs.push_back(ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end)});
 	}
 	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "plan");
-	event.partitions = partitions->size();
+	event.partitions = scan_info->projection ? ProjectedPartitionCount(*scan_info) : optional_idx(partitions->size());
 	event.partitions_read = indexes->size();
 	event.listings = listing_jobs.size();
 	event.detail = listing_jobs.empty() || !listing_jobs[0].root ? "partitions" : "root";
@@ -885,15 +917,19 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	auto &list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = list.ScanInfo();
 	serializer.WriteProperty(103, "location", info.root_location);
-	// by value: an index into Glue's partition list means nothing elsewhere. Partitions are loaded lazily; the
-	// optimizer only serializes scans of statements that plan one, which load them anyway (GetFileCount, pruning).
+	// by value: an index into Glue's partition list means nothing elsewhere. A projected scan whose partitions are not
+	// derived yet is written as its projection instead, so a copy made before filter pushdown derives with its own
+	// filters; once derived, the kept partitions are what tells two scans of the table apart (CommonSubplanOptimizer)
+	bool by_projection = info.projection && !info.PartitionsLoaded();
 	vector<vector<string>> partitions;
 	vector<string> locations;
-	auto all = info.Partitions(list.Context());
-	auto indexes = list.PartitionIndexes();
-	for (auto index : *indexes) {
-		partitions.push_back((*all)[index].values);
-		locations.push_back((*all)[index].location);
+	if (!by_projection) {
+		auto all = info.Partitions(list.Context());
+		auto indexes = list.PartitionIndexes();
+		for (auto index : *indexes) {
+			partitions.push_back((*all)[index].values);
+			locations.push_back((*all)[index].location);
+		}
 	}
 	serializer.WriteProperty(104, "partitions", partitions);
 	serializer.WriteProperty(105, "partition_locations", locations);
@@ -905,6 +941,9 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(111, "column_types", info.types);
 	serializer.WriteProperty(112, "csv_options", info.csv_options);
 	serializer.WriteProperty(113, "json_options", info.json_options);
+	const unique_ptr<PartitionProjection> none;
+	serializer.WritePropertyWithDefault<unique_ptr<PartitionProjection>>(114, "projection",
+	                                                                     by_projection ? info.projection : none);
 }
 
 //! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
@@ -925,18 +964,25 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	info->types = deserializer.ReadProperty<vector<LogicalType>>(111, "column_types");
 	info->csv_options = deserializer.ReadProperty<HiveCSVOptions>(112, "csv_options");
 	info->json_options = deserializer.ReadProperty<HiveJSONOptions>(113, "json_options");
+	auto projection = deserializer.ReadPropertyWithExplicitDefault<unique_ptr<PartitionProjection>>(
+	    114, "projection", unique_ptr<PartitionProjection>());
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
 	}
-	vector<GluePartitionInfo> partition_infos;
-	for (idx_t i = 0; i < partitions.size(); i++) {
-		GluePartitionInfo partition;
-		partition.values = std::move(partitions[i]);
-		partition.location = std::move(locations[i]);
-		partition_infos.push_back(std::move(partition));
+	if (projection) {
+		// derived on first use, with the filters this scan receives
+		info->projection = std::move(projection);
+	} else {
+		vector<GluePartitionInfo> partition_infos;
+		for (idx_t i = 0; i < partitions.size(); i++) {
+			GluePartitionInfo partition;
+			partition.values = std::move(partitions[i]);
+			partition.location = std::move(locations[i]);
+			partition_infos.push_back(std::move(partition));
+		}
+		info->SetPartitions(std::move(partition_infos));
 	}
-	info->SetPartitions(std::move(partition_infos));
 	unique_ptr<FunctionData> bind_data;
 	function = BoundTableFunction(BindHiveScan(context, std::move(info), bind_data));
 	return bind_data;
@@ -1295,6 +1341,275 @@ static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo
 	return kept;
 }
 
+//! The filters that reference one partition key and nothing else, as a filter on that key's values: the filter is
+//! evaluated with the value in place of the key column, as PartitionsToRead evaluates it on a whole partition
+class ExpressionKeyFilter : public PartitionProjection::KeyFilter {
+public:
+	ExpressionKeyFilter(ClientContext &context, const HiveScanInfo &info, TableIndex table_index,
+	                    const vector<PartitionKeyProjection> &projections, idx_t key_index)
+	    : context(context), info(info), table_index(table_index), projections(projections), key_index(key_index) {
+	}
+
+	void Add(const Expression &filter, idx_t filter_index) {
+		filters.push_back(filter.Copy());
+		filter_indexes.push_back(filter_index);
+		pruned.push_back(false);
+	}
+	//! The filters that dropped a value, as indexes into the pushed-down list: what EXPLAIN lists as file filters
+	vector<idx_t> PruningFilterIndexes() const {
+		vector<idx_t> result;
+		for (idx_t i = 0; i < filters.size(); i++) {
+			if (pruned[i]) {
+				result.push_back(filter_indexes[i]);
+			}
+		}
+		return result;
+	}
+
+	bool EqualityConstants(vector<Value> &constants) const override {
+		for (idx_t i = 0; i < filters.size(); i++) {
+			if (EqualityConstantsOf(*filters[i], constants)) {
+				// the equality drops every other value of the key, though it is never evaluated on one
+				pruned[i] = true;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void NarrowIntegerRange(int64_t &lower, int64_t &upper) const override {
+		for (idx_t i = 0; i < filters.size(); i++) {
+			if (NarrowBy(*filters[i], lower, upper)) {
+				// the comparison drops the values it leaves out, though it is never evaluated on one
+				pruned[i] = true;
+			}
+		}
+	}
+
+	bool Keep(const string &value) const override {
+		GluePartitionInfo partition;
+		partition.values.resize(info.partition_keys.size());
+		partition.values[key_index] = value;
+		for (idx_t i = 0; i < filters.size(); i++) {
+			auto copy = filters[i]->Copy();
+			ReplacePartitionColumnRefs(context, copy, table_index, projections, info, partition);
+			Value result;
+			if (!copy->IsScalar() || !copy->IsFoldable() ||
+			    !ExpressionExecutor::TryEvaluateScalar(context, *copy, result)) {
+				continue;
+			}
+			if (result.IsNull() || !result.GetValue<bool>()) {
+				pruned[i] = true;
+				return false;
+			}
+		}
+		return true;
+	}
+
+private:
+	//! Whether 'side' folds to a constant, and which
+	bool ConstantOf(const Expression &side, Value &result) const {
+		return side.IsFoldable() && side.IsScalar() && ExpressionExecutor::TryEvaluateScalar(context, side, result);
+	}
+	//! Whether 'side' is the key itself, or the key cast to an integer type every value of it survives (the binder
+	//! widens the column to meet a wider constant: `hour > 100000000000`); `hour // 2 = 5` names values of an
+	//! expression, not of the key
+	static bool IsKey(const Expression &side) {
+		if (side.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+			return true;
+		}
+		if (!BoundCastExpression::IsCast(side)) {
+			return false;
+		}
+		auto &cast = side.Cast<BoundFunctionExpression>();
+		auto &child = BoundCastExpression::Child(cast);
+		auto &from = child.GetReturnType();
+		auto &to = cast.GetReturnType();
+		// both integral: a string column compares text, and a cast to text or a decimal is not an integer comparison
+		return child.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+		       !BoundCastExpression::IsTryCast(cast) && from.IsIntegral() && to.IsIntegral() &&
+		       BoundCastExpression::CastIsInvertible(from, to);
+	}
+
+	//! Tightens 'lower' and 'upper' with a comparison of the key with a constant or a BETWEEN of the key (an AND was
+	//! split into its members before the pushdown); whether a bound moved. The bounds end up crossed when the predicate
+	//! leaves no value
+	bool NarrowBy(const Expression &filter, int64_t &lower, int64_t &upper) const {
+		if (filter.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+			auto &between = filter.Cast<BoundFunctionExpression>();
+			if (!IsKey(BoundBetweenExpression::Input(between))) {
+				return false;
+			}
+			bool moved = false;
+			Value constant;
+			if (ConstantOf(BoundBetweenExpression::LowerBound(between), constant)) {
+				moved = Tighten(BoundBetweenExpression::LowerComparisonType(between), constant, lower, upper) || moved;
+			}
+			if (ConstantOf(BoundBetweenExpression::UpperBound(between), constant)) {
+				moved = Tighten(BoundBetweenExpression::UpperComparisonType(between), constant, lower, upper) || moved;
+			}
+			return moved;
+		}
+		if (!BoundComparisonExpression::IsComparison(filter)) {
+			return false;
+		}
+		auto &comparison = filter.Cast<BoundFunctionExpression>();
+		auto &left = BoundComparisonExpression::Left(comparison);
+		auto &right = BoundComparisonExpression::Right(comparison);
+		auto type = filter.GetExpressionType();
+		Value constant;
+		if (IsKey(left) && ConstantOf(right, constant)) {
+			// key <op> constant
+		} else if (IsKey(right) && ConstantOf(left, constant)) {
+			type = FlipComparisonExpression(type);
+		} else {
+			return false;
+		}
+		return Tighten(type, constant, lower, upper);
+	}
+
+	//! Tightens the bounds with `key <type> constant`; whether a bound moved. The constant is read as a HUGEINT, so one
+	//! wider than the key's type (`account > 10000000000000000000`) bounds the key too: above every BIGINT it leaves
+	//! nothing to a > and everything to a <, below every BIGINT the reverse
+	static bool Tighten(ExpressionType type, const Value &constant, int64_t &lower, int64_t &upper) {
+		auto wide = constant.DefaultTryCastAs(LogicalType::HUGEINT, nullptr, true);
+		if (!wide || wide->IsNull() || lower > upper) {
+			// not an integer, or nothing left to drop
+			return false;
+		}
+		auto value = wide->GetValue<hugeint_t>();
+		auto max = hugeint_t(NumericLimits<int64_t>::Maximum());
+		auto min = hugeint_t(NumericLimits<int64_t>::Minimum());
+		auto new_lower = lower;
+		auto new_upper = upper;
+		switch (type) {
+		case ExpressionType::COMPARE_GREATERTHAN:
+		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+			if (value < min) {
+				return false;
+			}
+			if (value > max || (type == ExpressionType::COMPARE_GREATERTHAN && value == max)) {
+				new_lower = 1;
+				new_upper = 0;
+			} else {
+				auto bound = Hugeint::Cast<int64_t>(value);
+				new_lower = MaxValue<int64_t>(lower, type == ExpressionType::COMPARE_GREATERTHAN ? bound + 1 : bound);
+			}
+			break;
+		case ExpressionType::COMPARE_LESSTHAN:
+		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+			if (value > max) {
+				return false;
+			}
+			if (value < min || (type == ExpressionType::COMPARE_LESSTHAN && value == min)) {
+				new_lower = 1;
+				new_upper = 0;
+			} else {
+				auto bound = Hugeint::Cast<int64_t>(value);
+				new_upper = MinValue<int64_t>(upper, type == ExpressionType::COMPARE_LESSTHAN ? bound - 1 : bound);
+			}
+			break;
+		default:
+			// an equality is EqualityConstants', and a <> names no range
+			return false;
+		}
+		bool moved = new_lower != lower || new_upper != upper;
+		lower = new_lower;
+		upper = new_upper;
+		return moved;
+	}
+
+	//! The constants an equality, an IN, or an OR of those compares the key with; false for another shape
+	bool EqualityConstantsOf(const Expression &filter, vector<Value> &constants) const {
+		if (BoundComparisonExpression::IsComparison(filter)) {
+			if (filter.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+				return false;
+			}
+			auto &comparison = filter.Cast<BoundFunctionExpression>();
+			auto &left = BoundComparisonExpression::Left(comparison);
+			auto &right = BoundComparisonExpression::Right(comparison);
+			Value constant;
+			if ((IsKey(left) && ConstantOf(right, constant)) || (IsKey(right) && ConstantOf(left, constant))) {
+				constants.push_back(std::move(constant));
+				return true;
+			}
+			return false;
+		}
+		switch (filter.GetExpressionClass()) {
+		case ExpressionClass::BOUND_OPERATOR: {
+			auto &op = filter.Cast<BoundOperatorExpression>();
+			auto &children = op.GetChildren();
+			if (op.GetExpressionType() != ExpressionType::COMPARE_IN || children.empty() || !IsKey(*children[0])) {
+				return false;
+			}
+			for (idx_t i = 1; i < children.size(); i++) {
+				Value constant;
+				if (!ConstantOf(*children[i], constant)) {
+					return false;
+				}
+				constants.push_back(std::move(constant));
+			}
+			return true;
+		}
+		case ExpressionClass::BOUND_CONJUNCTION: {
+			auto &conjunction = filter.Cast<BoundConjunctionExpression>();
+			if (conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+				for (auto &child : conjunction.GetChildren()) {
+					if (!EqualityConstantsOf(*child, constants)) {
+						return false;
+					}
+				}
+				return true;
+			}
+			// AND: the constants of any equality in it; Keep checks the other members
+			for (auto &child : conjunction.GetChildren()) {
+				if (EqualityConstantsOf(*child, constants)) {
+					return true;
+				}
+			}
+			return false;
+		}
+		default:
+			return false;
+		}
+	}
+
+	ClientContext &context;
+	const HiveScanInfo &info;
+	TableIndex table_index;
+	const vector<PartitionKeyProjection> &projections;
+	idx_t key_index;
+	vector<unique_ptr<Expression>> filters;
+	vector<idx_t> filter_indexes;
+	//! Per filter, whether it dropped a value (set while the key's values are enumerated)
+	mutable vector<bool> pruned;
+};
+
+//! The partition key the filter references, when it references that key and no other column of the scan
+static optional_idx SingleKeyOf(const Expression &filter, TableIndex table_index,
+                                const vector<PartitionKeyProjection> &projections) {
+	optional_idx key;
+	bool single = true;
+	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(filter, [&](const BoundColumnRefExpression &colref) {
+		if (colref.Binding().table_index != table_index) {
+			single = false;
+			return;
+		}
+		auto column_index = colref.Binding().column_index.GetIndex();
+		for (auto &projection : projections) {
+			if (projection.projected_column_index == column_index) {
+				if (key.IsValid() && key.GetIndex() != projection.partition_key_index) {
+					single = false;
+				}
+				key = projection.partition_key_index;
+				return;
+			}
+		}
+		single = false;
+	});
+	return single ? key : optional_idx();
+}
+
 //! Which projected columns ('column_ids' into 'column_names') are partition keys
 static vector<PartitionKeyProjection> PartitionKeyProjections(const HiveScanInfo &info,
                                                               const vector<column_t> &column_ids,
@@ -1372,16 +1687,46 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// before its directory is listed. Such a filter is then true of every row read and is removed, as DuckDB's own
 	// hive partitioning does: kept, the optimizer would cost it a second time (a range filter keeps a fifth of the
 	// rows the pruning already narrowed down).
-	// first use of the partitions: loaded here, with the filters known
+	// first use of the partitions: loaded here, with the filters known. A projected table derives its partitions with
+	// the filters on one key applied to that key's values, before the cross product
+	unordered_set<idx_t> pruning_filters;
+	if (info.projection && !info.PartitionsLoaded()) {
+		vector<unique_ptr<ExpressionKeyFilter>> key_filters(info.partition_keys.size());
+		for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
+			auto key = SingleKeyOf(*filters[filter_index], pushdown_info.table_index, projections);
+			if (!key.IsValid()) {
+				continue;
+			}
+			auto &key_filter = key_filters[key.GetIndex()];
+			if (!key_filter) {
+				key_filter = make_uniq<ExpressionKeyFilter>(context, info, pushdown_info.table_index, projections,
+				                                            key.GetIndex());
+			}
+			key_filter->Add(*filters[filter_index], filter_index);
+		}
+		vector<optional_ptr<const PartitionProjection::KeyFilter>> pointers;
+		for (auto &key_filter : key_filters) {
+			pointers.emplace_back(key_filter.get());
+		}
+		// a filter that narrowed its key pruned partitions, as EXPLAIN reports it
+		auto narrowed = info.DerivePartitions(context, pointers);
+		for (idx_t key = 0; key < narrowed.size(); key++) {
+			if (narrowed[key] && key_filters[key]) {
+				auto indexes = key_filters[key]->PruningFilterIndexes();
+				pruning_filters.insert(indexes.begin(), indexes.end());
+			}
+		}
+	}
 	auto &hive_list = files.Cast<HiveMultiFileList>();
 	auto candidates = hive_list.PartitionIndexes();
 	auto partitions = info.Partitions(context);
-	unordered_set<idx_t> pruning_filters;
 	unordered_set<idx_t> decided_filters;
 	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
 	                             filters, pruning_filters, decided_filters);
 	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);
-	if (!pushdown_info.extra_info.total_files.IsValid()) {
+	// the first pushdown of this scan starts the retained filters; a later one (a predicate pushed into a materialized
+	// CTE) adds to them. filtered_files is set below on every pushdown; total_files is not for a product over 2^64
+	if (!pushdown_info.extra_info.filtered_files.IsValid()) {
 		pushdown_info.extra_info.file_filter_expressions = vector<unique_ptr<Expression>>();
 	}
 	vector<unique_ptr<Expression>> remaining_filters;
@@ -1393,8 +1738,10 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 		}
 	}
 	filters = std::move(remaining_filters);
-	// reported as files in EXPLAIN, but these are partitions: nothing has been listed yet
-	pushdown_info.extra_info.total_files = candidates->size();
+	// reported as files in EXPLAIN, but these are partitions: nothing has been listed yet; a projected table reports
+	// every partition its parameters describe, pruned ones included
+	pushdown_info.extra_info.total_files =
+	    info.projection ? ProjectedPartitionCount(info) : optional_idx(candidates->size());
 	pushdown_info.extra_info.filtered_files = kept.size();
 	if (kept.size() == candidates->size()) {
 		return nullptr;

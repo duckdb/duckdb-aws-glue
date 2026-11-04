@@ -6,6 +6,8 @@
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/time.hpp"
 
+#include <cstring>
+
 namespace duckdb {
 
 static bool IsSupportedLetter(char c) {
@@ -39,6 +41,14 @@ static const char *CountWord(idx_t count) {
 	default:
 		return "nine times";
 	}
+}
+
+//! The pattern letters from the coarsest field to the finest
+static constexpr const char FIELD_ORDER[] = "yMdHmsS";
+static constexpr idx_t FIELD_COUNT = sizeof(FIELD_ORDER) - 1;
+
+static idx_t FieldRank(char letter) {
+	return NumericCast<idx_t>(std::strchr(FIELD_ORDER, letter) - FIELD_ORDER);
 }
 
 JavaDateFormat::JavaDateFormat(const string &pattern, const string &parameter, const string &table_description) {
@@ -105,12 +115,15 @@ JavaDateFormat::JavaDateFormat(const string &pattern, const string &parameter, c
 			elements.push_back(element);
 			if (c == 'y') {
 				has_year_field = true;
-			} else if (c == 'd') {
-				has_day_field = true;
-			} else if (c == 'M') {
-				has_month_field = true;
-			} else {
+			} else if (c != 'M' && c != 'd') {
 				has_time_field = true;
+			}
+			// the finest field decides the step unit; a fraction field repeated at another width counts at its
+			// narrowest, the precision at which its readings agree
+			auto rank = FieldRank(c);
+			if (rank > FieldRank(finest_letter) || (rank == FieldRank(finest_letter) && count < finest_count)) {
+				finest_letter = c;
+				finest_count = count;
 			}
 			position += count;
 			continue;
@@ -140,6 +153,31 @@ static string FormatNumber(int64_t value, idx_t width) {
 		text.insert(0, width - text.size(), '0');
 	}
 	return value < 0 ? "-" + text : text;
+}
+
+interval_t JavaDateFormat::FinestUnit() const {
+	switch (finest_letter) {
+	case 'y':
+		return interval_t {Interval::MONTHS_PER_YEAR, 0, 0};
+	case 'M':
+		return interval_t {1, 0, 0};
+	case 'd':
+		return interval_t {0, 1, 0};
+	case 'H':
+		return interval_t {0, 0, Interval::MICROS_PER_HOUR};
+	case 'm':
+		return interval_t {0, 0, Interval::MICROS_PER_MINUTE};
+	case 's':
+		return interval_t {0, 0, Interval::MICROS_PER_SEC};
+	default: {
+		// the fraction's last digit; the digits past the sixth read as zeros, so a microsecond at the finest
+		int64_t micros = 1;
+		for (idx_t digit = MinValue<idx_t>(finest_count, 6); digit < 6; digit++) {
+			micros *= 10;
+		}
+		return interval_t {0, 0, micros};
+	}
+	}
 }
 
 string JavaDateFormat::Format(timestamp_t value) const {
@@ -226,8 +264,18 @@ static bool ParseDigits(const string &text, idx_t &position, idx_t min_width, id
 }
 
 bool JavaDateFormat::TryParse(const string &text, timestamp_t &result) const {
-	int64_t year = 1970, month = 1, day = 1, hour = 0, minute = 0, second = 0, fraction = 0;
-	idx_t fraction_digits = 0;
+	int64_t year = 1970, month = 1, day = 1, hour = 0, minute = 0, second = 0, nanos = 0;
+	// a field the pattern repeats has to read the same value each time, as Java's DateTimeFormatter requires
+	bool read[FIELD_COUNT] = {};
+	auto assign = [&](char letter, int64_t &field, int64_t value) {
+		auto rank = FieldRank(letter);
+		if (read[rank] && field != value) {
+			return false;
+		}
+		read[rank] = true;
+		field = value;
+		return true;
+	};
 	idx_t position = 0;
 	for (idx_t index = 0; index < elements.size(); index++) {
 		auto &element = elements[index];
@@ -244,7 +292,9 @@ bool JavaDateFormat::TryParse(const string &text, timestamp_t &result) const {
 			for (idx_t i = 0; i < 12; i++) {
 				auto name = names[i].GetString();
 				if (text.compare(position, name.size(), name) == 0) {
-					month = NumericCast<int64_t>(i + 1);
+					if (!assign('M', month, NumericCast<int64_t>(i + 1))) {
+						return false;
+					}
 					position += name.size();
 					found = true;
 					break;
@@ -272,31 +322,38 @@ bool JavaDateFormat::TryParse(const string &text, timestamp_t &result) const {
 		if (!ParseDigits(text, position, min_width, max_width, reserved, value)) {
 			return false;
 		}
+		bool consistent;
 		switch (element.letter) {
 		case 'y':
-			year = element.count == 2 ? 2000 + value : value;
+			consistent = assign('y', year, element.count == 2 ? 2000 + value : value);
 			break;
 		case 'M':
-			month = value;
+			consistent = assign('M', month, value);
 			break;
 		case 'd':
-			day = value;
+			consistent = assign('d', day, value);
 			break;
 		case 'H':
-			hour = value;
+			consistent = assign('H', hour, value);
 			break;
 		case 'm':
-			minute = value;
+			consistent = assign('m', minute, value);
 			break;
 		case 's':
-			second = value;
+			consistent = assign('s', second, value);
 			break;
 		case 'S':
-			fraction = value;
-			fraction_digits = element.count;
+			// the fraction as nanoseconds, whatever its width
+			for (idx_t i = element.count; i < 9; i++) {
+				value *= 10;
+			}
+			consistent = assign('S', nanos, value);
 			break;
 		default:
 			throw InternalException("JavaDateFormat: unexpected pattern letter");
+		}
+		if (!consistent) {
+			return false;
 		}
 	}
 	if (position != text.size()) {
@@ -310,15 +367,9 @@ bool JavaDateFormat::TryParse(const string &text, timestamp_t &result) const {
 	if (!Date::TryFromDate(NumericCast<int32_t>(year), NumericCast<int32_t>(month), NumericCast<int32_t>(day), date)) {
 		return false;
 	}
-	// the fraction as microseconds: digits beyond the sixth are dropped, missing ones are zeros
-	for (idx_t i = fraction_digits; i < 6; i++) {
-		fraction *= 10;
-	}
-	for (idx_t i = 6; i < fraction_digits; i++) {
-		fraction /= 10;
-	}
+	// digits beyond the sixth are dropped
 	auto time = Time::FromTime(NumericCast<int32_t>(hour), NumericCast<int32_t>(minute), NumericCast<int32_t>(second),
-	                           NumericCast<int32_t>(fraction));
+	                           NumericCast<int32_t>(nanos / 1000));
 	return Timestamp::TryFromDatetime(date, time, result);
 }
 

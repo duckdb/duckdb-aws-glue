@@ -117,8 +117,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption(
 	    "glue_projection_max_partitions",
 	    "The most partitions a scan of a table with Athena partition projection "
-	    "(projection.enabled) may still have to list after the filters on its partition columns "
-	    "pruned the derived ones; a scan over more fails instead of listing them. Default 100000.",
+	    "(projection.enabled) may derive after the query's filters on each partition column narrowed "
+	    "that column's values; a scan over more fails before deriving them. Default 100000.",
 	    LogicalType::UBIGINT, Value::UBIGINT(100000));
 
 	config.AddExtensionOption("hive_csv_parallel",

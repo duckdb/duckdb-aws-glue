@@ -11,6 +11,8 @@ require parquet
 
 require glue
 
+require json
+
 require-env GLUE_CATALOG_ID
 
 statement ok
@@ -43,7 +45,7 @@ statement ok
 SET redact_http_logs = false;
 
 statement ok
-CALL enable_logging('HTTP', storage := 'memory');
+CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
 
 #---------------------------------------------------------------------------
 # enum x integer: the cross product of the keys' values, at <key>=<value> below the table location
@@ -192,6 +194,18 @@ query I
 SELECT count(*) FROM my_datalake.default.pp_events;
 ----
 2
+
+# EXPLAIN lists a filter among the file filters only when it dropped a value of its key, and once, as DuckDB's own
+# hive partitioning does: the optimizer hands `hour % 2 = 1` over twice, and `hour % 1 = 0` drops nothing
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_events WHERE hour > 5 AND hour % 2 = 1;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*File Filters:[\s│]*\(hour > 5\) AND \(\(hour % 2\) = 1\)[\s│]*Scanning Files: 18/48.*
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_events WHERE hour > 5 AND hour % 1 = 0;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*File Filters:[\s│]*hour > 5[\s│]*Scanning Files: 36/48.*
 
 statement ok
 DROP TABLE my_datalake.default.pp_events;
@@ -1119,7 +1133,7 @@ CALL truncate_duckdb_logs();
 statement error
 SELECT count(*) FROM my_datalake.default.pp_prune;
 ----
-Invalid Input Error: Scan of Glue table 'default.pp_prune' would list 48 derived partitions after pruning, more than glue_projection_max_partitions (10); filter on the partition columns or raise the setting
+Invalid Input Error: Scan of Glue table 'default.pp_prune' would derive more than 10 partitions (glue_projection_max_partitions); filter on the partition columns or raise the setting
 
 query I
 SELECT count(*) FROM listed_dirs();
@@ -1134,7 +1148,7 @@ SELECT count(*) FROM my_datalake.default.pp_prune WHERE region = 'us' AND hour <
 statement error
 SELECT count(*) FROM my_datalake.default.pp_prune WHERE hour < 6;
 ----
-would list 12 derived partitions after pruning, more than glue_projection_max_partitions (10)
+would derive more than 10 partitions (glue_projection_max_partitions)
 
 # a table with registered partitions is not capped
 statement ok
@@ -1378,23 +1392,38 @@ SELECT id FROM my_datalake.default.pp_year;
 ----
 projection.y.interval must be a positive integer, got '1.5'
 
-# deriving the partitions honours max_execution_time: a millisecond step over a month format is 7.9 billion steps
-# for four partitions (no build finishes that inside the deadline, and the statement ends at the deadline either
-# way), and the derivation runs at bind, inside the query's deadline (as DuckDB's own binder and optimizer loops do
-# with ClientContext::InterruptCheck)
+# a millisecond step over a month format is 7.9 billion steps for four partitions: the four directories are visited
+# instead
 statement ok
 ALTER TABLE my_datalake.default.pp_year SET ('projection.y.format' = 'yyyy-MM', 'projection.y.range' = '2020-01,2020-04', 'projection.y.interval' = '1', 'projection.y.interval.unit' = 'MILLIS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_year WHERE y = '2020-03';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/4.*
+
+# deriving the partitions honours max_execution_time: an integer key over the whole range of BIGINT, under a cap that
+# admits every value (2^63 - 1 of them), with a predicate on its string column that no value passes is walked until the
+# deadline (ClientContext::InterruptCheck, as DuckDB's own binder and optimizer loops)
+statement ok
+ALTER TABLE my_datalake.default.pp_year SET ('projection.y.type' = 'integer', 'projection.y.range' = '1,9223372036854775807');
+
+statement ok
+SET glue_projection_max_partitions = 9223372036854775807;
 
 statement ok
 SET max_execution_time = 500;
 
 statement error
-SELECT count(*) FROM my_datalake.default.pp_year;
+SELECT count(*) FROM my_datalake.default.pp_year WHERE y < '0';
 ----
 Query exceeded maximum execution time
 
 statement ok
 RESET max_execution_time;
+
+statement ok
+RESET glue_projection_max_partitions;
 
 statement ok
 DROP TABLE my_datalake.default.pp_year;
@@ -1439,6 +1468,23 @@ SELECT id, n FROM my_datalake.default.pp_par_int ORDER BY id;
 ----
 2	0
 3	-5
+
+# a comparison narrows to the interval grid: of -5, 0 and 5, strictly between the ends leaves 0; from -4 up leaves 0 and
+# 5; -3..-1 holds no value
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_par_int WHERE n > -5 AND n < 5;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_par_int WHERE n >= -4;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 2/3.*
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_par_int WHERE n BETWEEN -3 AND -1;
+----
+0
 
 statement ok
 ALTER TABLE my_datalake.default.pp_par_int SET ('projection.n.digits' = '3');
@@ -1536,8 +1582,217 @@ EXPLAIN SELECT count(*) FROM my_datalake.default.pp_par_big WHERE n = -922337203
 ----
 physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/2.*
 
+# below the lowest BIGINT nothing is left; the lowest value is a value like any other
+query I
+SELECT count(*) FROM my_datalake.default.pp_par_big WHERE n < -9223372036854775808;
+----
+0
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_par_big WHERE n <= -9223372036854775808;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/2.*
+
 statement ok
 DROP TABLE my_datalake.default.pp_par_big;
+
+# a product that does not fit 64 bits (an unbounded key times 24 hours) is no count: the listing plan still measures
+# the root as larger than the narrowed scan, and EXPLAIN and the plan event report no total
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_sat;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_sat (id INTEGER, account BIGINT, hour INTEGER) PARTITIONED BY (account, hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_sat',
+    'projection.enabled' = 'true',
+    'projection.account.type' = 'integer',
+    'projection.account.range' = '0,9223372036854775807',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23',
+    'projection.hour.digits' = '2'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_sat/account=1/hour=02/a.parquet';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query III
+SELECT id, account, hour FROM my_datalake.default.pp_sat WHERE account = 1 AND hour = 2;
+----
+1	1	2
+
+query I
+SELECT DISTINCT dir FROM listed_dirs();
+----
+pp_sat/account=1/hour=02/
+
+query III
+SELECT partitions, partitions_read, detail FROM duckdb_logs_parsed('GlueScan') WHERE event = 'plan';
+----
+NULL	1	partitions
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_sat WHERE account = 1 AND hour = 2;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*File Filters:.*account = 1.*hour = 2.*
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_sat WHERE account = 1 AND hour = 2;
+----
+physical_plan	<!REGEX>:.*Scanning Files.*
+
+# a comparison on an integer key of an integer column narrows the range arithmetically, as an equality does: the two
+# accounts are the candidates, not the 2^63 values of the range, and the top of the range is a value like any other
+statement ok
+SET max_execution_time = 10000;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query III
+SELECT id, account, hour FROM my_datalake.default.pp_sat WHERE account BETWEEN 1 AND 2 AND hour = 2;
+----
+1	1	2
+
+query I
+SELECT DISTINCT dir FROM listed_dirs() ORDER BY dir;
+----
+pp_sat/account=1/hour=02/
+pp_sat/account=2/hour=02/
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_sat WHERE account BETWEEN 1 AND 2 AND hour = 2;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*File Filters:[\s│]*\(account BETWEEN 1 AND 2\) AND \(hour = 2\).*
+
+# the optimizer folds two comparisons into one BETWEEN, here with an exclusive lower bound: 6, 7, 8 and 9
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE account > 5 AND account <= 9 AND hour = 2;
+----
+0
+
+query III
+SELECT count(*), min(dir), max(dir) FROM listed_dirs();
+----
+4	pp_sat/account=6/hour=02/	pp_sat/account=9/hour=02/
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE account >= 9223372036854775807 AND hour = 2;
+----
+0
+
+query I
+SELECT DISTINCT dir FROM listed_dirs();
+----
+pp_sat/account=9223372036854775807/hour=02/
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE account > 9223372036854775807 AND hour = 2;
+----
+0
+
+# a predicate that names no range (account % 7 = 0) leaves the 2^63 values as candidates, more than the cap: the scan
+# fails at once instead of enumerating them, as Athena fails a scan that would generate the column's whole range
+statement error
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE account % 7 = 0 AND hour = 2;
+----
+would derive more than 100000 partitions (glue_projection_max_partitions)
+
+# a constant wider than the column still bounds the key (the binder casts the column to the constant's type:
+# CAST(account AS HUGEINT), CAST(hour AS BIGINT)): above every value of the type nothing is left to a >, below every
+# value nothing is dropped
+query I
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE account > 10000000000000000000 AND hour = 2;
+----
+0
+
+# under a cap of one, hour's 24 values could not be enumerated: the comparison through the cast narrows them to none
+statement ok
+SET glue_projection_max_partitions = 1;
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE hour > 100000000000 AND account = 1;
+----
+0
+
+# a cast over an expression of the key is not the key: hour's 24 values would be enumerated and tested. The constant
+# has to be one INTEGER can not hold, or the optimizer moves the cast onto it and no cast reaches the scan
+statement error
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE CAST(hour // 2 AS BIGINT) = 5000000000 AND account = 1;
+----
+would derive more than 1 partitions (glue_projection_max_partitions)
+
+statement ok
+RESET glue_projection_max_partitions;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE account >= -10000000000000000000 AND hour = 2;
+----
+would derive more than 100000 partitions (glue_projection_max_partitions)
+
+# an IN through the cast takes the equality path: the constant outside the type names no value, the 2^63 values are
+# never enumerated and one partition is listed
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM my_datalake.default.pp_sat WHERE account IN (100000000000000000000, 1) AND hour = 2;
+----
+1
+
+query I
+SELECT DISTINCT dir FROM listed_dirs();
+----
+pp_sat/account=1/hour=02/
+
+# a <= above every BIGINT drops nothing from the two values the BETWEEN narrowed the key to: both are listed
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM my_datalake.default.pp_sat WHERE account BETWEEN 1 AND 2 AND account <= 100000000000000000000 AND hour = 2;
+----
+1
+
+query I
+SELECT DISTINCT dir FROM listed_dirs() ORDER BY dir;
+----
+pp_sat/account=1/hour=02/
+pp_sat/account=2/hour=02/
+
+# a cast that can lose a value of the key (narrowing, or signed to unsigned) is not the key: the predicate is evaluated
+# on every value instead, which this key has too many of
+statement error
+SELECT id FROM my_datalake.default.pp_sat WHERE CAST(account AS INTEGER) = 1 AND hour = 2;
+----
+Invalid Input Error: Scan of Glue table 'default.pp_sat' would derive more than 100000 partitions (glue_projection_max_partitions); filter on the partition columns or raise the setting
+
+statement error
+SELECT id FROM my_datalake.default.pp_sat WHERE CAST(account AS UBIGINT) = 1 AND hour = 2;
+----
+would derive more than 100000 partitions (glue_projection_max_partitions)
+
+# a scan pushed down twice (the outer predicate pushed into a MATERIALIZED CTE) keeps the first pass's predicates in
+# the SQL it exports as, which the table-name fallback (a virtual column selected) relies on
+query II
+EXPLAIN (SQL) WITH p AS MATERIALIZED (SELECT id, account, hour, filename FROM my_datalake.default.pp_sat WHERE account = 1 AND hour BETWEEN 1 AND 3) SELECT * FROM p WHERE hour = 2;
+----
+sql	<REGEX>:.*column1 = CAST\(1 AS BIGINT\).*column2 BETWEEN CAST\(1 AS INTEGER\) AND CAST\(3 AS INTEGER\).*column2 = CAST\(2 AS INTEGER\).*
+
+statement ok
+RESET max_execution_time;
+
+statement ok
+DROP TABLE my_datalake.default.pp_sat;
 
 # enum white space is part of the value (' eu ' is not 'eu'); values may be any UTF-8 text
 statement ok
@@ -1739,3 +1994,643 @@ SELECT id FROM my_datalake.default.pp_par_flat;
 
 statement ok
 DROP TABLE my_datalake.default.pp_par_flat;
+
+#---------------------------------------------------------------------------
+# pruning before derivation: a predicate on one key narrows that key's values before the cross product; the cap counts
+# the partitions that would be derived after that, not the ones left after pruning
+#---------------------------------------------------------------------------
+# source: Athena HivePartitionProjectionShim.getProjectedPartitionValues narrows each column from its predicate before the
+# product; the cap counts partitions before dynamic (join) filters (BackgroundHiveSplitLoader.loadSplits)
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_wide;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_wide (id INTEGER, region INTEGER, hour INTEGER) PARTITIONED BY (region, hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_wide',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'integer',
+    'projection.region.range' = '0,999',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,999',
+    'projection.hour.digits' = '2'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_wide/region=7/hour=07/a.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_wide/region=7/hour=11/b.parquet';
+
+statement ok
+SET glue_projection_max_partitions = 10;
+
+# an equality on each key derives one of the million partitions
+query I
+SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 7;
+----
+1
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 7;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/1000000.*
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND hour IN (1, 2, 3);
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 3/1000000.*
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND hour BETWEEN 10 AND 12;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 3/1000000.*
+
+query I
+SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour BETWEEN 10 AND 12;
+----
+2
+
+# an equality on an expression of the key is not an equality on the key: the key's 1000 values stay its candidates,
+# more than a cap of 10, and the scan fails as Athena fails a scan that would generate the column's whole range; under
+# a cap the candidates fit they are enumerated and tested
+statement error
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND hour // 2 = 5;
+----
+would derive more than 10 partitions (glue_projection_max_partitions)
+
+statement ok
+SET glue_projection_max_partitions = 1000;
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND hour // 2 = 5;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 2/1000000.*
+
+query I
+SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour // 2 = 5;
+----
+2
+
+query I
+SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour + 1 IN (7, 8) ORDER BY id;
+----
+1
+
+# a constant outside the range, an OR of equalities (the key's values are the constants), a NULL in the IN list, and a
+# non-integer constant (the binder casts the column, so the predicate is no equality on the key and the key enumerates)
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 1000;
+----
+0
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND (hour = 1 OR hour = 3);
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 2/1000000.*
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND ((hour = 1 AND hour > 0) OR hour = 3);
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 2/1000000.*
+
+query I
+SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour IN (7, NULL);
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 7.5;
+----
+0
+
+statement ok
+SET glue_projection_max_partitions = 10;
+
+# a plan copied before the filters are pushed down (a NOT MATERIALIZED CTE referenced twice) serializes the scan as its
+# projection, and each copy derives with its own predicates; a scan whose partitions are derived serializes as those
+# partitions, which keeps two scans with different predicates apart
+query I
+WITH p AS NOT MATERIALIZED (SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 7)
+SELECT * FROM p UNION ALL SELECT * FROM p;
+----
+1
+1
+
+query I
+WITH t AS NOT MATERIALIZED (SELECT * FROM my_datalake.default.pp_wide)
+SELECT id FROM t WHERE region = 7 AND hour = 7 UNION ALL SELECT id FROM t WHERE region = 7 AND hour = 11 ORDER BY 1;
+----
+1
+2
+
+query I
+SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 7
+UNION ALL SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 11 ORDER BY 1;
+----
+1
+2
+
+# an unoptimized plan (json_serialize_plan without optimize) carries the projection parameters, not derived partitions
+query I
+SELECT json_serialize_plan('SELECT id FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 7') LIKE '%projection.hour.digits%';
+----
+true
+
+# a key no value of which passes its predicate empties the product, whatever the other key would have derived: the
+# other key stops at the cap but the scan derives nothing instead of failing
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = -1;
+----
+0
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = -1;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 0/1000000.*
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE hour = -1;
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region < 0;
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region > 5 AND hour = -1;
+----
+0
+
+# a cap of 0 refuses every scan that derives a partition; a scan that derives none still returns nothing
+statement ok
+SET glue_projection_max_partitions = 0;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7 AND hour = 7;
+----
+would derive more than 0 partitions (glue_projection_max_partitions)
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = -1;
+----
+0
+
+statement ok
+SET glue_projection_max_partitions = 10;
+
+# without a predicate, or with one key left wide, the product exceeds the cap before anything is derived
+statement error
+SELECT count(*) FROM my_datalake.default.pp_wide;
+----
+Invalid Input Error: Scan of Glue table 'default.pp_wide' would derive more than 10 partitions (glue_projection_max_partitions); filter on the partition columns or raise the setting
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7;
+----
+would derive more than 10 partitions (glue_projection_max_partitions)
+
+statement ok
+SET glue_projection_max_partitions = 1000;
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1000/1000000.*
+
+# the 1000 partitions are listed one by one: the root holds a million projected partitions, so the derived (narrowed)
+# count does not measure it; an explicit hive_partition_listing_threshold still asks for the root
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7;
+----
+2
+
+query II
+SELECT count(*), count(*) FILTER (dir LIKE 'pp_wide/region=7/hour=%') FROM listed_dirs();
+----
+1000	1000
+
+# the plan event counts the projected partitions, as EXPLAIN does
+query III
+SELECT partitions, partitions_read, detail FROM duckdb_logs_parsed('GlueScan') WHERE event = 'plan';
+----
+1000000	1000	partitions
+
+statement ok
+SET hive_partition_listing_threshold = 100;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = 7;
+----
+2
+
+query I
+SELECT dir FROM listed_dirs();
+----
+pp_wide/
+
+query III
+SELECT partitions, partitions_read, detail FROM duckdb_logs_parsed('GlueScan') WHERE event = 'plan';
+----
+1000000	1000	root
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+RESET glue_projection_max_partitions;
+
+# a predicate over two keys prunes the derived partitions, as before, and does not narrow a key: region < 2 narrows
+# region to two values, region = hour then keeps two of the 2000 derived partitions
+statement ok
+SET glue_projection_max_partitions = 2000;
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_wide WHERE region = hour AND region < 2;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 2/1000000.*
+
+# a join filter prunes the derived partitions at execution, as before; it does not change what is derived or the cap:
+# with hour pinned and region left to the join, 1000 partitions are derived
+statement ok
+SET glue_projection_max_partitions = 10;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_wide p JOIN (VALUES (7)) d(r) ON p.region = d.r WHERE p.hour = 7;
+----
+would derive more than 10 partitions (glue_projection_max_partitions)
+
+statement ok
+SET glue_projection_max_partitions = 1000;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_wide p JOIN (VALUES (7)) d(r) ON p.region = d.r WHERE p.hour = 7;
+----
+1
+
+# the scan lists the one partition the join filter keeps; the cardinality sample listed the first derived partition,
+# not the root, which holds a million projected partitions
+query I
+SELECT DISTINCT dir FROM listed_dirs() ORDER BY dir;
+----
+pp_wide/region=0/hour=07/
+pp_wide/region=7/hour=07/
+
+statement ok
+RESET glue_projection_max_partitions;
+
+statement ok
+DROP TABLE my_datalake.default.pp_wide;
+
+# a key wider than the cap is never enumerated past the cap: without an equality on it the scan fails at once, with
+# one the constant is checked against the range and the interval instead of enumerating
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_huge;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_huge (id INTEGER, k BIGINT) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_huge',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'integer',
+    'projection.k.range' = '0,9223372036854775807'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_huge/k=5/a.parquet';
+
+statement ok
+SET max_execution_time = 10000;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_huge;
+----
+would derive more than 100000 partitions (glue_projection_max_partitions)
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_huge WHERE k > 5;
+----
+would derive more than 100000 partitions (glue_projection_max_partitions)
+
+query I
+SELECT id FROM my_datalake.default.pp_huge WHERE k = 5;
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_huge WHERE k IN (5, 6, 9223372036854775807);
+----
+1
+
+# a date key stepped by minutes over ten years is five million steps: refused at the cap
+statement ok
+ALTER TABLE my_datalake.default.pp_huge SET ('projection.k.type' = 'date', 'projection.k.format' = 'yyyy-MM-dd-HH-mm', 'projection.k.range' = '2015-01-01-00-00,2025-01-01-00-00', 'projection.k.interval' = '1', 'projection.k.interval.unit' = 'MINUTES');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_huge;
+----
+would derive more than 100000 partitions (glue_projection_max_partitions)
+
+statement ok
+RESET max_execution_time;
+
+statement ok
+DROP TABLE my_datalake.default.pp_huge;
+
+# an integer key on a FLOAT column: 16777216 and 16777217 convert to the same float, so an equality on the column
+# reads both directories; the equality shortcut applies to integral and string columns only
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_float;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_float (id INTEGER, k FLOAT) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_float',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'integer',
+    'projection.k.range' = '16777216,16777217'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_float/k=16777216/a.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_float/k=16777217/b.parquet';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_float WHERE k = 16777216::FLOAT ORDER BY id;
+----
+1	16777216.0
+2	16777216.0
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_float WHERE k IN (16777216::FLOAT);
+----
+2
+
+statement ok
+DROP TABLE my_datalake.default.pp_float;
+
+# an integer key on a VARCHAR column spelled with digits: an equality names the padded text, which is what the column
+# holds ('7' is another text, '7.5' names no value); the shortcut reads the constant as a number and the predicate
+# then checks the spelling
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_text;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_text (id INTEGER, k VARCHAR) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_text',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'integer',
+    'projection.k.range' = '1,12',
+    'projection.k.digits' = '2'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_text/k=07/a.parquet';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_text WHERE k = '07';
+----
+1	07
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_text WHERE k IN ('07', '08');
+----
+1
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_text WHERE k = '07';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/12.*
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_text WHERE k = '7';
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_text WHERE k = '7.5';
+----
+0
+
+# a comparison on a string column compares text, so it does not narrow the range: '10', '11' and '12' are above '1'
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_text WHERE k > '1';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 3/12.*
+
+query II
+SELECT id, k FROM my_datalake.default.pp_text WHERE k > '06' AND k < '08';
+----
+1	07
+
+# a cast of a string key is not the key either: its values are enumerated and tested, which a cap of one refuses
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_text WHERE CAST(k AS INTEGER) > 10;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 2/12.*
+
+statement ok
+SET glue_projection_max_partitions = 1;
+
+statement error
+SELECT id, k FROM my_datalake.default.pp_text WHERE CAST(k AS INTEGER) = 7;
+----
+would derive more than 1 partitions (glue_projection_max_partitions)
+
+statement ok
+RESET glue_projection_max_partitions;
+
+statement ok
+ALTER TABLE my_datalake.default.pp_text RESET ('projection.k.digits');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_text WHERE k = '7';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/12.*
+
+statement ok
+DROP TABLE my_datalake.default.pp_text;
+
+# a step finer than the format's finest field spells each directory once: the directories are visited, not the steps
+# source: Athena ProjectedDateTimeColumn steps from the lower bound while at or before the upper bound, so a directory is
+# derived when a step lands in it; a microsecond step over three days lands in each of them
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_fine;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_fine (id INTEGER, dt VARCHAR) PARTITIONED BY (dt)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_fine',
+    'projection.enabled' = 'true',
+    'projection.dt.type' = 'date',
+    'projection.dt.format' = 'yyyy-MM-dd',
+    'projection.dt.range' = '2024-01-01,2024-01-03',
+    'projection.dt.interval' = '1',
+    'projection.dt.interval.unit' = 'MICROS'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_fine/dt=2024-01-02/a.parquet';
+
+statement ok
+SET max_execution_time = 5000;
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-01-02';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
+
+query I
+SELECT id FROM my_datalake.default.pp_fine WHERE dt = '2024-01-02';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_fine;
+----
+1
+
+# 7-hour steps from 2024-01-01 00:00: the seventh is 2024-01-03 01:00, past the upper bound, so the third day is never
+# spelled; over a week, the 24th step lands on 2024-01-08 00:00 exactly and the eighth day is
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.interval' = '7', 'projection.dt.interval.unit' = 'HOURS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-01-01';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/2.*
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-01-03';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 0/2.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.range' = '2024-01-01,2024-01-08');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-01-08';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/8.*
+
+# 27-day steps over months: 01-01, 01-28, 02-24, 03-22 land in January to March; 04-18 is past the upper bound
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.format' = 'yyyy-MM', 'projection.dt.range' = '2024-01,2024-04', 'projection.dt.interval' = '27', 'projection.dt.interval.unit' = 'DAYS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-03';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-04';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 0/3.*
+
+# a microsecond step over a millisecond fraction: three directories
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.format' = 'yyyyMMdd-HHmmssSSS', 'projection.dt.range' = '20240101-000000000,20240101-000000002', 'projection.dt.interval' = '1', 'projection.dt.interval.unit' = 'MICROS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '20240101-000000001';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
+
+# a field that appears twice has to read the same value, as Java's DateTimeFormatter requires: a bound whose two
+# fraction fields disagree is not a date, in either order
+# source: java.time.format.DateTimeFormatter rejects a text whose repeated field resolves to two values
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.format' = 'yyyy-MM-dd HH:mm:ss.S-SSS', 'projection.dt.range' = '2024-01-01 00:00:00.0-000,2024-01-01 00:00:00.0-002', 'projection.dt.interval' = '1', 'projection.dt.interval.unit' = 'MICROS');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_fine;
+----
+'2024-01-01 00:00:00.0-002' is neither
+
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.format' = 'yyyyMMdd-HHmmss.SSS-S', 'projection.dt.range' = '20240101-000000.000-0,20240101-000000.002-0');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_fine;
+----
+'20240101-000000.002-0' is neither
+
+# the two fields agree only at the narrower width's precision, so that width is the step unit: a microsecond step
+# visits three directories a tenth of a second apart, a step of a tenth lands on the same three, and a step of 150
+# milliseconds spells a value the format cannot read back
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.format' = 'yyyy-MM-dd HH:mm:ss.S-SSS', 'projection.dt.range' = '2024-01-01 00:00:00.0-000,2024-01-01 00:00:00.2-200');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-01-01 00:00:00.1-100';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.interval' = '100', 'projection.dt.interval.unit' = 'MILLIS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-01-01 00:00:00.1-100';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.interval' = '150');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_fine;
+----
+projection.dt value '2024-01-01 00:00:00.1-150' can not be read back in the format of projection.dt.format
+
+# the rule holds for every field: a reduced year reads with its base (99 is 2099, not 1999), a month name as its number
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.format' = 'yyyy/yy', 'projection.dt.range' = '1999/99,2001/01', 'projection.dt.interval' = '1', 'projection.dt.interval.unit' = 'YEARS');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_fine;
+----
+'1999/99' is neither
+
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.range' = '2000/00,2001/01');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2001/01';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/2.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.format' = 'yyyy-MM-MMM', 'projection.dt.range' = '2024-01-Jan,2024-03-Mar', 'projection.dt.interval.unit' = 'MONTHS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_fine WHERE dt = '2024-02-Feb';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_fine SET ('projection.dt.range' = '2024-01-Jan,2024-03-Apr');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_fine;
+----
+'2024-03-Apr' is neither
+
+statement ok
+RESET max_execution_time;
+
+statement ok
+DROP TABLE my_datalake.default.pp_fine;

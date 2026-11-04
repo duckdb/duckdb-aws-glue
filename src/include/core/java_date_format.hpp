@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/string.hpp"
+#include "duckdb/common/types/interval.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector.hpp"
 
@@ -15,17 +16,12 @@ public:
 	string Format(timestamp_t value) const;
 	//! False when 'text' is not a value of this pattern; fields the pattern lacks read as January, the 1st, midnight
 	bool TryParse(const string &text, timestamp_t &result) const;
+	//! One of the pattern's finest field as a step: a year, month, day, hour, minute, second or the fraction's last
+	//! digit
+	interval_t FinestUnit() const;
 	//! Whether the pattern has an hour, minute, second or fraction field
 	bool HasTimeField() const {
 		return has_time_field;
-	}
-	//! Whether the pattern has a day-of-month field
-	bool HasDayField() const {
-		return has_day_field;
-	}
-	//! Whether the pattern has a month field
-	bool HasMonthField() const {
-		return has_month_field;
 	}
 
 private:
@@ -39,8 +35,9 @@ private:
 private:
 	vector<Element> elements;
 	bool has_time_field = false;
-	bool has_day_field = false;
-	bool has_month_field = false;
+	//! The finest pattern letter and how often it repeats
+	char finest_letter = 'y';
+	idx_t finest_count = 0;
 };
 
 } // namespace duckdb
