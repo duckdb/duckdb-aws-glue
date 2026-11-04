@@ -7,6 +7,7 @@
 #include "duckdb/common/operator/multiply.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/to_string.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
@@ -39,9 +40,10 @@ static void ParseEnumKey(const GlueTableInfo &table, const string &description, 
 		throw InvalidInputException("Glue table '%s': %s is required for an enum partition column", description,
 		                            parameter);
 	}
-	// any white space is part of a value, as Athena documents; an empty element is skipped, as Trino does
+	// white space is part of a value (Athena); an empty element is skipped and a repeated one counted once (Trino)
+	unordered_set<string> seen;
 	for (auto &value : StringUtil::Split(values, ',')) {
-		if (!value.empty()) {
+		if (!value.empty() && seen.insert(value).second) {
 			key.enum_values.push_back(value);
 		}
 	}
@@ -101,9 +103,9 @@ static void ParseIntegerKey(const GlueTableInfo &table, const string &descriptio
 	}
 }
 
-//! Athena's NOW[ +|- n unit ] bound; false when 'text' is not one
+//! Athena's NOW[ +|- n unit ] bound, in any case; false when 'text' is not one
 static bool TryParseRelativeBound(const string &text, DateBound &bound) {
-	auto rest = text;
+	auto rest = StringUtil::Upper(text);
 	StringUtil::Trim(rest);
 	if (!StringUtil::StartsWith(rest, "NOW")) {
 		return false;
@@ -249,12 +251,13 @@ static void ParseDateKey(const GlueTableInfo &table, const string &description, 
 	}
 	auto unit_parameter = ProjectionParameter(key.name, "interval.unit");
 	auto unit = table.GetParameter(unit_parameter);
-	if (!unit.empty() && !TryParseIntervalUnit(unit, count, key.step)) {
+	// a unit without an interval is ignored but has to name a unit: 1000 of any unit is a valid step
+	if (!unit.empty() && !TryParseIntervalUnit(unit, interval.empty() ? 1000 : count, key.step)) {
 		throw InvalidInputException(
 		    "Glue table '%s': %s is '%s', expected MILLENNIA, CENTURIES, DECADES, YEARS, MONTHS, "
 		    "WEEKS, DAYS, HALF_DAYS, HOURS, MINUTES, SECONDS, MILLIS, MICROS or NANOS (a "
-		    "multiple of 1000), and an interval that fits the unit",
-		    description, unit_parameter, unit);
+		    "multiple of 1000)%s",
+		    description, unit_parameter, unit, interval.empty() ? "" : ", and an interval that fits the unit");
 	}
 	if (interval.empty() || unit.empty()) {
 		// Athena reads the interval and its unit only together; otherwise one of the format's finest field

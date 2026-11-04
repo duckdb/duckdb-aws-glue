@@ -460,6 +460,15 @@ EXPLAIN SELECT count(*) FROM my_datalake.default.pp_hourly WHERE dt IN (strftime
 ----
 physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 2/[67].*
 
+# NOW and its unit are read in any case, as Athena does (now-2days, NOW - 1 day and Now-2Days checked on engine v3)
+statement ok
+ALTER TABLE my_datalake.default.pp_hourly SET ('projection.dt.range' = 'now - 2 days,Now', 'projection.dt.interval' = '1', 'projection.dt.interval.unit' = 'DAYS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_hourly WHERE dt IN (strftime(make_timestamp(epoch_us(now())), '%Y-%m-%d'));
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
+
 #---------------------------------------------------------------------------
 # unsupported format: the offending letter or character is named
 #---------------------------------------------------------------------------
@@ -632,12 +641,13 @@ SELECT id, k FROM my_datalake.default.pp_esc ORDER BY id;
 10	a:b
 
 # glob characters in a value name a directory, not a pattern: a[b] is not 'a' or 'b', a* is not every k=a..., a?c is
-# not axc; the same from one listing per partition and from one listing of the root
+# not axc, x?*y is not xAy, a] is a]; the same from one listing per partition, from one listing of the root, and from
+# the listing cache
 statement ok
 ALTER TABLE my_datalake.default.pp_esc RESET ('storage.location.template');
 
 statement ok
-ALTER TABLE my_datalake.default.pp_esc SET ('projection.k.values' = 'a[b],a*,a?c,ab');
+ALTER TABLE my_datalake.default.pp_esc SET ('projection.k.values' = 'a[b],a*,a?c,ab,a],x?*y');
 
 statement ok
 COPY (SELECT 11 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_esc/k=a[b]/a.parquet';
@@ -654,6 +664,15 @@ COPY (SELECT 15 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_esc/k=ab/e.parque
 statement ok
 COPY (SELECT 16 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_esc/k=axc/f.parquet';
 
+statement ok
+COPY (SELECT 17 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_esc/k=a]/g.parquet';
+
+statement ok
+COPY (SELECT 18 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_esc/k=x?*y/h.parquet';
+
+statement ok
+COPY (SELECT 19 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_esc/k=xAy/i.parquet';
+
 foreach threshold 1 100
 
 statement ok
@@ -666,6 +685,76 @@ SELECT id, k FROM my_datalake.default.pp_esc ORDER BY id;
 12	a*
 13	a?c
 15	ab
+17	a]
+18	x?*y
+
+# the listing cache lists through the same escaping; with the connection scope the second read lists nothing
+statement ok
+SET glue_cache_listings = true;
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_esc ORDER BY id;
+----
+11	a[b]
+12	a*
+13	a?c
+15	ab
+17	a]
+18	x?*y
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, k FROM my_datalake.default.pp_esc ORDER BY id;
+----
+11	a[b]
+12	a*
+13	a?c
+15	ab
+17	a]
+18	x?*y
+
+query I
+SELECT count(*) FROM listed_dirs();
+----
+0
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+statement ok
+RESET glue_cache_listings;
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+#---------------------------------------------------------------------------
+# a repeated enum value is one partition: its files are read once and it is counted once
+#---------------------------------------------------------------------------
+statement ok
+ALTER TABLE my_datalake.default.pp_esc SET ('projection.k.values' = 'ab,a:b,ab');
+
+foreach threshold 1 100
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT id, k FROM my_datalake.default.pp_esc ORDER BY id;
+----
+1	a:b
+15	ab
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_esc WHERE k = 'ab';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/2.*
 
 endloop
 
@@ -805,6 +894,14 @@ SELECT count(*) FROM my_datalake.default.pp_bad;
 projection.hour.range must be two integers separated by a comma (min,max), got '0,1e1'
 
 statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.hour.range' = '0,9223372036854775808');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_bad;
+----
+projection.hour.range must be two integers separated by a comma (min,max), got '0,9223372036854775808'
+
+statement ok
 ALTER TABLE my_datalake.default.pp_bad SET ('projection.hour.range' = '0,5', 'projection.hour.interval' = '1.5');
 
 statement error
@@ -859,6 +956,44 @@ statement error
 SELECT count(*) FROM my_datalake.default.pp_bad;
 ----
 projection.region.range has its lower bound (2024-01-02-00) after its upper bound (2024-01-01-00)
+
+# a NOW offset is a 32-bit count of a unit, and the bound has to stay in the timestamp range
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.region.range' = 'NOW,NOW + 2147483648 DAYS');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_bad;
+----
+'NOW + 2147483648 DAYS' is neither
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.region.range' = 'NOW - 300000 YEARS,NOW');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_bad;
+----
+projection.region.range: NOW offset out of range
+
+# yy is Java's reduced year with base 2000: 99 reads as 2099, so a range meant to cross 2000 runs backwards, and a
+# four-digit year is not a yy value
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.region.format' = 'yy', 'projection.region.range' = '99,01', 'projection.region.interval' = '1', 'projection.region.interval.unit' = 'YEARS');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_bad;
+----
+projection.region.range has its lower bound (99) after its upper bound (01)
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.region.range' = '1999,2001');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_bad;
+----
+'1999' is neither
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.region.format' = 'yyyy-MM-dd-HH');
 
 statement ok
 ALTER TABLE my_datalake.default.pp_bad SET ('projection.region.range' = '2024-01-01-00,2024-01-02-00', 'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_bad/${region}/');
@@ -1152,6 +1287,42 @@ EXPLAIN SELECT count(*) FROM my_datalake.default.pp_year WHERE y = '2024-01-03';
 ----
 physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/5.*
 
+# NANOS too, although one nanosecond is no whole microsecond: the unit is ignored before it is scaled
+statement ok
+ALTER TABLE my_datalake.default.pp_year SET ('projection.y.interval.unit' = 'NANOS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_year WHERE y = '2024-01-03';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/5.*
+
+# a finer step repeats a directory only in consecutive steps (the formatted sequence never wraps), so comparing with
+# the previous directory deduplicates exactly: 25 days over yyyy-MM land twice in January and in May, 5 partitions
+statement ok
+ALTER TABLE my_datalake.default.pp_year SET ('projection.y.format' = 'yyyy-MM', 'projection.y.range' = '2024-01,2024-06', 'projection.y.interval' = '25', 'projection.y.interval.unit' = 'DAYS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_year WHERE y = '2024-05';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/5.*
+
+# the date loop stops where the next step would leave the timestamp range; a bound outside it is not a date
+statement ok
+ALTER TABLE my_datalake.default.pp_year SET ('projection.y.format' = 'yyyy', 'projection.y.range' = '294240,294247', 'projection.y.interval' = '1', 'projection.y.interval.unit' = 'YEARS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_year WHERE y = '294247';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/8.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_year SET ('projection.y.range' = '294240,294248');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_year;
+----
+'294248' is neither
+
 statement ok
 ALTER TABLE my_datalake.default.pp_year SET ('projection.y.format' = 'yyyy', 'projection.y.range' = '2020,2023', 'projection.y.interval' = '1', 'projection.y.interval.unit' = 'NANOS');
 
@@ -1317,6 +1488,56 @@ SELECT id, n FROM my_datalake.default.pp_par_int WHERE n = 100 ORDER BY id;
 
 statement ok
 DROP TABLE my_datalake.default.pp_par_int;
+
+# the integer loop stops where the next step would overflow, and digits pad the smallest integer behind its sign
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_par_big;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_par_big (id INTEGER, n BIGINT) PARTITIONED BY (n)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_par_big',
+    'projection.enabled' = 'true',
+    'projection.n.type' = 'integer',
+    'projection.n.range' = '0,9223372036854775807',
+    'projection.n.interval' = '9223372036854775807'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_par_big/n=9223372036854775807/a.parquet';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, n FROM my_datalake.default.pp_par_big;
+----
+1	9223372036854775807
+
+query I
+SELECT DISTINCT dir FROM listed_dirs() ORDER BY dir;
+----
+pp_par_big/n=0/
+pp_par_big/n=9223372036854775807/
+
+statement ok
+ALTER TABLE my_datalake.default.pp_par_big SET ('projection.n.range' = '-9223372036854775808,-9223372036854775807', 'projection.n.interval' = '1', 'projection.n.digits' = '21');
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_par_big/n=-09223372036854775808/b.parquet';
+
+query II
+SELECT id, n FROM my_datalake.default.pp_par_big ORDER BY id;
+----
+2	-9223372036854775808
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_par_big WHERE n = -9223372036854775807;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/2.*
+
+statement ok
+DROP TABLE my_datalake.default.pp_par_big;
 
 # enum white space is part of the value (' eu ' is not 'eu'); values may be any UTF-8 text
 statement ok

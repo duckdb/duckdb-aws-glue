@@ -100,14 +100,15 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   the `projection.<key>.*` table parameters describe them, and the partitions registered in Glue are ignored (no
   `GetPartitions` call). A projected partition without files reads as empty; a value outside the projected ones is
   not an error. Supported, as Athena documents them:
-  - `type = enum`: `values`, comma-separated; white space is part of a value, an empty element is skipped.
+  - `type = enum`: `values`, comma-separated; white space is part of a value, an empty element is skipped, a repeated
+    value counts once.
   - `type = integer`: `range = min,max` (inclusive, 64-bit), `interval` (default 1), `digits` (zero-padded width,
     the sign included, as Java's `%0Nd`).
   - `type = date`: `range = min,max` with each bound written in `format` or as `NOW[ +|- n YEARS|MONTHS|WEEKS|DAYS|
-    HOURS|MINUTES|SECONDS]` (singular too); `NOW` is the start of the transaction (what `now()` returns), in UTC.
-    `interval` and `interval.unit` (any `java.time` `ChronoUnit` from `MILLENNIA` to `NANOS`, as in Athena) step
-    from the lower bound and count only together, as in Athena (an `interval` without its unit is ignored, and so is a
-    unit without an `interval`); otherwise
+    HOURS|MINUTES|SECONDS]` (singular too, any case); `NOW` is the start of the transaction (what `now()` returns),
+    in UTC. `interval` and `interval.unit` (any `java.time` `ChronoUnit` from `MILLENNIA` to `NANOS`, as in Athena)
+    step from the lower bound and count only together, as in Athena (an `interval` without its unit is ignored, and so
+    is a unit without an `interval`, which still has to name a unit); otherwise
     the step is one of the format's finest field: a day with a day field, a month with a month field and no day, a year
     with only a year; a format with time fields requires both. Both bounds are truncated to the format's precision
     first. A step finer than the format spells
