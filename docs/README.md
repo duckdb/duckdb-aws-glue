@@ -265,6 +265,10 @@ With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the co
 per connection — two connections never share one — so another connection's write stays unseen until something clears
 this connection's cache: a write through it, a rollback, or DETACH.
 
+Under either scope, a table Glue reports missing is not kept like that: the answer is only reused within the statement,
+or the API call such as `Connection::TableInfo`, that looked the table up (`CREATE TABLE` checks its target twice). A
+table another connection creates is found by this connection's next statement, also within an explicit transaction.
+
 ## Views
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...` and `CREATE SECURE VIEW` create a Glue

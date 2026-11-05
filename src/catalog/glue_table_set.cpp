@@ -73,8 +73,7 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 			// Without this the per reference GetEntry re-fetches every table this one request
 			// already returned, which makes the bulk round trip pure added cost
 			shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
-			cache->GetTable(
-			    schema.GetDatabaseName(), table.name, [&info]() { return info; }, true);
+			cache->GetTable(schema.GetDatabaseName(), table.name, [&info]() { return info; });
 		}
 		auto existing = entries.find(table.name);
 		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(table)) {
@@ -125,8 +124,7 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 	for (auto &table : tables) {
 		// Warm the metadata cache only - already-cached values win; the entry/Scan story is on the declaration
 		shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
-		cache.GetTable(
-		    schema.GetDatabaseName(), table.name, [&info]() { return info; }, true);
+		cache.GetTable(schema.GetDatabaseName(), table.name, [&info]() { return info; });
 	}
 	if (has_more) {
 		DUCKDB_LOG_INFO(context,
@@ -155,7 +153,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		// page warms the cache, at most once per instance - under the default scope that is once per transaction.
 		// A name the cache already resolved, a known miss included, needs no page.
 		if (!cached && cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
-		    !cache->HasTable(schema.GetDatabaseName(), glue_name) && BatchTableLookups(context)) {
+		    !cache->IsTableResolved(schema.GetDatabaseName(), glue_name) && BatchTableLookups(context)) {
 			BulkLoadTableInfo(context, *cache);
 		}
 	}

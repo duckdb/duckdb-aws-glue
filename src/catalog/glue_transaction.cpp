@@ -15,10 +15,11 @@ GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &
     : Transaction(manager, context), glue_catalog(glue_catalog),
       transaction_state(GlueTransactionState::TRANSACTION_NOT_YET_STARTED) {
 	if (GlueTransactionCache::ConnectionScoped(context)) {
-		auto state = context.registered_state->GetOrCreate<GlueMetadataCacheState>("glue_metadata_cache");
-		cache = state->GetCache(glue_catalog.GetName().GetIdentifierName(), glue_catalog.GetAttached().oid);
+		cache = GlueMetadataCacheState::Get(context)->GetCache(glue_catalog.GetName().GetIdentifierName(),
+		                                                       glue_catalog.GetAttached().oid);
 	} else {
 		cache = make_shared_ptr<GlueTransactionCache>();
+		GlueMetadataCacheState::Get(context)->TrackTransactionCache(cache);
 	}
 }
 
@@ -64,7 +65,7 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 	// The scope setting can change between statements, so the active transaction's cache may not be the
 	// connection-level one this write would otherwise leave stale: clear those too (all of them, matching
 	// the rollback hook — a write through any alias of the same Glue catalog must not be hidden by another's cache)
-	auto state = context.registered_state->Get<GlueMetadataCacheState>("glue_metadata_cache");
+	auto state = context.registered_state->Get<GlueMetadataCacheState>(GlueMetadataCacheState::NAME);
 	if (state) {
 		state->ClearAll();
 	}
@@ -81,7 +82,7 @@ bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {
 }
 
 void GlueTransactionCache::OnDetach(ClientContext &context, Catalog &catalog) {
-	auto state = context.registered_state->Get<GlueMetadataCacheState>("glue_metadata_cache");
+	auto state = context.registered_state->Get<GlueMetadataCacheState>(GlueMetadataCacheState::NAME);
 	if (state) {
 		state->EraseCache(catalog.GetName().GetIdentifierName(), catalog.GetAttached().oid);
 	}
