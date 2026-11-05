@@ -28,13 +28,15 @@ statement ok
 INSERT INTO my_datalake.alter_schema_reads.events VALUES (1), (2), (3);
 
 # every ALTER SCHEMA replaces the cached schema entry and the table entries it holds, which statements running on
-# other connections may still be using
+# other connections may still be using; AWS Glue refuses an UpdateDatabase that overlaps another one
 concurrentloop threadid 0 8
 
 loop i 0 5
 
-statement ok
+statement maybe
 ALTER SCHEMA my_datalake.alter_schema_reads SET (comment = 'run {threadid}-{i}');
+----
+was changed by another client while it was altered, run the statement again
 
 query I
 SELECT sum(id) FROM my_datalake.alter_schema_reads.events

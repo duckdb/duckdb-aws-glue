@@ -891,6 +891,8 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		row.location = step.location.empty() ? Value(LogicalType::VARCHAR) : Value(step.location);
 		state.rows.push_back(std::move(row));
 	};
+	bool table_updated = false;
+	GlueTableInfo refetched_table;
 	vector<GluePartitionInput> pending_adds;
 	auto flush_adds = [&]() {
 		if (pending_adds.empty()) {
@@ -943,7 +945,12 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		}
 		case GlueAlterAction::SET_TABLE_LOCATION:
-			GlueAPI::SetTableLocation(context, catalog, table, step.location);
+			// UpdateTable is refused with the VersionId of the definition an earlier step already replaced
+			if (table_updated && !GlueAPI::GetTable(context, catalog, table.schema_name, table.name, refetched_table)) {
+				throw CatalogException("Glue table '%s' was dropped while it was altered", table_name);
+			}
+			GlueAPI::SetTableLocation(context, catalog, table_updated ? refetched_table : table, step.location);
+			table_updated = true;
 			break;
 		}
 		emit(step);

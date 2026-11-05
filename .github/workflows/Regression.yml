@@ -50,7 +50,8 @@ jobs:
   build-benchmark-runners:
     name: Build Benchmark Runners
     needs: check-draft
-    runs-on: ubuntu-latest
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
     env:
       GEN: ninja
       CC: clang-20
@@ -150,7 +151,8 @@ jobs:
     name: Regression Tests (${{ matrix.name }})
     needs: build-benchmark-runners
     if: github.ref != 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       # Two jobs of ~3 minutes each, so only the join-heavy TPC-H and TPC-DS queries: every query costs 10-30s against

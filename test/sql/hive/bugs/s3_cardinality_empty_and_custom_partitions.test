@@ -61,7 +61,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.mixloc')), (SE
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mixloc;
 ----
-physical_plan	<REGEX>:.*Hive Scan.*~[1-9][0-9]{0,2} rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~[1-9][0-9]{0,2} rows?.*
 
 # ---- a custom location must not change the values or the read ---------------------------------------
 statement ok

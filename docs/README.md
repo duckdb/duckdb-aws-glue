@@ -527,16 +527,22 @@ process first installs the loadable extensions from `build/<type>/repository`; o
 makes them ~1.5 GB each, so CI tests a `make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1` build (assertions and
 sanitizers, no debug info).
 
-A maintainer can run the whole suite of a pull request or a branch, on a release build, against a live catalog with
-the `Cloud Glue tests` workflow (`.github/workflows/CloudGlueTests.yml`,
-`gh workflow run CloudGlueTests.yml -f pr_number=<n>`, or `gh workflow run CloudGlueTests.yml --ref main` without a
-PR). It is never triggered by a PR, refuses to run for anyone below the `maintain` role, tests the PR's head commit
-(or the branch's) as it was when the run started, and reports the result as a `Cloud Glue tests` status on that
-commit. The catalog, region and AWS credentials come from the variables and secrets of the `cloud-glue` environment,
-listed at the top of the workflow. The tests write to the bucket `duckdb-glue-ci-<account id>-<region>`, which the
-workflow creates if needed, under `duckdb-aws-glue-cloud-tests/ci-<run id>-<attempt>/`, which it deletes when the job
-ends, whether the tests pass or not; a lifecycle rule on `duckdb-aws-glue-cloud-tests/` expires anything a failed run
-leaves behind after 2 days.
+The `Cloud Glue tests` workflow (`.github/workflows/CloudGlueTests.yml`) runs the whole suite, on a release build,
+against a live catalog. It runs on every push to `main`; when such a run fails, its job summary lists the failing tests
+and the merges since the last passing run on `main`. On a pull request it runs when a maintainer adds the `cloud-tests`
+label, and again on every push to a labeled PR whose author is a member or collaborator of the repository. Since the
+PR's code runs with the AWS credentials, read an outside contributor's PR before labeling it, and remove and re-add the
+label to test their later commits. A maintainer can also start it by hand (`gh workflow run CloudGlueTests.yml -f
+pr_number=<n>`, or `gh workflow run CloudGlueTests.yml --ref main` without a PR). Starting it by hand or through the
+label is refused for anyone below the `maintain` role. A run tests the PR's head commit (or the branch's) as it was when
+the run started, and reports the result as a `Cloud Glue tests` status on that commit. Runs share the catalog, so they
+go one at a time; GitHub keeps only the newest waiting run, which is why a failing run on `main` compares with the last
+passing one rather than the previous commit. Every run first deletes all Glue databases of the account and creates an
+empty `default`. The catalog, region and AWS credentials come from the variables and secrets of the `cloud-glue`
+environment, listed at the top of the workflow. The tests write to the bucket `duckdb-glue-ci-<account id>-<region>`,
+which the workflow creates if needed, under `duckdb-aws-glue-cloud-tests/ci-<run id>-<attempt>/`, which it deletes when
+the job ends, whether the tests pass or not; a lifecycle rule on `duckdb-aws-glue-cloud-tests/` expires anything a
+failed run leaves behind after 2 days.
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.
