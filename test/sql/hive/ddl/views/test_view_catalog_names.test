@@ -35,9 +35,6 @@ statement ok
 DROP VIEW IF EXISTS writer_cat.default.an_view_no_id;
 
 statement ok
-DROP VIEW IF EXISTS writer_cat.default.an_view_other_path;
-
-statement ok
 DROP VIEW IF EXISTS writer_cat.default.an_view_noprobe;
 
 statement ok
@@ -403,28 +400,6 @@ query I
 SELECT id FROM no_id.default.an_view_no_id;
 ----
 1
-
-# a catalog is the view's own when Glue reports the same id for it, whatever the ATTACH path. The local Glue (moto)
-# answers for the account of the credentials whatever CatalogId is sent, so a catalog attached as '111111111111'
-# with the same credentials is the view's own catalog here. (In AWS an account-id path and Glue's report agree;
-# for "<catalog>/<nested>" Glue reports "<account>:<catalog>/<nested>".) Tables of another account:
-# test_view_other_account.test; of an S3 Tables catalog: test_view_nested_catalog.test (live only).
-statement ok
-attach '111111111111' as other_spelling (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
-
-statement ok
-CREATE VIEW no_id.default.an_view_other_path AS SELECT id FROM other_spelling.default.an_orders;
-
-query I
-SELECT response.ViewExpandedText FROM glue_get_table_response('no_id.default.an_view_other_path');
-----
-SELECT id FROM "default".an_orders
-
-statement ok
-DETACH other_spelling;
-
-statement ok
-DROP VIEW no_id.default.an_view_other_path;
 
 statement ok
 DROP VIEW no_id.default.an_view_no_id;

@@ -588,7 +588,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
 	// if its new query would read itself under this alias (not when a path reaches it under another alias)
 	LogicalDependencyList reads;
-	Binder::BindView(context, *check, catalog.GetName(), name, &reads, info.aliases, types, names);
+	Binder::BindView(context, *check, catalog.GetName(), GetSchemaPath(), &reads, info.aliases, types, names);
 	if (existing && reads.Contains(*existing)) {
 		throw BinderException("Glue view \"%s.%s\" can not be created: its query reads the view itself",
 		                      database_info.name, view_name);

@@ -322,7 +322,7 @@ static bool TryGetSchemaNameEquality(optional_ptr<const TableFilter> filter, str
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
                                                                      const SchemaScanFilters &filters) {
 	string name;
-	if (filters.schema_oid || !TryGetSchemaNameEquality(filters.schema_name, name)) {
+	if (filters.GetSchemaOid() || !TryGetSchemaNameEquality(filters.GetSchemaName(), name)) {
 		return Catalog::GetSchemasForScan(context, filters);
 	}
 	vector<reference<SchemaCatalogEntry>> result;

@@ -33,6 +33,7 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -48,6 +49,7 @@
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/query_node/set_operation_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
@@ -1600,6 +1602,43 @@ static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &
 	                                         make_uniq<BoundConstantExpression>(Value("true")));
 }
 
+//! Make the cast of a field's text to TIMESTAMP make_timestamp_ms(CAST(text AS BIGINT)), and to DATE
+//! DATE '1970-01-01' + CAST(text AS INTEGER), as OpenCSVSerde reads a timestamp and a date
+static void MakeEpoch(ClientContext &context, unique_ptr<Expression> &expr, bool try_cast) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	auto is_date = expr->GetReturnType() == LogicalType::DATE;
+	if (!is_date && expr->GetReturnType() != LogicalType::TIMESTAMP) {
+		return;
+	}
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	vector<unique_ptr<Expression>> children;
+	if (is_date) {
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DATE(date_t::epoch())));
+	}
+	children.push_back(BoundCastExpression::AddCastToType(context, std::move(BoundCastExpression::ChildMutable(cast)),
+	                                                      is_date ? LogicalType::INTEGER : LogicalType::BIGINT,
+	                                                      try_cast));
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto value = function_binder.BindScalarFunction(
+	    Identifier::DefaultSchema(), Identifier(is_date ? "+" : "make_timestamp_ms"), std::move(children), error);
+	if (!value) {
+		error.Throw();
+	}
+	if (try_cast) {
+		// a number out of the type's range is NULL too
+		auto try_value = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_TRY, value->GetReturnType());
+		try_value->GetChildrenMutable().push_back(std::move(value));
+		value = std::move(try_value);
+	}
+	expr = std::move(value);
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1645,6 +1684,12 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 			break;
 		case HiveFieldConversion::FALSE_UNLESS_TRUE:
 			MakeFalseUnlessTrue(context, expr);
+			break;
+		case HiveFieldConversion::EPOCH:
+			MakeEpoch(context, expr, false);
+			break;
+		case HiveFieldConversion::TRY_EPOCH:
+			MakeEpoch(context, expr, true);
 			break;
 		}
 	}
@@ -1722,7 +1767,8 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 		return make_uniq<ColumnRefExpression>(name);
 	}
 	unique_ptr<ParsedExpression> column;
-	switch (info.csv_options.FieldConversion(type)) {
+	auto conversion = info.csv_options.FieldConversion(type);
+	switch (conversion) {
 	case HiveFieldConversion::NONE:
 		return make_uniq<ColumnRefExpression>(name);
 	case HiveFieldConversion::CAST:
@@ -1737,6 +1783,23 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 		column = make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL,
 		                                         make_uniq<FunctionExpression>(Identifier("lower"), std::move(lower)),
 		                                         ConstantExpression::FromValue(Value("true")));
+		break;
+	}
+	case HiveFieldConversion::EPOCH:
+	case HiveFieldConversion::TRY_EPOCH: {
+		auto is_date = type == LogicalType::DATE;
+		auto number = make_uniq<CastExpression>(is_date ? LogicalType::INTEGER : LogicalType::BIGINT, BarredField(name),
+		                                        conversion == HiveFieldConversion::TRY_EPOCH);
+		vector<unique_ptr<ParsedExpression>> children;
+		if (is_date) {
+			children.push_back(ConstantExpression::FromValue(Value::DATE(date_t::epoch())));
+		}
+		children.push_back(std::move(number));
+		column = make_uniq<FunctionExpression>(Identifier(is_date ? "+" : "make_timestamp_ms"), std::move(children),
+		                                       nullptr, nullptr, false, is_date);
+		if (conversion == HiveFieldConversion::TRY_EPOCH) {
+			column = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_TRY, std::move(column));
+		}
 		break;
 	}
 	}

@@ -22,7 +22,12 @@ enum class HiveFieldConversion : uint8_t {
 	//! a field that does not parse is NULL
 	TRY_CAST,
 	//! lower(text) = 'true': true for 'true' in any case and false otherwise, never an error
-	FALSE_UNLESS_TRUE
+	FALSE_UNLESS_TRUE,
+	//! the text as milliseconds (timestamp) or days (date) since the epoch; a field that is not an integer fails the
+	//! query
+	EPOCH,
+	//! the text as milliseconds (timestamp) or days (date) since the epoch; NULL when not an integer or out of range
+	TRY_EPOCH
 };
 
 //! How the files of a csv table are read
@@ -39,6 +44,8 @@ struct HiveCSVOptions {
 	bool null_for_invalid_data = true;
 	//! With serde_fields: a boolean field is true when it is 'true' in any case and false otherwise, never an error
 	bool false_unless_true = false;
+	//! With serde_fields: a timestamp field is a number of milliseconds, a date field a number of days since the epoch
+	bool epoch_fields = false;
 
 public:
 	//! With serde_fields: how a field becomes a value of a column of 'type', in the scan and in its reader call

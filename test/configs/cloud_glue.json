@@ -1,6 +1,6 @@
 {
-	"description": "A live AWS Glue Data Catalog; credentials from the AWS credential chain (AWS_PROFILE, environment, ...)",
-	"on_init": "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');",
+	"description": "A live AWS Glue Data Catalog; credentials from the AWS credential chain (AWS_PROFILE, environment, ...). aws_default_credentials is off: with credentials in the environment the aws extension adds a default secret whose negative match score httpfs's bulk S3 delete can not cast (Information loss on integer cast), so deleting written files fails",
+	"on_init": "SET aws_default_credentials = false; CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');",
 	"statically_loaded_extensions": [
 		"core_functions",
 		"parquet",
@@ -17,7 +17,7 @@
 		},
 		{
 			"env_name": "GLUE_CATALOG_ID",
-			"env_value": "847122343688"
+			"env_value": "176760123605"
 		},
 		{
 			"env_name": "GLUE_ENDPOINT",
@@ -35,6 +35,14 @@
 				"test/sql/hive/dml/insert/insert_into_bucketed_table.test",
 				"test/sql/hive/dml/formats/csv/test_csv_serde_properties.test",
 				"test/sql/hive/hive_scan/scan_partitioned/test_partition_storage_format.test",
+				"test/sql/hive/hive_scan/unreadable_tables.test",
+				"test/sql/hive/functions/glue_get_partition_response.test",
+				"test/sql/hive/ddl/create_table/create_table_struct_field_names.test",
+				"test/sql/hive/ddl/alter_properties/alter_table_set_properties.test",
+				"test/sql/hive/ddl/views/test_view_listing.test",
+				"test/sql/hive/ddl/views/test_foreign_view.test",
+				"test/sql/hive/ddl/views/test_view_glue_record.test",
+				"test/sql/hive/ddl/views/test_view_nested_catalog_read.test",
 				"test/sql/hive/hive_scan/scan_partitioned/test_partition_column_types.test"
 			]
 		},
@@ -55,13 +63,20 @@
 		{
 			"reason": "counts moto's single GetPartitions request per partition listing: AWS Glue lists in segments (glue_get_partitions_segments) and ends every listing with an extra, empty page",
 			"paths": [
-				"test/sql/hive/bugs/s3_plan_time_cost_invariants.test"
+				"test/sql/hive/bugs/s3_plan_time_cost_invariants.test",
+				"test/sql/hive/catalog/transaction_cache.test",
+				"test/sql/hive/catalog/connection_cache.test",
+				"test/sql/hive/catalog/bare_statement_cache.test",
+				"test/sql/hive/hive_scan/scan_partitioned/test_lazy_partitions.test",
+				"test/sql/hive/ddl/glue_calls_per_ddl.test"
 			]
 		},
 		{
 			"reason": "AWS Glue stores column names in lower case ('Mixed Case' reads back as 'mixed case'); moto keeps them as given",
 			"paths": [
-				"test/sql/hive/ddl/alter_column/glue_replace_columns.test"
+				"test/sql/hive/ddl/alter_column/glue_replace_columns.test",
+				"test/sql/hive/ddl/alter_column/alter_table_rename_column.test",
+				"test/sql/hive/ddl/glue_partitions_column_names.test"
 			]
 		},
 		{

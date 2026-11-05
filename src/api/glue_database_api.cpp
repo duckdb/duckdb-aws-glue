@@ -127,6 +127,11 @@ void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const
 	request.SetDatabaseInput(input);
 	auto outcome = client->UpdateDatabase(request);
 	if (!outcome.IsSuccess()) {
+		if (outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::CONCURRENT_MODIFICATION) {
+			throw TransactionException("Glue database \"%s\" was changed by another client while it was altered, run "
+			                           "the statement again",
+			                           database.name);
+		}
 		ThrowGlueError(outcome, StringUtil::Format("UpdateDatabase '%s'", database.name));
 	}
 }

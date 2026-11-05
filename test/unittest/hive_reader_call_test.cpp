@@ -500,6 +500,42 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	               "SELECT string_agg(id || ':' || coalesce(ok::VARCHAR, 'NULL'), ' ' ORDER BY id) FROM (" + read + ")")
 	            .ToString() == "1:true 2:true 3:false 4:false 5:false 6:false 7:false 8:NULL");
 	REQUIRE(Differences(con, query, read) == 0);
+	// OpenCSVSerde timestamps and dates are numbers of milliseconds and days since the epoch
+	auto stamps = tables.Add("stamps");
+	Run(con, "CREATE TABLE lake.default." + stamps +
+	             " (id INTEGER, ts TIMESTAMP, d DATE) WITH (format = 'csv', quote = '\"')");
+	auto stamps_location = location + "/default/" + stamps;
+	WriteLines(con, {"1,1579059880123,18276", "2,-1,-1", "3"}, stamps_location + "/data.csv");
+	query = "SELECT * FROM lake.default." + stamps;
+	{
+		PlannedScan scan(con, query);
+		REQUIRE(Columns(Call(scan)) ==
+		        vector<string> {"CAST(__internal_barrier(id) AS INTEGER)",
+		                        "make_timestamp_ms(CAST(__internal_barrier(ts) AS BIGINT))",
+		                        "(CAST('1970-01-01' AS DATE) + CAST(__internal_barrier(d) AS INTEGER))"});
+	}
+	read = Restate(con, query);
+	REQUIRE(Scalar(con, "SELECT string_agg(id || ':' || coalesce(ts::VARCHAR, 'NULL') || ':' || coalesce(d::VARCHAR, "
+	                    "'NULL'), ' ' ORDER BY id) FROM (" +
+	                        read + ")")
+	            .ToString() == "1:2020-01-15 03:44:40.123:2020-01-15 2:1969-12-31 23:59:59.999:1969-12-31 3:NULL:NULL");
+	REQUIRE(Differences(con, query, read) == 0);
+	WriteLines(con, {"4,2020-01-15 03:44:40,2020-01-15"}, stamps_location + "/text.csv");
+	REQUIRE(StringUtil::Contains(ReadError(con, query), "Could not convert string '2020-01-15"));
+	REQUIRE(StringUtil::Contains(ReadError(con, Restate(con, query)), "Could not convert string '2020-01-15"));
+	Run(con, "ALTER TABLE lake.default." + stamps + " SET ('use.null.for.invalid.data' = 'true')");
+	WriteLines(con, {"5,9223372036854775807,2147483647"}, stamps_location + "/out_of_range.csv");
+	{
+		PlannedScan scan(con, query);
+		auto columns = Columns(Call(scan));
+		REQUIRE(columns[1] == "TRY(make_timestamp_ms(TRY_CAST(__internal_barrier(ts) AS BIGINT)))");
+		REQUIRE(columns[2] == "TRY((CAST('1970-01-01' AS DATE) + TRY_CAST(__internal_barrier(d) AS INTEGER)))");
+	}
+	read = Restate(con, query);
+	REQUIRE(Rows(con, read) == 5);
+	REQUIRE(Scalar(con, "SELECT count(*) FROM (" + read + ") WHERE id = 5 AND ts IS NULL AND d IS NULL").ToString() ==
+	        "1");
+	REQUIRE(Differences(con, query, read) == 0);
 	// json and avro
 	auto json = tables.Add("json");
 	Run(con, "CREATE TABLE lake.default." + json +

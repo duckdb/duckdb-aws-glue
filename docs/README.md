@@ -54,7 +54,9 @@ Text tables are read the way their SerDe reads them:
   file and the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per
   file in every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two
   broken rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any
-  case and false otherwise.
+  case and false otherwise. A timestamp field is a number of milliseconds since the epoch (`1579059880000` is
+  `2020-01-15 03:44:40`) and a date field a number of days since the epoch (`18276` is `2020-01-15`); text such as
+  `2020-01-15 03:44:40` or `2020-01-15` does not parse.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
   are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
@@ -73,7 +75,9 @@ Text tables are read the way their SerDe reads them:
   with `case.insensitive=false` matches them exactly. Keys of one object that differ only in case are duplicate keys.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
-  line break.
+  line break, and timestamps and dates are written as milliseconds (truncated) and days since the epoch (an infinite
+  value is refused). NULL is written as an empty field, which reads back as an empty string in a string column,
+  false in a boolean column and NULL elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
 - Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
   nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
@@ -522,16 +526,22 @@ process first installs the loadable extensions from `build/<type>/repository`; o
 makes them ~1.5 GB each, so CI tests a `make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1` build (assertions and
 sanitizers, no debug info).
 
-A maintainer can run the whole suite of a pull request or a branch, on a release build, against a live catalog with
-the `Cloud Glue tests` workflow (`.github/workflows/CloudGlueTests.yml`,
-`gh workflow run CloudGlueTests.yml -f pr_number=<n>`, or `gh workflow run CloudGlueTests.yml --ref main` without a
-PR). It is never triggered by a PR, refuses to run for anyone below the `maintain` role, tests the PR's head commit
-(or the branch's) as it was when the run started, and reports the result as a `Cloud Glue tests` status on that
-commit. The catalog, region and AWS credentials come from the variables and secrets of the `cloud-glue` environment,
-listed at the top of the workflow. The tests write to the bucket `duckdb-glue-ci-<account id>-<region>`, which the
-workflow creates if needed, under `duckdb-aws-glue-cloud-tests/ci-<run id>-<attempt>/`, which it deletes when the job
-ends, whether the tests pass or not; a lifecycle rule on `duckdb-aws-glue-cloud-tests/` expires anything a failed run
-leaves behind after 2 days.
+The `Cloud Glue tests` workflow (`.github/workflows/CloudGlueTests.yml`) runs the whole suite, on a release build,
+against a live catalog. It runs on every push to `main`; when such a run fails, its job summary lists the failing tests
+and the merges since the last passing run on `main`. On a pull request it runs when a maintainer adds the `cloud-tests`
+label, and again on every push to a labeled PR whose author is a member or collaborator of the repository. Since the
+PR's code runs with the AWS credentials, read an outside contributor's PR before labeling it, and remove and re-add the
+label to test their later commits. A maintainer can also start it by hand (`gh workflow run CloudGlueTests.yml -f
+pr_number=<n>`, or `gh workflow run CloudGlueTests.yml --ref main` without a PR). Starting it by hand or through the
+label is refused for anyone below the `maintain` role. A run tests the PR's head commit (or the branch's) as it was when
+the run started, and reports the result as a `Cloud Glue tests` status on that commit. Runs share the catalog, so they
+go one at a time; GitHub keeps only the newest waiting run, which is why a failing run on `main` compares with the last
+passing one rather than the previous commit. Every run first deletes all Glue databases of the account and creates an
+empty `default`. The catalog, region and AWS credentials come from the variables and secrets of the `cloud-glue`
+environment, listed at the top of the workflow. The tests write to the bucket `duckdb-glue-ci-<account id>-<region>`,
+which the workflow creates if needed, under `duckdb-aws-glue-cloud-tests/ci-<run id>-<attempt>/`, which it deletes when
+the job ends, whether the tests pass or not; a lifecycle rule on `duckdb-aws-glue-cloud-tests/` expires anything a
+failed run leaves behind after 2 days.
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.

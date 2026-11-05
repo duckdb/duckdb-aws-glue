@@ -13,7 +13,8 @@ on:
 
 jobs:
   local-glue-tests:
-    runs-on: ubuntu-latest
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
 
     env:
       GEN: ninja
