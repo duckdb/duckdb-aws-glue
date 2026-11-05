@@ -337,6 +337,18 @@ COPY (SELECT * FROM (VALUES
     ('"9"')
 ) t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv_bool/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
+# the reader call converts the field as the scan does
+query II
+EXPLAIN (SQL) SELECT flag FROM my_datalake.default.formats_csv_opencsv_bool;
+----
+sql	<REGEX>:.*\(lower\(__internal_barrier\(flag\)\) = 'true'\) AS flag.*
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
 query II
 SELECT id, flag FROM my_datalake.default.formats_csv_opencsv_bool ORDER BY id;
 ----
@@ -349,6 +361,11 @@ SELECT id, flag FROM my_datalake.default.formats_csv_opencsv_bool ORDER BY id;
 7	false
 8	false
 9	NULL
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
 
 # use.null.for.invalid.data does not change it: no boolean field is invalid
 statement ok

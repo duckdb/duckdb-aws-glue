@@ -44,30 +44,42 @@ A `float` or `double` column may hold NaN wherever the file does not count its N
 writers leave out): such a column's min/max never skip a row group for a filter that NaN could match.
 Text tables are read the way their SerDe reads them:
 
-- LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
-  is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
-  quoted.
-- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\` when the table has none; doubled quotes
-  are read either way). Without `escapeChar` the escape is read as Athena v3 reads it: the `\` is dropped and the `\`
-  or quote character after it is kept, in a quoted field or not (`\` is an empty field, `a\x` is `ax`, `a\\b` is
-  `a\b`), and outside quotes it does not escape the separator (`a\,b` is the fields `a` and `b`). As `read_csv` splits
-  the fields first, two cases differ: `\"` inside a quoted field ends the quote, so the field and the following lines
-  run together until the next quote (v3: `"`), and an unquoted field starting with `\\` keeps one `\` (v3: none). An
-  `escapeChar` the table records, such as the `"` of the tables this extension creates, is applied by `read_csv` (v3
-  reads `"` as `\` too). An empty field is an empty string; there is no NULL. A line break inside a quoted field fails
-  a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner does not
-  support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per file and
-  the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per file in
-  every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two broken
-  rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any case and
-  false otherwise. A timestamp field is a number of milliseconds since the epoch (`1579059880000` is `2020-01-15
-  03:44:40`) and a date field a number of days since the epoch (`18276` is `2020-01-15`); text such as `2020-01-15
-  03:44:40` or `2020-01-15` does not parse.
+- LazySimpleSerDe:
+  - The delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127 is a byte code
+    (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not quoted.
+  - `timestamp.formats` is not supported as the SerDe defines it (Joda-Time patterns, the longest match wins). Its
+    patterns are hints: a `timestamp` field is trimmed and tried with `try_strptime` and each pattern strptime can
+    express (`y`, `M`, `d`, `H`, `h`, `m`, `s`, `SSS`, `a`, `E` and quoted text), the first match in the list winning;
+    then as milliseconds since the epoch if `millis` is listed; then with the usual cast. A field shorter than 8
+    characters is NULL, as in the SerDe. Patterns are separated by `,` (`\,` is a comma in a pattern); those with a time
+    zone, a fraction other than `SSS`, or no year are ignored. Without the property, timestamps are read with the usual
+    cast only.
+- OpenCSVSerde:
+  - `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\` when the table has none; see escapes below). An
+    empty field is an empty string; there is no NULL.
+  - A boolean field is true when it is `true` in any case and false otherwise.
+  - A timestamp field is a number of milliseconds since the epoch (`1579059880000` is `2020-01-15 03:44:40`) and a date
+    field a number of days since the epoch (`18276` is `2020-01-15`); text such as `2020-01-15 03:44:40` or
+    `2020-01-15` does not parse.
+  - Escapes: without `escapeChar` a field is read with `\` as the escape, as the SerDe reads it: the `\` is dropped and
+    the `\` or quote character after it is kept, in a quoted field or not (`\` is an empty field, `a\x` is `ax`,
+    `a\\b` is `a\b`), and outside quotes it does not escape the separator (`a\,b` is the fields `a` and `b`). Doubled
+    quotes are one quote either way. As `read_csv` splits the fields first, two cases differ: `\"` inside a quoted field
+    ends the quote, so the field and the following lines run together until the next quote (the SerDe: `"`), and an
+    unquoted field starting with `\\` keeps one `\` (the SerDe: none). An `escapeChar` the table records, such as the
+    `"` of the tables this extension creates, is applied by `read_csv` (the SerDe reads `"` as `\` too).
+  - Line breaks: the SerDe reads a file line by line (TextInputFormat), so a line break inside a quoted field splits the
+    record into two broken rows, and a quote that is never closed (`2,"abc`) makes only that field NULL. The extension
+    reads CSV as `read_csv` does: a quoted field continues across line breaks, so a quoted line break is read as one
+    value, and the lines after an unclosed quote are read into that one value without an error. A quoted line break
+    fails a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner
+    does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per
+    file. `SET hive_csv_parallel = false` reads one thread per file in every scan.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
-  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
-  details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
-  (Hive: a row of NULLs).
+  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property; OpenCSVSerde booleans, timestamps
+  and dates as above), which differs from Hive in details: surrounding spaces are ignored, `'1.5'` in an `int` column
+  is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
 - A line may be up to `hive_csv_max_line_size` bytes long (default 8000000; Hive has no limit); a longer line fails
   the query. Up to the default the reader's buffers and how a file is split between threads are unchanged; a larger
