@@ -26,11 +26,14 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! A directory's recursive listing, fetched a page at a time as it is read
+//! The listing of a glob (a directory, recursively, or a range of partitions), fetched a page at a time as it is read
 struct HiveDirectoryListingEntry {
 	annotated_mutex lock;
-	//! Null until some scan first asks for this directory
+	//! Null until some scan first asks for this glob
 	shared_ptr<MultiFileList> listing DUCKDB_GUARDED_BY(lock);
+
+	//! The listing, listed now if it is not yet; locked per entry, so no listing waits on another's first page
+	shared_ptr<MultiFileList> GetOrList(ClientContext &context, const string &glob);
 };
 
 //! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
@@ -48,10 +51,8 @@ public:
 	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
-	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
-	//! listing is kept beyond the query (glue_cache_listings)
-	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
-	                                              bool cache_in_connection = false);
+	//! The files matching 'glob', fetched as they are read; kept beyond the query with 'cache_in_connection'
+	shared_ptr<MultiFileList> GetListing(ClientContext &context, const string &glob, bool cache_in_connection = false);
 	//! The id of the next scan bound in this query, starting at 1
 	idx_t NextScanId();
 

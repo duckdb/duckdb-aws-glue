@@ -83,7 +83,7 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
 
 - **Entry point** `src/glue_extension.cpp`: `Aws::InitAPI`, registers the `glue` StorageExtension, the table functions,
   the `glue_hive_ddl` grammar extension, and settings (`glue_network_calls_via_duckdb`, `glue_get_partitions_segments`,
-  `hive_partition_listing_threshold`, `hive_partition_listing_measure_files`).
+  `hive_partition_listing_threshold`, `hive_partition_listing_measure_files`, `hive_partition_listing_ranges`).
 - **Catalog layer** `src/catalog/`: the usual DuckDB custom-catalog shape — `GlueCatalog` → `GlueSchemaSet` →
   `GlueSchemaEntry` (a Glue database) → `GlueTableSet` → `GlueTable`. `GlueAttach` parses ATTACH options. DDL
   (CREATE/DROP schema/table, ALTER column) is implemented in `GlueSchemaEntry`; Glue types are mapped in
@@ -97,7 +97,8 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
 - **Reading** `src/planning/hive_multi_file_reader.cpp`: `GlueTable::GetScanFunction` builds a `HiveScanInfo` (Glue
   schema, partitions from `GetPartitions`, format) and scans with the format's reader
   (`read_parquet`/`read_csv`/`read_json`/ `read_avro`) using `HiveMultiFileReader` + a lazy `HiveMultiFileList`:
-  partition filters are pushed down to Glue's partition values before any S3 listing. The `hive_scan` table function
+  partition filters are pushed down to Glue's partition values before any S3 listing, and `HiveListingPlanner`
+  (`src/planning/hive_listing_plan.cpp`) chooses how the partitions read are listed. The `hive_scan` table function
   (`src/functions/hive_scan_function.cpp`) reuses the same reader with schema/partitions given as arguments.
 - **Writing** `src/planning/glue_hive_insert.cpp`: INSERT and CTAS plan a `PhysicalCopyToFile` in the table's format
   with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. The copy is

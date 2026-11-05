@@ -126,6 +126,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Count the keys the scan's sample lists per partition, and size the table location's "
 	                          "listing by them rather than one key per partition. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("hive_partition_listing_ranges",
+	                          "List the partitions below the table location in ranges that share a key prefix, all "
+	                          "ranges at the same time, when that takes fewer rounds of requests than listing the "
+	                          "location or each partition read. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "

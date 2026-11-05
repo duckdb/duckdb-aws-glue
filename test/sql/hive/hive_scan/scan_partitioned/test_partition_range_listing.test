@@ -1,0 +1,396 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_range_listing.test
+# description: The partitions below the table location are listed in key prefix ranges of about one page, all at once, when that takes fewer rounds of requests than the location or each partition
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rl_events;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rl_strings;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rl_multi;
+
+statement ok
+CREATE TABLE my_datalake.default.rl_events (v INTEGER, part INTEGER) PARTITIONED BY (part);
+
+# 1100 partitions of two files each
+statement ok
+INSERT INTO my_datalake.default.rl_events SELECT i, i % 1100 FROM range(1100) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.rl_events SELECT i, i % 1100 FROM range(1100, 2200) t(i);
+
+# a directory next to the partitions that no partition registers: listed with its range, never read
+statement ok
+COPY (SELECT 1 AS v) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rl_events/part=50_stale/f.parquet';
+
+# 1040 partitions a000 to a519 and b000 to b519, of two files each
+statement ok
+CREATE TABLE my_datalake.default.rl_strings (v INTEGER, part VARCHAR) PARTITIONED BY (part);
+
+statement ok
+INSERT INTO my_datalake.default.rl_strings
+SELECT i, CASE WHEN i < 520 THEN 'a' ELSE 'b' END || lpad((i % 520)::VARCHAR, 3, '0') FROM range(1040) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.rl_strings
+SELECT i, CASE WHEN i < 520 THEN 'a' ELSE 'b' END || lpad((i % 520)::VARCHAR, 3, '0') FROM range(1040) t(i);
+
+# 1100 partitions a=0/b=000 to a=9/b=109 of one file each, and a=0 to a=9 with b NULL (__HIVE_DEFAULT_PARTITION__)
+statement ok
+CREATE TABLE my_datalake.default.rl_multi (v INTEGER, a INTEGER, b VARCHAR) PARTITIONED BY (a, b);
+
+statement ok
+INSERT INTO my_datalake.default.rl_multi
+SELECT i, i % 10, CASE WHEN i < 1100 THEN lpad((i // 10)::VARCHAR, 3, '0') END FROM range(1110) t(i);
+
+statement ok
+SET threads = 16;
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# the prefix of each listing request relative to the table location: '' for the location, ending in '/' for a
+# partition and without one for a range
+statement ok
+CREATE MACRO listed(tbl) AS TABLE
+    SELECT regexp_extract(url_decode(regexp_extract(request.url, 'prefix=([^&]*)', 1)), '/' || tbl || '/(.*)$', 1) AS prefix
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.url LIKE '%list-type=2%' AND url_decode(request.url) LIKE '%/' || tbl || '/%';
+
+statement ok
+CREATE MACRO listed_kinds(tbl) AS TABLE
+    SELECT count(*) FILTER (WHERE prefix = '') AS location,
+           count(*) FILTER (WHERE prefix LIKE '%/') AS partitions,
+           count(*) FILTER (WHERE prefix <> '' AND prefix NOT LIKE '%/') AS ranges
+    FROM listed(tbl);
+
+# 40 partitions: the one range holding them, which the sample lists and the scan takes from it
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events WHERE part BETWEEN 500 AND 539;
+----
+80	85560
+
+query I
+SELECT prefix FROM listed('rl_events') ORDER BY prefix;
+----
+part=5
+
+# partitions in two ranges
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events WHERE part BETWEEN 590 AND 619;
+----
+60	69270
+
+query I
+SELECT prefix FROM listed('rl_events') ORDER BY prefix;
+----
+part=5
+part=6
+
+# every partition: one range per first digit (part=0 is a directory of its own, the sample's), at most one page each
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events;
+----
+2200	2418900
+
+query III
+SELECT * FROM listed_kinds('rl_events');
+----
+0	1	9
+
+# partitions in nine ranges: the sample's range part=1, and the eight others listed at the same time
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events WHERE part % 10 = 5;
+----
+220	242000
+
+query II
+SELECT prefix, count(*) FROM listed('rl_events') GROUP BY prefix ORDER BY prefix;
+----
+part=1	1
+part=2	1
+part=3	1
+part=4	1
+part=5	1
+part=6	1
+part=7	1
+part=8	1
+part=9	1
+
+# a join pruning the partitions at run time lists the range holding the partitions it keeps
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(e.v) FROM my_datalake.default.rl_events e JOIN (SELECT range AS p FROM range(100, 120)) d ON e.part = d.p;
+----
+40	26380
+
+query I
+SELECT prefix FROM listed('rl_events') WHERE prefix NOT LIKE '%/' ORDER BY prefix;
+----
+part=1
+
+# without ranges the location is listed, as it takes fewer rounds than the 40 partitions
+statement ok
+SET hive_partition_listing_ranges = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events WHERE part BETWEEN 500 AND 539;
+----
+80	85560
+
+query III
+SELECT * FROM listed_kinds('rl_events');
+----
+3	0	0
+
+statement ok
+RESET hive_partition_listing_ranges;
+
+# a string valued key: the ranges part=a and part=b of one key a partition hold two pages each once measured, so the
+# scan lists part=b0 instead of part=b, and takes the partitions of part=a0 from the sample, the first page of part=a
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_strings
+WHERE part BETWEEN 'a010' AND 'a019' OR part BETWEEN 'b010' AND 'b019';
+----
+40	10980
+
+query II
+SELECT prefix, count(*) FROM listed('rl_strings') GROUP BY prefix ORDER BY prefix;
+----
+part=a	1
+part=b0	1
+
+# unmeasured, the ranges stay those of one key a partition, and part=a still comes from the sample
+statement ok
+SET hive_partition_listing_measure_files = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_strings
+WHERE part BETWEEN 'a010' AND 'a019' OR part BETWEEN 'b010' AND 'b019';
+----
+40	10980
+
+query II
+SELECT prefix, count(*) FROM listed('rl_strings') GROUP BY prefix ORDER BY prefix;
+----
+part=a	1
+part=b	2
+
+statement ok
+RESET hive_partition_listing_measure_files;
+
+# with hive_partition_listing_threshold the ranges replace the location it chooses, but not the partitions, and are
+# sized by the measured keys as well
+statement ok
+SET hive_partition_listing_threshold = 10;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_strings
+WHERE part BETWEEN 'a010' AND 'a019' OR part BETWEEN 'b010' AND 'b019';
+----
+40	10980
+
+query II
+SELECT prefix, count(*) FROM listed('rl_strings') GROUP BY prefix ORDER BY prefix;
+----
+part=a	1
+part=b0	1
+
+statement ok
+SET hive_partition_listing_threshold = 30;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_strings
+WHERE part BETWEEN 'a010' AND 'a019' OR part BETWEEN 'b010' AND 'b019';
+----
+40	10980
+
+query III
+SELECT * FROM listed_kinds('rl_strings');
+----
+0	20	0
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+# with glue_cache_listings the range listings serve later statements of the connection as well
+statement ok
+SET glue_cache_listings = true;
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_strings
+WHERE part BETWEEN 'a010' AND 'a019' OR part BETWEEN 'b010' AND 'b019';
+----
+40	10980
+
+query II
+SELECT prefix, count(*) FROM listed('rl_strings') GROUP BY prefix ORDER BY prefix;
+----
+part=a	1
+part=b0	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_strings
+WHERE part BETWEEN 'a010' AND 'a019' OR part BETWEEN 'b010' AND 'b019';
+----
+40	10980
+
+query I
+SELECT count(*) FROM listed('rl_strings');
+----
+0
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+statement ok
+RESET glue_cache_listings;
+
+# a partition read at an s3a:// location below the s3:// table location: no range covers it, so the location and
+# then, once measured, each partition is listed
+statement ok
+CALL glue_add_partition('my_datalake.default.rl_strings', {part: 'b999'},
+    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/rl_strings/part=b999');
+
+statement ok
+INSERT INTO my_datalake.default.rl_strings VALUES (7, 'b999');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_strings WHERE part BETWEEN 'b010' AND 'b029' OR part = 'b999';
+----
+41	21587
+
+query III
+SELECT * FROM listed_kinds('rl_strings');
+----
+2	21	0
+
+# a partition whose location has a glob character is a range of its own that can not be listed: rather than the ranges
+# part=a0 and part=c*, the location's first page (the sample) and then each partition (part=c*, listed up to its '*')
+statement ok
+CALL glue_add_partition('my_datalake.default.rl_strings', {part: 'c*'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rl_strings/part=c*');
+
+statement ok
+INSERT INTO my_datalake.default.rl_strings VALUES (9, 'c*');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_strings WHERE part BETWEEN 'a010' AND 'a029' OR part = 'c*';
+----
+41	789
+
+query III
+SELECT * FROM listed_kinds('rl_strings');
+----
+1	20	1
+
+# two partition keys, with NULL values: the ranges a=2/b= and a=3/b=, the first from the sample
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_multi WHERE a IN (2, 3) AND (b < '020' OR b IS NULL);
+----
+42	6105
+
+query I
+SELECT prefix FROM listed('rl_multi') ORDER BY prefix;
+----
+a=2/b=
+a=3/b=
+
+# a range listing that fails fails the scan: here the range part=7, whose prefix a secret sends to a closed port
+statement ok
+CREATE SECRET rl_unreachable (TYPE S3, KEY_ID 'x', SECRET 'y', ENDPOINT 'localhost:1', USE_SSL false,
+    URL_STYLE 'path', SCOPE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rl_events/part=7');
+
+statement ok
+SET http_retries = 0;
+
+# the test runner skips a test on an HTTP error by default
+set ignore_error_messages
+
+statement error
+SELECT count(*) FROM my_datalake.default.rl_events WHERE part % 10 = 5;
+----
+<REGEX>:.*Could not connect.*rl_events%2Fpart%3D7.*
+
+statement ok
+RESET http_retries;
+
+statement ok
+DROP SECRET rl_unreachable;
+
+statement ok
+RESET threads;
+
+statement ok
+DROP TABLE my_datalake.default.rl_events;
+
+statement ok
+DROP TABLE my_datalake.default.rl_strings;
+
+statement ok
+DROP TABLE my_datalake.default.rl_multi;

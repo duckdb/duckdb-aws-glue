@@ -27,8 +27,12 @@ bool LocationHasGlob(const string &location) {
 	return FileSystem::HasGlob(location);
 }
 
+string LocationGlob(const string &location) {
+	return location + "/**";
+}
+
 unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location) {
-	return fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
+	return fs.GlobFileList(LocationGlob(location), FileGlobOptions::ALLOW_EMPTY);
 }
 
 Path HivePartitionDirectory(const vector<string> &keys, const vector<string> &values) {
