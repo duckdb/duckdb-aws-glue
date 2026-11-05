@@ -47,6 +47,18 @@ COPY (SELECT * FROM (VALUES ('1,1579059880000,18276'), ('2,"1579059880123","1827
     ('5,+1579059880000,20200115'), ('6'))
 t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
+# the reader call converts the fields as the scan does
+query II
+EXPLAIN (SQL) SELECT ts, d FROM my_datalake.default.opencsv_epoch;
+----
+sql	<REGEX>:.*make_timestamp_ms\(CAST\(__internal_barrier\(ts\) AS BIGINT\)\) AS ts,\s+\(CAST\('1970-01-01' AS DATE\) \+ CAST\(__internal_barrier\(d\) AS INTEGER\)\) AS d.*
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
 query III
 SELECT id, ts, d FROM my_datalake.default.opencsv_epoch ORDER BY id;
 ----
@@ -69,6 +81,11 @@ SELECT CAST(ts AS VARCHAR), CAST(d AS VARCHAR) FROM my_datalake.default.opencsv_
 ----
 2020-01-15 03:44:40.123	2020-01-15
 
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
 #---------------------------------------------------------------------------
 # a field that is not a number fails the query unless use.null.for.invalid.data is true
 #---------------------------------------------------------------------------
@@ -76,14 +93,31 @@ statement ok
 COPY (SELECT * FROM (VALUES ('7,2020-01-15 03:44:40,18276'))
 t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch/text_ts.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
 statement error
 SELECT id, ts FROM my_datalake.default.opencsv_epoch;
 ----
 <REGEX>:.*Could not convert string '2020-01-15 03:44:40' to INT64.*
 
 statement ok
+RESET debug_verify_statement;
+
+endloop
+
+statement ok
 COPY (SELECT * FROM (VALUES ('8,0,2020-01-15'), ('9,0,1579059880000'))
 t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch/text_d.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 statement error
 SELECT id, d FROM my_datalake.default.opencsv_epoch;
@@ -91,7 +125,23 @@ SELECT id, d FROM my_datalake.default.opencsv_epoch;
 <REGEX>:.*Could not convert string '(2020-01-15|1579059880000)' to INT32.*
 
 statement ok
+RESET debug_verify_statement;
+
+endloop
+
+statement ok
 ALTER TABLE my_datalake.default.opencsv_epoch SET ('use.null.for.invalid.data' = 'true');
+
+query II
+EXPLAIN (SQL) SELECT ts, d FROM my_datalake.default.opencsv_epoch;
+----
+sql	<REGEX>:.*TRY\(make_timestamp_ms\(TRY_CAST\(__internal_barrier\(ts\) AS BIGINT\)\)\) AS ts,\s+TRY\(\(CAST\('1970-01-01' AS DATE\) \+ TRY_CAST\(__internal_barrier\(d\) AS INTEGER\)\)\) AS d.*
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 query III
 SELECT id, ts, d FROM my_datalake.default.opencsv_epoch WHERE id >= 5 ORDER BY id;
@@ -101,6 +151,11 @@ SELECT id, ts, d FROM my_datalake.default.opencsv_epoch WHERE id >= 5 ORDER BY i
 7	NULL	2020-01-15
 8	1970-01-01 00:00:00	NULL
 9	1970-01-01 00:00:00	NULL
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
 
 #---------------------------------------------------------------------------
 # a number out of the type's range fails the query, and is NULL with use.null.for.invalid.data
@@ -113,6 +168,12 @@ COPY (SELECT * FROM (VALUES ('1,9223372036854775807,2147483647'), ('2,-922337203
     ('3,9223372036854775,2147483646'))
 t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch_range/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
 statement error
 SELECT id, ts FROM my_datalake.default.opencsv_epoch_range;
 ----
@@ -124,7 +185,18 @@ SELECT id, d FROM my_datalake.default.opencsv_epoch_range;
 <REGEX>:.*Date out of range.*
 
 statement ok
+RESET debug_verify_statement;
+
+endloop
+
+statement ok
 ALTER TABLE my_datalake.default.opencsv_epoch_range SET ('use.null.for.invalid.data' = 'true');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 query III
 SELECT id, ts, d FROM my_datalake.default.opencsv_epoch_range ORDER BY id;
@@ -132,6 +204,11 @@ SELECT id, ts, d FROM my_datalake.default.opencsv_epoch_range ORDER BY id;
 1	NULL	NULL
 2	NULL	NULL
 3	294247-01-10 04:00:54.775	5881580-07-10
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
 
 #---------------------------------------------------------------------------
 # writing: milliseconds and days since the epoch, which read back as the same values (timestamps to the millisecond)

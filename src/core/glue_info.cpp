@@ -338,8 +338,11 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	options.null_for_invalid_data =
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
-	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
-	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
+	options.serde = GetSerDe();
+	string timestamp_formats;
+	if (GetSerDe() == HiveSerDe::LAZY_SIMPLE && TryGetProperty("timestamp.formats", timestamp_formats)) {
+		options.SetTimestampFormats(timestamp_formats);
+	}
 	return options;
 }
 

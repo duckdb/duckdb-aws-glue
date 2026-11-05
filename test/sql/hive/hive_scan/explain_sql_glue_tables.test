@@ -96,7 +96,7 @@ TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/es_opencsv/dt=2016-05-14/more.csv' 
 query II
 EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_opencsv;
 ----
-sql	<REGEX>:.*SELECT\s+CAST\(__internal_barrier\(id\) AS INTEGER\) AS id,\s+"name",\s+\(lower\(__internal_barrier\(flag\)\) = 'true'\) AS flag,\s+'2016-05-14' AS dt\s+FROM "system"\.main\.read_csv\(.*\("quote" = CAST\('"' AS VARCHAR\)\).*
+sql	<REGEX>:.*SELECT\s+CAST\(\s+CASE\s+WHEN \(\(NOT regexp_full_match\(__internal_barrier\(id\), '\[\+-\]\?\[0-9\]\+'\)\)\) THEN \(CAST\("error"\(concat\('OpenCSVSerde field ''', __internal_barrier\(id\), ''' is not an integer'\)\) AS VARCHAR\)\)\s+ELSE __internal_barrier\(id\)\s+END AS INTEGER\) AS id,\s+"name",\s+\(lower\(__internal_barrier\(flag\)\) = 'true'\) AS flag,\s+'2016-05-14' AS dt\s+FROM "system"\.main\.read_csv\(.*\("quote" = CAST\('"' AS VARCHAR\)\).*
 
 # one thread per file, as the planning session has it
 statement ok
@@ -225,7 +225,7 @@ SET debug_verify_statement = '{mode}';
 statement error
 SELECT id FROM my_datalake.default.es_opencsv;
 ----
-<REGEX>:.*Could not convert string 'x' to (INT32|INTEGER).*
+<REGEX>:.*OpenCSVSerde field 'x' is not an integer.*
 
 statement ok
 RESET debug_verify_statement;
@@ -238,7 +238,7 @@ ALTER TABLE my_datalake.default.es_opencsv SET ('use.null.for.invalid.data' = 't
 query II
 EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_opencsv;
 ----
-sql	<REGEX>:.*SELECT\s+TRY_CAST\(__internal_barrier\(id\) AS INTEGER\) AS id,\s+.*
+sql	<REGEX>:.*SELECT\s+TRY_CAST\(\s+CASE\s+WHEN \(\(NOT regexp_full_match\(__internal_barrier\(id\), '\[\+-\]\?\[0-9\]\+'\)\)\) THEN \(CAST\(NULL AS VARCHAR\)\)\s+ELSE __internal_barrier\(id\)\s+END AS INTEGER\) AS id,\s+.*
 
 # a line of a JsonSerDe table that is not JSON fails the read
 statement ok

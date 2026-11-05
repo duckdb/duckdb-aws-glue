@@ -1,0 +1,186 @@
+# name: test/sql/hive/dml/formats/csv/test_csv_opencsv_integer.test
+# description: OpenCSVSerde integer fields are an optional sign and digits in the column type's range
+# group: [csv]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.opencsv_int;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.opencsv_int_bad;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.lazy_int;
+
+#---------------------------------------------------------------------------
+# reading: a sign and digits, quoted or not, in every integer type's range; a missing field is NULL
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.opencsv_int (id INTEGER, n INTEGER, b BIGINT, s SMALLINT, t TINYINT)
+WITH (format = 'csv', quote = '"');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1,+7,+7,+7,+7'), ('2,007,-007,007,-007'), ('3,"42","42","42","42"'),
+    ('4,-2147483648,9223372036854775807,-32768,-128'), ('5,2147483647,-9223372036854775808,32767,127'), ('6'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_int/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+query IIIII
+SELECT id, n, b, s, t FROM my_datalake.default.opencsv_int ORDER BY id;
+----
+1	7	7	7	7
+2	7	-7	7	-7
+3	42	42	42	42
+4	-2147483648	9223372036854775807	-32768	-128
+5	2147483647	-9223372036854775808	32767	127
+6	NULL	NULL	NULL	NULL
+
+query I
+SELECT id FROM my_datalake.default.opencsv_int WHERE n = 7 AND b < 0 ORDER BY id;
+----
+2
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+#---------------------------------------------------------------------------
+# any other text fails the query unless use.null.for.invalid.data is true
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.opencsv_int_bad (id INTEGER, n INTEGER) WITH (format = 'csv', quote = '"');
+
+foreach field 0.54 1.5 -1.5 1.0 1e2 0x10 1_000 +-1 7-
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1,{field}')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_int_bad/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT n FROM my_datalake.default.opencsv_int_bad;
+----
+<REGEX>:.*OpenCSVSerde field '[^']*' is not an integer.*
+
+endloop
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1, 7 ')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_int_bad/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+statement error
+SELECT n FROM my_datalake.default.opencsv_int_bad;
+----
+<REGEX>:.*OpenCSVSerde field ' 7 ' is not an integer.*
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1,')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_int_bad/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT n FROM my_datalake.default.opencsv_int_bad;
+----
+<REGEX>:.*OpenCSVSerde field '' is not an integer.*
+
+# digits out of the type's range fail the cast
+statement ok
+COPY (SELECT * FROM (VALUES ('1,2147483648')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_int_bad/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT n FROM my_datalake.default.opencsv_int_bad;
+----
+<REGEX>:.*Could not convert string '2147483648' to INT32.*
+
+# the id column has to parse too, also when only it is read
+statement ok
+COPY (SELECT * FROM (VALUES ('1.5,1')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_int_bad/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT id FROM my_datalake.default.opencsv_int_bad;
+----
+<REGEX>:.*OpenCSVSerde field '1\.5' is not an integer.*
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1,0.54'), ('2,1e2'), ('3, 7'), ('4,'), ('5,2147483648'), ('6,+7'), ('7'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_int_bad/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement ok
+ALTER TABLE my_datalake.default.opencsv_int_bad SET ('use.null.for.invalid.data' = 'true');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+query II
+SELECT id, n FROM my_datalake.default.opencsv_int_bad ORDER BY id;
+----
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	7
+7	NULL
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+#---------------------------------------------------------------------------
+# LazySimpleSerDe keeps its own conversion (TRY_CAST)
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.lazy_int (id INTEGER, n INTEGER) WITH (format = 'csv');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1,1.5'), ('2, 7'), ('3,abc'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lazy_int/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, n FROM my_datalake.default.lazy_int ORDER BY id;
+----
+1	2
+2	7
+3	NULL
+
+statement ok
+DROP TABLE my_datalake.default.opencsv_int;
+
+statement ok
+DROP TABLE my_datalake.default.opencsv_int_bad;
+
+statement ok
+DROP TABLE my_datalake.default.lazy_int;
