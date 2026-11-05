@@ -154,7 +154,8 @@ private:
 };
 
 //! Glue has no transactional semantics in this extension: every DDL statement is executed against the Glue API
-//! immediately. The transaction exists because every attached database needs one, and carries the metadata cache.
+//! immediately. The transaction exists because every attached database needs one, carries the metadata cache, and
+//! drops the tables a CREATE TABLE AS created when it rolls back.
 class GlueTransaction : public Transaction {
 public:
 	GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &manager, ClientContext &context);
@@ -165,6 +166,8 @@ public:
 	void Rollback();
 
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
+	//! Rollback drops the table again; in autocommit mode the transaction is the CREATE TABLE AS statement
+	void AddCreatedTable(GlueCreatedTable table);
 
 public:
 	GlueCatalog &glue_catalog;
@@ -174,6 +177,7 @@ public:
 
 private:
 	GlueTransactionState transaction_state;
+	vector<GlueCreatedTable> created_tables;
 };
 
 } // namespace duckdb

@@ -194,8 +194,9 @@ their codec themselves.
   stay, empty), so the statement can be run again without adding its
   rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
-  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
-  (empty) table stays. It is refused when the location already holds data files, such as those of a dropped table,
+  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the statement fails
+  (including registering its partitions) the table is dropped from Glue again and its files are deleted. A failed
+  drop is logged as a warning naming the table, which is then left to drop manually. It is refused when the location already holds data files, such as those of a dropped table,
   which would read as rows of the new table. `WITH (overwrite = true)` deletes those files instead, in one
   `RemoveFiles` call when the statement starts executing and before the table is created: they stay deleted if the
   statement then fails, and a failed delete may leave some of them (the table is then not created). It is refused

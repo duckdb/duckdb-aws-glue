@@ -6,6 +6,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "core/hive_location.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 
@@ -96,15 +97,15 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 			auto &create_schema = *schema.get_mutable();
 			ClearLocation(context, create_schema, table_info, location, overwrite);
 			auto &catalog = create_schema.catalog;
+			auto created_table = GlueAPI::PrepareCreatedTable(context, catalog.Cast<GlueCatalog>(),
+			                                                  table_info.schema_name, table_info.name);
 			auto created = create_schema.CreateTableFromInfo(catalog.GetCatalogTransaction(context), *info, table_info);
 			if (!created) {
 				throw CatalogException("Table with name \"%s\" appeared between planning and execution; retry CREATE "
 				                       "TABLE IF NOT EXISTS",
 				                       table_info.name);
 			}
-			// Drop the table if this statement does not commit
-			GlueAPI::RegisterTableCleanup(context, catalog.Cast<GlueCatalog>(), table_info.schema_name,
-			                              table_info.name);
+			GlueTransaction::Get(context, catalog).AddCreatedTable(std::move(created_table));
 			table_created = true;
 		}
 	}

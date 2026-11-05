@@ -33,12 +33,35 @@ void GlueTransaction::Commit() {
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
+	created_tables.clear();
 }
 
 void GlueTransaction::Rollback() {
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
+	// No GlueHttpClientContextScope: the connection's HTTP session needs an active transaction
+	auto client_context = context.lock();
+	for (auto &table : created_tables) {
+		try {
+			GlueAPI::DropCreatedTable(table);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			auto message = StringUtil::Format("Could not drop Glue table '%s.%s' created by a rolled back CREATE TABLE "
+			                                  "AS, drop it manually: %s",
+			                                  table.database_name, table.table_name, error.RawMessage());
+			if (client_context) {
+				DUCKDB_LOG_WARNING(*client_context, message);
+			} else {
+				DUCKDB_LOG_WARNING(glue_catalog.GetDatabase(), message);
+			}
+		}
+	}
+	created_tables.clear();
+}
+
+void GlueTransaction::AddCreatedTable(GlueCreatedTable table) {
+	created_tables.push_back(std::move(table));
 }
 
 GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) {

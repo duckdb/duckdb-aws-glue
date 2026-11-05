@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/ctas/create_table_as_created_at_execution.test
-# description: CREATE TABLE AS creates the Glue table when execution starts, not while planning: EXPLAIN creates nothing, IF NOT EXISTS on an existing table writes nothing, the options are resolved once, and partitioned tables keep their column order in Glue and in the files; a statement that fails after the table is created rolls back and the cleanup drops it
+# description: CREATE TABLE AS creates the Glue table when execution starts, not while planning: EXPLAIN creates nothing, IF NOT EXISTS on an existing table writes nothing, the options are resolved once, and partitioned tables keep their column order in Glue and in the files; a statement that fails after the table is created rolls back, which drops the table
 # group: [ctas]
 
 require httpfs
@@ -217,7 +217,7 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_read_only_failu
 0
 
 # A failure after the table is created at sink start (here the projection raises
-# mid-stream) rolls the statement back, and the cleanup drops the table it
+# mid-stream) rolls back the statement's transaction, which drops the table it
 # created: Glue is left with no such table and core removes the files it wrote.
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.ctas_projection_error;
@@ -257,6 +257,47 @@ SELECT count(*) FROM my_datalake.default.ctas_after_failure;
 
 statement ok
 DROP TABLE my_datalake.default.ctas_after_failure;
+
+# Glue refusing a partition after the table is created also rolls back: the
+# table is dropped and the files are deleted.
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ctas_registration_error;
+
+statement ok
+SET glue_debug_fail_partition_registration = 'InvalidInputException:1';
+
+statement error
+CREATE TABLE my_datalake.default.ctas_registration_error
+PARTITIONED BY (p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_registration_error') AS
+SELECT range AS id, range % 3 AS p FROM range(9);
+----
+injected by glue_debug_fail_partition_registration
+
+statement ok
+RESET glue_debug_fail_partition_registration;
+
+statement error
+SELECT * FROM glue_get_table_response('my_datalake.default.ctas_registration_error');
+----
+does not exist
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_registration_error/**');
+----
+0
+
+# IF NOT EXISTS on an existing table creates nothing, so a query that would
+# fail never runs and the existing table is not dropped.
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.default.ctas_plan_side_effect
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect') AS
+SELECT error('ctas if not exists failure') AS id, 0 AS twice;
+
+query II
+SELECT count(*), sum(twice) FROM my_datalake.default.ctas_plan_side_effect;
+----
+10	90
 
 # The same holds when the table location comes from the ATTACH DEFAULT_LOCATION
 # instead of a CREATE TABLE option: planning derives <default>/<database>/<table>

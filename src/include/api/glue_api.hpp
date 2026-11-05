@@ -33,6 +33,14 @@ public:
 //! How a create call ended: the object exists afterwards either way, another client may have created it first
 enum class GlueCreateOutcome : uint8_t { CREATED, ALREADY_EXISTED };
 
+//! A table CREATE TABLE AS created, dropped again when its transaction rolls back
+struct GlueCreatedTable {
+	std::shared_ptr<Aws::Glue::GlueClient> client;
+	string catalog_id;
+	string database_name;
+	string table_name;
+};
+
 //! Thin wrapper around the AWS SDK Glue client
 class GlueAPI {
 public:
@@ -145,10 +153,12 @@ public:
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
-	//! Register cleanup for a just-created table: drop it from Glue if the statement fails instead of committing.
-	//! The Glue client is captured now, while the transaction is active, so the drop can run from the rollback hook.
-	static void RegisterTableCleanup(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                 const string &table_name);
+	//! What a rollback needs to drop a table CREATE TABLE AS creates. The client is fetched now: once the
+	//! transaction has ended the secret can no longer be looked up.
+	static GlueCreatedTable PrepareCreatedTable(ClientContext &context, GlueCatalog &catalog,
+	                                            const string &database_name, const string &table_name);
+	//! Drop a table a rolled-back CREATE TABLE AS created; a table that no longer exists is ignored
+	static void DropCreatedTable(const GlueCreatedTable &table);
 
 private:
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret
