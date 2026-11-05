@@ -217,17 +217,6 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 	auto format = table_info.GetFormat();
 	switch (format.format) {
 	case GlueFormat::HIVE:
-		if (table_info.IsPartitionProjected()) {
-			// Athena derives the partitions from the projection.* parameters and ignores the registered ones, which
-			// such a table usually has none of: reading the registered partitions would silently return no or wrong
-			// rows
-			throw NotImplementedException("Glue table '%s.%s' uses Athena partition projection (projection.enabled), "
-			                              "which is not supported yet: Athena derives its partitions from the "
-			                              "projection.* parameters and ignores the ones registered in Glue, so a scan "
-			                              "of the registered ones would read no rows or the wrong ones. Set "
-			                              "projection.enabled to false and register the partitions to read it",
-			                              table_info.schema_name, table_info.name);
-		}
 		return GetHiveScanFunction(context, bind_data);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
@@ -270,7 +259,15 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	for (auto &key : table_info.partition_keys) {
 		scan_info->partition_keys.push_back(key.name);
 	}
-	// the partitions are fetched from Glue on first use (HiveScanInfo::Partitions), not at bind
+	if (table_info.IsPartitionProjected()) {
+		// Athena derives the partitions from projection.* and ignores the registered ones; checked at bind
+		vector<LogicalType> key_types;
+		for (auto &key : table_info.partition_keys) {
+			key_types.push_back(GetColumns().GetColumn(Identifier(key.name)).Type());
+		}
+		scan_info->projection = PartitionProjection::Parse(table_info, key_types);
+	}
+	// the partitions are fetched from Glue (or derived) on first use (HiveScanInfo::Partitions), not at bind
 	return BindHiveScan(context, std::move(scan_info), bind_data);
 }
 

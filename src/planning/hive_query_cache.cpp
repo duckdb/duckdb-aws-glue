@@ -15,6 +15,18 @@ static constexpr const char *HIVE_LISTING_CACHE = "glue_listing_cache";
 
 namespace {
 
+//! Everything under 'directory': the directory is a literal path, only the appended /** is a pattern
+unique_ptr<MultiFileList> ListRecursively(FileSystem &fs, const string &directory) {
+	string literal;
+	for (auto c : directory) {
+		if (c == '*' || c == '?' || c == '[' || c == '\\') {
+			literal += '\\';
+		}
+		literal += c;
+	}
+	return fs.GlobFileList(literal + "/**", FileGlobOptions::ALLOW_EMPTY);
+}
+
 //! The directory listings of Glue tables, kept across statements under glue_cache_listings
 class HiveListingCache : public ClientContextState {
 public:
@@ -23,7 +35,7 @@ public:
 		auto &listing = listings[directory];
 		if (!listing) {
 			auto &fs = FileSystem::GetFileSystem(context);
-			listing = shared_ptr<MultiFileList>(fs.GlobFileList(directory + "/**", FileGlobOptions::ALLOW_EMPTY));
+			listing = shared_ptr<MultiFileList>(ListRecursively(fs, directory));
 		}
 		return listing;
 	}
@@ -126,7 +138,7 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->listing) {
 		auto &fs = FileSystem::GetFileSystem(context);
-		entry->listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
+		entry->listing = shared_ptr<MultiFileList>(ListRecursively(fs, key));
 	}
 	return entry->listing;
 }

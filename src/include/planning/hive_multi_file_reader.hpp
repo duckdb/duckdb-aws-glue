@@ -12,6 +12,7 @@
 #include "duckdb/function/table_function.hpp"
 
 #include "core/glue_info.hpp"
+#include "core/partition_projection.hpp"
 
 namespace duckdb {
 
@@ -39,6 +40,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	vector<string> partition_keys;
 	//! Numbers the scans of a query (HiveQueryCache::NextScanId), so the GlueScan log can tell them apart
 	idx_t scan_id = 0;
+	//! The Athena partition projection the partitions are derived from; null without one and for a hive_scan
+	unique_ptr<PartitionProjection> projection;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
@@ -76,15 +79,24 @@ struct HiveScanInfo : public TableFunctionInfo {
 	                           const vector<idx_t> &column_indexes) const;
 	//! A description of the table for error messages
 	string Describe() const;
-	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
-	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
+	//! The partitions of the table: given at bind (hive_scan), derived from the projection, or fetched from Glue on
+	//! first use and shared with every scan of the table in the query. Never replaced, so indexes into it stay valid
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
+	//! Derive the projected partitions with the query's predicates on each key applied before the cross product;
+	//! returns per key whether its predicate dropped a value, or nothing when the partitions already existed.
+	//! Partitions() derives without predicates.
+	vector<bool> DerivePartitions(ClientContext &context,
+	                              const vector<optional_ptr<const PartitionProjection::KeyFilter>> &filters) const;
+	//! The projected partitions before any predicate, saturating at the largest idx_t; 0 for a table without a
+	//! projection
+	idx_t UnfilteredPartitions() const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
 
 private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
+	mutable idx_t unfiltered_partitions DUCKDB_GUARDED_BY(partitions_lock) = 0;
 };
 
 //! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with

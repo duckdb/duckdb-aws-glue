@@ -114,6 +114,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "partitions read, or as many rounds and a tenth of the requests.",
 	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
 
+	config.AddExtensionOption(
+	    "glue_projection_max_partitions",
+	    "The most partitions a scan of a table with Athena partition projection "
+	    "(projection.enabled) may derive after the query's filters on each partition column narrowed "
+	    "that column's values; a scan over more fails before deriving them. Default 100000.",
+	    LogicalType::UBIGINT, Value::UBIGINT(100000));
+
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
 	                          "twice `threads` files. False reads one thread per file, which a file that holds a line "

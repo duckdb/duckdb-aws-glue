@@ -1,0 +1,71 @@
+# name: benchmark/pushdown/projection_prune_before_derive.benchmark
+# description: an equality on each key of a projected table with two 1000-value integer keys, in the local Glue (moto) + S3 (MinIO)
+# group: [pushdown]
+
+# The table has no registered partitions: Athena partition projection derives them from the projection.* parameters.
+# The predicate pins one of the 1,000,000 projected partitions; the time is the derivation of that one partition and
+# one listing, not of the million. The load skips the table when it already exists.
+
+name Projected partitions are derived after the predicates narrow each key
+group pushdown
+subgroup projection
+
+require httpfs
+
+require glue
+
+cache glue_pushdown_projection_prune.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_pushdown_projection;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_pushdown_projection.wide (id BIGINT, region INTEGER, hour INTEGER) PARTITIONED BY (region, hour)
+WITH (
+    location = 's3://glue-test/warehouse/benchmark/bench_pushdown_projection/wide',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'integer',
+    'projection.region.range' = '0,999',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,999'
+);
+COPY (SELECT i AS id FROM range(0, 1000) t(i)) TO 's3://glue-test/warehouse/benchmark/bench_pushdown_projection/wide/region=7/hour=7/a.parquet' (FORMAT parquet);
+CREATE TABLE glue_pushdown_projection_loaded AS SELECT 1 AS loaded;
+USE my_datalake.bench_pushdown_projection;
+SET enable_external_file_cache=false;
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+USE my_datalake.bench_pushdown_projection;
+SET enable_external_file_cache=false;
+
+run
+SELECT count(*) FROM wide WHERE region = 7 AND hour = 7;
+
+result I
+1000
