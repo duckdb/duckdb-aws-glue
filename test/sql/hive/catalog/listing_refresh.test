@@ -1,0 +1,327 @@
+# name: test/sql/hive/catalog/listing_refresh.test
+# description: a listing (duckdb_tables/duckdb_columns/duckdb_schemas) is taken from Glue once per metadata cache id, so tables and databases another session created, replaced or dropped show up on the next statement
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as writer (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS writer.lr_db CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS writer.lr_db2 CASCADE;
+
+statement ok
+CREATE SCHEMA writer.lr_db;
+
+statement ok
+CREATE TABLE writer.lr_db.a (i INTEGER);
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# the second binder miss of a missing name would otherwise warm the metadata cache with one GetTables page (block 11)
+statement ok
+SET glue_batch_table_lookup = false;
+
+# the same catalog again: another session's view of what writer does
+statement ok
+attach '{GLUE_CATALOG_ID}' as reader (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# 1. the first listing
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+a
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+statement ok
+CREATE TEMP TABLE lr_oid AS SELECT table_oid FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' AND table_name = 'a';
+
+# 2. a table created elsewhere is listed by the next statement; the unchanged table keeps its entry
+statement ok
+CREATE TABLE writer.lr_db.b (i INTEGER);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+a
+b
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+query I
+SELECT table_oid = (SELECT table_oid FROM lr_oid) FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' AND table_name = 'a';
+----
+true
+
+# 3. a table dropped elsewhere is gone from the next listing
+statement ok
+DROP TABLE writer.lr_db.a;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+# 4. a table replaced elsewhere is listed with its new definition
+statement ok
+DROP TABLE writer.lr_db.b;
+
+statement ok
+CREATE TABLE writer.lr_db.b (i INTEGER, j VARCHAR);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY column_name;
+----
+i
+j
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+# 5. one listing per transaction, not per scan
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (
+    SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db'
+    UNION ALL SELECT view_name FROM duckdb_views() WHERE database_name = 'reader' AND schema_name = 'lr_db'
+);
+----
+1
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+# 6. inside an explicit transaction the listing is not retaken
+statement ok
+BEGIN;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+statement ok con2
+CREATE TABLE writer.lr_db.c (i INTEGER);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+
+query I
+SELECT glue_calls('GetTables');
+----
+0
+
+statement ok
+COMMIT;
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
+
+# 7. a database created elsewhere is listed by the next statement (duckdb_schemas lists every attach: writer and reader)
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'reader' AND schema_name LIKE 'lr_%' ORDER BY schema_name;
+----
+lr_db
+
+query I
+SELECT glue_calls('GetDatabases');
+----
+2
+
+statement ok
+CREATE SCHEMA writer.lr_db2;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'reader' AND schema_name LIKE 'lr_%' ORDER BY schema_name;
+----
+lr_db
+lr_db2
+
+query I
+SELECT glue_calls('GetDatabases');
+----
+2
+
+# 8. a database dropped elsewhere is gone from the next listing
+statement ok
+DROP SCHEMA writer.lr_db2;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'reader' AND schema_name LIKE 'lr_%' ORDER BY schema_name;
+----
+lr_db
+
+query I
+SELECT glue_calls('GetDatabases');
+----
+2
+
+# 9. under the connection-scoped cache a write through this connection invalidates the listing too
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+statement ok
+CREATE TABLE writer.lr_db.d (i INTEGER);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
+d
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+# 10. ... while another connection's write is not seen until the connection's cache is invalidated
+statement ok con2
+CREATE TABLE writer.lr_db.e (i INTEGER);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
+d
+
+query I
+SELECT glue_calls('GetTables');
+----
+0
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
+d
+e
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+# 11. a missing name is suggested from the tables already seen, without listing Glue
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT * FROM reader.lr_db.bb;
+----
+<REGEX>:.*Table with name bb does not exist.*Did you mean "b".*
+
+query I
+SELECT glue_calls('GetTables');
+----
+0
+
+statement ok
+DROP SCHEMA writer.lr_db CASCADE;

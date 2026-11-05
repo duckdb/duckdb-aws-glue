@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -60,9 +61,11 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
+		id = NextId();
 	}
-	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
-	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
+	//! Tells cache contents apart (monotonic, never reused): a new instance and a Clear() both bring a new id, so a
+	//! consumer keyed on it (bulk warming and listing in GlueTableSet, listing in GlueSchemaSet) redoes its work once
+	//! per id. Under the default scope a new transaction brings a new instance.
 	idx_t Id() const {
 		return id;
 	}
@@ -104,7 +107,8 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
-	const idx_t id = NextId();
+	//! Read without the lock (Id()), written under it (Clear())
+	atomic<idx_t> id {NextId()};
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in

@@ -63,39 +63,66 @@ bool GlueTableSet::BatchTableLookups(ClientContext &context) {
 }
 
 void GlueTableSet::LoadEntries(ClientContext &context) {
-	if (is_loaded) {
+	// Scan started the transaction, so the cache exists. The id is read once: a Clear() during the fetch must not
+	// mark this listing current
+	auto &cache = *GlueTransaction::Get(context, catalog).cache;
+	auto cache_id = cache.Id();
+	if (cache_id == listed_cache_id || get_tables_forbidden) {
 		return;
 	}
-	auto tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName());
-	auto cache = GlueTransactionCache::Of(context, catalog);
-	for (auto &table : tables) {
-		if (cache) {
-			// Without this the per reference GetEntry re-fetches every table this one request
-			// already returned, which makes the bulk round trip pure added cost
-			shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
-			cache->GetTable(schema.GetDatabaseName(), table.name, [&info]() { return info; });
+	vector<GlueTableInfo> tables;
+	try {
+		tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName(), false, nullptr, true);
+	} catch (const GlueException &ex) {
+		if (!ex.access_denied) {
+			throw;
 		}
-		auto existing = entries.find(table.name);
-		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(table)) {
-			// already loaded through a direct lookup, and still what Glue holds
+		// a database whose tables we may not list keeps the entries its lookups built
+		get_tables_forbidden = true;
+		ErrorData error(ex);
+		DUCKDB_LOG_WARNING(context, "Not listing the tables of Glue database '%s': %s", schema.GetDatabaseName(),
+		                   error.RawMessage());
+		return;
+	}
+	case_insensitive_set_t listed;
+	for (auto &table : tables) {
+		listed.insert(table.name);
+		// The definition this transaction's lookups see: one the cache already holds wins, otherwise the listed one is
+		// cached so the per reference GetEntry does not re-fetch what this one request returned
+		shared_ptr<const GlueTableInfo> listed_info = make_shared_ptr<const GlueTableInfo>(table);
+		auto info = cache.GetTable(schema.GetDatabaseName(), table.name, [&listed_info]() { return listed_info; });
+		auto existing = entries.find(info->name);
+		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(*info)) {
+			// already loaded, and still what Glue holds
 			continue;
 		}
 		unique_ptr<CatalogEntry> entry;
 		try {
-			entry = CreateEntry(table);
+			entry = CreateEntry(*info);
 		} catch (std::exception &ex) {
 			// A table whose Glue definition we can not turn into a DuckDB table (e.g. an unsupported column type)
 			// must not break listing the other tables: leave it out and log why. Looking the table up by name
 			// still reports the error to the user.
 			ErrorData error(ex);
-			DUCKDB_LOG_ERROR(context, "Glue table '%s.%s' is not listed: %s", schema.GetDatabaseName(), table.name,
+			DUCKDB_LOG_ERROR(context, "Glue table '%s.%s' is not listed: %s", schema.GetDatabaseName(), info->name,
 			                 error.RawMessage());
+			RetireEntry(info->name);
 			continue;
 		}
-		RetireEntry(table.name);
-		entries.emplace(table.name, std::move(entry));
+		RetireEntry(info->name);
+		entries.emplace(info->name, std::move(entry));
 	}
-	is_loaded = true;
+	// what Glue no longer returns was dropped by another client
+	vector<string> gone;
+	for (auto &entry : entries) {
+		if (!listed.count(entry.first)) {
+			gone.push_back(entry.first);
+		}
+	}
+	for (auto &name : gone) {
+		RetireEntry(name);
+	}
+	listed_cache_id = cache_id;
 }
 
 void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache) {
@@ -111,14 +138,14 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 		// A failed bulk fetch must not fail a lookup that never needed GetTables: log it and let the caller
 		// fall through to the direct GetTable
 		if (ex.access_denied) {
-			batch_forbidden = true;
+			get_tables_forbidden = true;
 		}
 		ErrorData error(ex);
 		DUCKDB_LOG_WARNING(context, "Not batching the table lookups of Glue database '%s', GetTables failed: %s",
 		                   schema.GetDatabaseName(), error.RawMessage());
 		return;
 	}
-	// One page per cache instance: misses past the page (a database larger than one page) stay direct instead
+	// One page per cache id: misses past the page (a database larger than one page) stay direct instead
 	// of re-reading the same first page
 	bulk_loaded_cache_id = cache.Id();
 	for (auto &table : tables) {
@@ -149,9 +176,9 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		// the lookup name may differ in case from the one Glue knows
 		glue_name = cached ? existing->second->name.GetIdentifierName() : name;
 		// The attach's first round-trip miss stays direct: a lone lookup must not enumerate a large database.
-		// From the second round-trip-causing miss on (round trips count across cache instances), one GetTables
-		// page warms the cache, at most once per instance - under the default scope that is once per transaction.
-		if (!cached && cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
+		// From the second round-trip-causing miss on (round trips count across cache ids), one GetTables
+		// page warms the cache, at most once per id - under the default scope that is once per transaction.
+		if (!cached && cache && !get_tables_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
 		    BatchTableLookups(context)) {
 			BulkLoadTableInfo(context, *cache);
 		}
@@ -203,6 +230,13 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	LoadEntries(context);
+	for (auto &entry : entries) {
+		callback(*entry.second);
+	}
+}
+
+void GlueTableSet::ScanLoaded(const std::function<void(CatalogEntry &)> &callback) {
+	lock_guard<mutex> guard(entry_lock);
 	for (auto &entry : entries) {
 		callback(*entry.second);
 	}

@@ -208,7 +208,7 @@ SELECT glue_calls('GetTable'), glue_calls('GetTables');
 ----
 0	1
 
-# 10. shapes a lookup cannot serve are answered from the listed set: no lookup, and the set is listed only once
+# 10. shapes a lookup cannot serve are answered from the listed set: no lookup, one listing per statement
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -232,7 +232,7 @@ t2
 query II
 SELECT glue_calls('GetTable'), glue_calls('GetTables');
 ----
-0	0
+0	3
 
 # 11. a table created through another attach is found by lookup
 statement ok
