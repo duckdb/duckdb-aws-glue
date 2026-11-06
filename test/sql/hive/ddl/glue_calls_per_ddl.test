@@ -57,7 +57,8 @@ CALL enable_logging('HTTP', storage='memory');
 #---------------------------------------------------------------------------
 # CREATE TABLE / DROP TABLE
 #---------------------------------------------------------------------------
-# the lookup of a name that does not exist is not memoized: the binder's and the extension's probes both reach Glue
+# the lookup of a name that does not exist is memoized: of the binder's and the extension's probes only the first
+# reaches Glue
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -68,7 +69,7 @@ query II
 FROM glue_calls();
 ----
 CreateTable	1
-GetTable	3
+GetTable	2
 GetTables	1
 
 statement ok
@@ -97,7 +98,7 @@ FROM glue_calls();
 ----
 BatchCreatePartition	1
 CreateTable	1
-GetTable	4
+GetTable	3
 GetTables	1
 
 statement ok

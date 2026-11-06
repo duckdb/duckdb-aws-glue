@@ -151,8 +151,9 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		// The attach's first round-trip miss stays direct: a lone lookup must not enumerate a large database.
 		// From the second round-trip-causing miss on (round trips count across cache instances), one GetTables
 		// page warms the cache, at most once per instance - under the default scope that is once per transaction.
+		// A name the cache already resolved, a known miss included, needs no page.
 		if (!cached && cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
-		    BatchTableLookups(context)) {
+		    !cache->IsTableResolved(schema.GetDatabaseName(), glue_name) && BatchTableLookups(context)) {
 			BulkLoadTableInfo(context, *cache);
 		}
 	}
