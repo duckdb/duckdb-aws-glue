@@ -5,6 +5,8 @@ duckdb_extension_load(glue
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
     LOAD_TESTS
 )
+# Linked into unittest, which the test extension under test/extension/glue_test_credentials must share with it
+duckdb_extension_statically_link(glue)
 
 # Avro backed Hive tables (AvroSerDe) are read with read_avro from the avro extension, which the glue extension loads
 # when Glue reports such a table. Pinned to the hash the duckdb submodule pins in

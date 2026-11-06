@@ -344,8 +344,9 @@ The caller reads a set of the scan's files as `SELECT <columns>, <partition valu
 <parameters>)`, one such read per partition, `UNION ALL`ed. Neither function calls Glue or needs a `ClientContext`.
 Both return nothing for a scan they do not recognize or that reads a column, a partition key included, as another
 type than the table declares (a type the optimizer pushed into the scan), and `HiveScanGetReaderCall` also for a
-Parquet table with a `binary` column, whose string columns are decoded file by file. Both only work when the caller
-and this extension are linked into the same binary.
+Parquet table with a `binary` column, whose string columns are decoded file by file, and for a scan that reads with
+[file credentials](#file-credentials). Both only work when the caller and this extension are linked into the same
+binary.
 
 `EXPLAIN (SQL)` renders a Hive scan as these reads, so the SQL it prints reads the scan's files without this extension
 (and `SET debug_verify_statement = 'explain_sql_strict'` runs a query as that SQL). The scan lists its files for it:
@@ -353,6 +354,32 @@ a partition the filters pruned is not read, a filter the partition values decide
 scan without files is a relation without rows. A scan no reader call can read (a Parquet table with a `binary`
 column, or one whose query reads `$path`, `$file_size`, `$file_modified_time` or another virtual column) is rendered
 as the Glue table it reads, by name; a `hive_scan()` call then cannot be rendered.
+
+## File credentials
+
+An extension can give the scans of a Glue table credentials of their own, for example credentials a governance
+service vends for that table. It registers a `GlueFileCredentialsCallback`
+([glue_file_credentials.hpp](../src/include/catalog/glue_file_credentials.hpp)) as an `ExtensionCallback`, which this
+extension asks each time a scan of a Hive table is bound. The callback's extension must be linked into the same binary
+as this one (it is found with `dynamic_cast`); one `LOAD`ed as a separate library is not found. The callback answers
+with the name of a secret, typically one it created for the transaction (`SecretPersistType::TRANSACTION`). Every file
+the scan lists then names that secret in its options (`ExtendedOpenFileInfo::SECRET_OPTION`), and DuckDB opens it with
+that secret instead of the one that matches its path. Without a callback, or when it returns no name, the files are read as above.
+
+- The listings themselves are made by path: DuckDB's globs name no secret. A secret of the transaction takes part in
+  the path lookup, so a listing under its scope is made with it. So does every other read by path under its scope in
+  that transaction, e.g. a `read_parquet` of the table's files or a table without credentials at the same location.
+- One query lists a directory once, for every scan of it with or without credentials; only the opens differ.
+- A file naming a secret that does not exist (e.g. a transaction secret, after the transaction), or whose scope does
+  not cover it, fails to open rather than being read by path.
+- `glue_cache_listings` does not keep the listings of a scan with credentials beyond the query.
+- A scan with credentials serializes the name of its secret; `EXPLAIN (SQL)` renders it as the Glue table by name.
+- INSERT into a table whose scans read with credentials, and `glue_repair_table` of one, are refused: they list or
+  write its files by path. The check asks the callback's `HasFileCredentials`, which creates no secret.
+
+The tests under `test/sql/file_credentials/` give tables credentials with the test extension `glue_test_credentials`
+(`test/extension/glue_test_credentials/`), which must share a binary with this extension; `extension_config.cmake`
+links both into `unittest`.
 
 ## Partitions
 
@@ -414,7 +441,9 @@ the partitions Glue does not have yet with `BatchCreatePartition`. A partition i
 component per partition key, in partition key order (keys compare case-insensitively); it is registered at that
 directory, with the values unescaped and cast to the key types (`year=07` is `7`). Directories that do not follow this
 scheme, whose values do not cast, that are already the location of a partition, or that hold no file a scan would read
-(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions.
+(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. A table with another
+engine's InputFormat over a Hive SerDe (one INSERT refuses too) is refused: its files are not laid out the way Hive
+writes them.
 
 Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
 Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so

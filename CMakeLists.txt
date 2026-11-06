@@ -54,3 +54,10 @@ if(BUILD_UNITTESTS
    AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
   add_subdirectory(test/unittest)
 endif()
+
+# test-only GlueFileCredentialsCallback, linked into unittest
+if(BUILD_UNITTESTS
+   AND NOT CLANG_TIDY
+   AND DUCKDB_EXTENSION_GLUE_SHOULD_BUILD)
+  add_subdirectory(test/extension/glue_test_credentials)
+endif()

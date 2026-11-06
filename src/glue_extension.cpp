@@ -143,8 +143,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterGlueHttpClientFactory();
 	RegisterGlueLogTypes(instance);
 
-	// Hive tables are read with read_parquet
-	ExtensionHelper::AutoLoadExtension(instance, "parquet");
+	// Hive tables are read with read_parquet. A linked parquet is loaded as linked: autoloading would install it first
+	if (!instance.ExtensionIsLoaded("parquet")) {
+		DuckDB db(instance);
+		if (ExtensionHelper::LoadExtension(db, "parquet") != ExtensionLoadResult::LOADED_EXTENSION) {
+			ExtensionHelper::AutoLoadExtension(instance, "parquet");
+		}
+	}
 	if (!instance.ExtensionIsLoaded("parquet")) {
 		throw MissingExtensionException("The glue extension requires the parquet extension to be loaded!");
 	}
