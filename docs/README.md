@@ -121,7 +121,16 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
     unterminated quote or a pattern without a year field fails the scan naming it. A `DATE`
     partition column reads the value as a date and a `TIMESTAMP` column as a timestamp whatever the directory
     format; a string column reads the formatted text.
-  - `type = injected` is not supported: the scan fails naming the column.
+  - `type = injected`: the key has no value list; the query supplies it with an equality or IN on the column (`k = 'a'`,
+    `k IN ('a', 'b')`, `k = 'a' OR k = 'b'`, a constant expression), one partition per distinct value, spelled as the
+    column type's text (`k=7/`, `k=true/`, `k=12.34/`, `k=2024-01-15/`; a TIMESTAMP column is refused, as Athena
+    refuses it; a FLOAT or DOUBLE value is spelled as DuckDB prints it). Without such a predicate, or with one that
+    names no value (`k > 'a'`, `k LIKE 'a%'`, `k IS NULL`, `k = ''`, a function of the column), the scan fails naming
+    the column, as Athena's does, adding that the predicate names no values when it constrains the column to a range
+    (a LIKE with an ESCAPE clause is not read and gets the shorter message);
+    other predicates on the column filter the values. A table with an injected key lists its derived partitions one
+    by one and never the table location, whose contents no parameter bounds, unless `hive_partition_listing_threshold`
+    is set.
   - Locations: `storage.location.template` with a `${key}` placeholder for every partition key, else
     `<location>/<key1>=<value1>/<key2>=<value2>/`. Values are substituted as written in both, as Athena does: no
     escaping, so `a:b` is the directory `k=a:b/` (Hive would write `k=a%3Ab/`).

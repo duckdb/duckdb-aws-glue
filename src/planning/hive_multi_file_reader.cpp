@@ -470,8 +470,11 @@ void HiveMultiFileList::PlanListings() const {
 		}
 	}
 	if (scan_info->projection && partitions_below_root > 0) {
-		// the derived partitions are only the ones the filters kept; the root holds every projected one
-		partitions_below_root = MaxValue<idx_t>(partitions_below_root, scan_info->UnfilteredPartitions());
+		// the derived partitions are only the ones the filters kept; the root holds every projected one, and with an
+		// injected key whatever values were ever written, which no parameter bounds
+		partitions_below_root = scan_info->projection->HasInjectedKey()
+		                            ? NumericLimits<idx_t>::Maximum()
+		                            : MaxValue<idx_t>(partitions_below_root, scan_info->UnfilteredPartitions());
 	}
 	// a ceiling that does not overflow: the unfiltered product saturates at the largest idx_t
 	auto root_pages =
@@ -1368,9 +1371,20 @@ public:
 
 	bool EqualityConstants(vector<Value> &constants) const override {
 		for (idx_t i = 0; i < filters.size(); i++) {
-			if (EqualityConstantsOf(*filters[i], constants)) {
-				// the equality drops every other value of the key, though it is never evaluated on one
+			auto shape = ShapeOf(*filters[i]);
+			if (shape.kind == Shape::Kind::VALUES) {
+				// the predicate drops every other value of the key, though it is never evaluated on one
+				constants = std::move(shape.values);
 				pruned[i] = true;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool ConstrainsRange() const override {
+		for (auto &filter : filters) {
+			if (ShapeOf(*filter).kind == Shape::Kind::RANGE) {
 				return true;
 			}
 		}
@@ -1379,7 +1393,15 @@ public:
 
 	void NarrowIntegerRange(int64_t &lower, int64_t &upper) const override {
 		for (idx_t i = 0; i < filters.size(); i++) {
-			if (NarrowBy(*filters[i], lower, upper)) {
+			auto shape = ShapeOf(*filters[i]);
+			if (shape.kind != Shape::Kind::RANGE) {
+				continue;
+			}
+			bool moved = false;
+			for (auto &bound : shape.bounds) {
+				moved = Tighten(bound.first, bound.second, lower, upper) || moved;
+			}
+			if (moved) {
 				// the comparison drops the values it leaves out, though it is never evaluated on one
 				pruned[i] = true;
 			}
@@ -1407,6 +1429,202 @@ public:
 	}
 
 private:
+	//! What one filter says about the key, in the terms Athena's shim reads a column's domain: the set of values it
+	//! names, the range it bounds the key to, or nothing a key value can be read from. Every shape the optimizer hands
+	//! down is classified here and nowhere else; a shape not listed is NONE, which the callers treat as "evaluate the
+	//! filter on each value" (Keep)
+	struct Shape {
+		enum class Kind : uint8_t { NONE, VALUES, RANGE };
+		Kind kind = Kind::NONE;
+		//! VALUES: the constants named; none for `key IS NULL`, which names no value
+		vector<Value> values;
+		//! RANGE: the comparisons that bound the key, each a type and its constant; empty for a range no arithmetic
+		//! can use (<>, IS NOT NULL, NOT of a set, a prefix, an OR of ranges)
+		vector<pair<ExpressionType, Value>> bounds;
+	};
+
+	static Shape Values(vector<Value> values) {
+		Shape shape;
+		shape.kind = Shape::Kind::VALUES;
+		shape.values = std::move(values);
+		return shape;
+	}
+	static Shape Range(vector<pair<ExpressionType, Value>> bounds = {}) {
+		Shape shape;
+		shape.kind = Shape::Kind::RANGE;
+		shape.bounds = std::move(bounds);
+		return shape;
+	}
+
+	Shape ShapeOf(const Expression &filter) const {
+		// a BOOLEAN key on its own is `key = true`, as Trino reads it
+		if (IsKey(filter) && filter.GetReturnType().id() == LogicalTypeId::BOOLEAN) {
+			return Values({Value::BOOLEAN(true)});
+		}
+		switch (filter.GetExpressionClass()) {
+		case ExpressionClass::BOUND_OPERATOR:
+			return ShapeOfOperator(filter.Cast<BoundOperatorExpression>());
+		case ExpressionClass::BOUND_CONJUNCTION:
+			return ShapeOfConjunction(filter.Cast<BoundConjunctionExpression>());
+		case ExpressionClass::BOUND_FUNCTION:
+			break;
+		default:
+			return Shape();
+		}
+		auto &function = filter.Cast<BoundFunctionExpression>();
+		if (filter.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+			if (!IsKey(BoundBetweenExpression::Input(function))) {
+				return Shape();
+			}
+			vector<pair<ExpressionType, Value>> bounds;
+			Value constant;
+			if (ConstantOf(BoundBetweenExpression::LowerBound(function), constant)) {
+				bounds.emplace_back(BoundBetweenExpression::LowerComparisonType(function), constant);
+			}
+			if (ConstantOf(BoundBetweenExpression::UpperBound(function), constant)) {
+				bounds.emplace_back(BoundBetweenExpression::UpperComparisonType(function), constant);
+			}
+			return Range(std::move(bounds));
+		}
+		if (BoundComparisonExpression::IsComparison(filter)) {
+			return ShapeOfComparison(function);
+		}
+		if (BoundCastExpression::IsCast(filter) || filter.GetReturnType().id() != LogicalTypeId::BOOLEAN) {
+			return Shape();
+		}
+		// a literal prefix bounds the key to a range, as Trino's domain translation reads it; any other function of the
+		// key, a LIKE with an ESCAPE clause (the three-argument like_escape) included, names nothing it can use
+		auto &children = function.GetChildren();
+		if (children.size() != 2 || !IsKey(*children[0])) {
+			return Shape();
+		}
+		auto &name = function.Function().GetName();
+		if (name == "prefix" || name == "starts_with" || name == "^@") {
+			return Range();
+		}
+		Value pattern;
+		if (name == "~~" && ConstantOf(*children[1], pattern) && !pattern.IsNull()) {
+			auto text = StringValue::Get(pattern);
+			if (!text.empty() && text[0] != '%' && text[0] != '_') {
+				return Range();
+			}
+		}
+		return Shape();
+	}
+
+	Shape ShapeOfComparison(const BoundFunctionExpression &comparison) const {
+		auto &left = BoundComparisonExpression::Left(comparison);
+		auto &right = BoundComparisonExpression::Right(comparison);
+		auto type = comparison.GetExpressionType();
+		Value constant;
+		if (IsKey(left) && ConstantOf(right, constant)) {
+			// key <op> constant
+		} else if (IsKey(right) && ConstantOf(left, constant)) {
+			type = FlipComparisonExpression(type);
+		} else {
+			// `hour // 2 = 5` names values of an expression, not of the key
+			return Shape();
+		}
+		switch (type) {
+		case ExpressionType::COMPARE_EQUAL:
+		case ExpressionType::COMPARE_NOT_DISTINCT_FROM:
+			return Values({std::move(constant)});
+		case ExpressionType::COMPARE_LESSTHAN:
+		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		case ExpressionType::COMPARE_GREATERTHAN:
+		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+			return Range({{type, std::move(constant)}});
+		default:
+			// <> and IS DISTINCT FROM leave everything but one value: a range no bound describes
+			return Range();
+		}
+	}
+
+	Shape ShapeOfOperator(const BoundOperatorExpression &op) const {
+		auto &children = op.GetChildren();
+		if (children.empty()) {
+			return Shape();
+		}
+		auto &first = *children[0];
+		switch (op.GetExpressionType()) {
+		case ExpressionType::COMPARE_IN: {
+			if (!IsKey(first)) {
+				return Shape();
+			}
+			vector<Value> constants;
+			for (idx_t i = 1; i < children.size(); i++) {
+				Value constant;
+				if (!ConstantOf(*children[i], constant)) {
+					return Shape();
+				}
+				constants.push_back(std::move(constant));
+			}
+			return Values(std::move(constants));
+		}
+		case ExpressionType::OPERATOR_IS_NULL:
+			return IsKey(first) ? Values({}) : Shape();
+		case ExpressionType::OPERATOR_IS_NOT_NULL:
+			return IsKey(first) ? Range() : Shape();
+		case ExpressionType::OPERATOR_NOT: {
+			// NOT over the key, over a set (NOT IN arrives as NOT (k IN (...))) or over a bounded range leaves a range,
+			// as Athena reads them; NOT over a function of the key (NOT LIKE 'a%' arrives as NOT prefix(k, 'a')) names
+			// nothing Athena can read a value from. The rewriter folds NOT over a comparison or a conjunction but not
+			// a double negation, so NOT (k NOT IN (...)) arrives as NOT (NOT (k IN (...))) and reads as its inner shape
+			if (first.GetExpressionType() == ExpressionType::OPERATOR_NOT) {
+				return ShapeOf(*first.Cast<BoundOperatorExpression>().GetChildren()[0]);
+			}
+			if (IsKey(first)) {
+				return Range();
+			}
+			auto inner = ShapeOf(first);
+			if (inner.kind == Shape::Kind::VALUES || (inner.kind == Shape::Kind::RANGE && !inner.bounds.empty())) {
+				return Range();
+			}
+			return Shape();
+		}
+		default:
+			return Shape();
+		}
+	}
+
+	Shape ShapeOfConjunction(const BoundConjunctionExpression &conjunction) const {
+		if (conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+			// a set when every member names values (`key IS NULL` names none); a range as soon as one member is a
+			// range; nothing when a member names nothing
+			vector<Value> values;
+			bool range = false;
+			for (auto &child : conjunction.GetChildren()) {
+				auto shape = ShapeOf(*child);
+				switch (shape.kind) {
+				case Shape::Kind::NONE:
+					return Shape();
+				case Shape::Kind::RANGE:
+					range = true;
+					break;
+				case Shape::Kind::VALUES:
+					values.insert(values.end(), shape.values.begin(), shape.values.end());
+					break;
+				}
+			}
+			return range ? Range() : Values(std::move(values));
+		}
+		// AND (only below an OR: a top-level one was split before the pushdown): the values any member names, the
+		// other members being checked on each value; else the bounds of its ranges
+		vector<pair<ExpressionType, Value>> bounds;
+		bool range = false;
+		for (auto &child : conjunction.GetChildren()) {
+			auto shape = ShapeOf(*child);
+			if (shape.kind == Shape::Kind::VALUES) {
+				return shape;
+			}
+			if (shape.kind == Shape::Kind::RANGE) {
+				range = true;
+				bounds.insert(bounds.end(), shape.bounds.begin(), shape.bounds.end());
+			}
+		}
+		return range ? Range(std::move(bounds)) : Shape();
+	}
+
 	//! Whether 'side' folds to a constant, and which
 	bool ConstantOf(const Expression &side, Value &result) const {
 		return side.IsFoldable() && side.IsScalar() && ExpressionExecutor::TryEvaluateScalar(context, side, result);
@@ -1429,43 +1647,6 @@ private:
 		return child.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
 		       !BoundCastExpression::IsTryCast(cast) && from.IsIntegral() && to.IsIntegral() &&
 		       BoundCastExpression::CastIsInvertible(from, to);
-	}
-
-	//! Tightens 'lower' and 'upper' with a comparison of the key with a constant or a BETWEEN of the key (an AND was
-	//! split into its members before the pushdown); whether a bound moved. The bounds end up crossed when the predicate
-	//! leaves no value
-	bool NarrowBy(const Expression &filter, int64_t &lower, int64_t &upper) const {
-		if (filter.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
-			auto &between = filter.Cast<BoundFunctionExpression>();
-			if (!IsKey(BoundBetweenExpression::Input(between))) {
-				return false;
-			}
-			bool moved = false;
-			Value constant;
-			if (ConstantOf(BoundBetweenExpression::LowerBound(between), constant)) {
-				moved = Tighten(BoundBetweenExpression::LowerComparisonType(between), constant, lower, upper) || moved;
-			}
-			if (ConstantOf(BoundBetweenExpression::UpperBound(between), constant)) {
-				moved = Tighten(BoundBetweenExpression::UpperComparisonType(between), constant, lower, upper) || moved;
-			}
-			return moved;
-		}
-		if (!BoundComparisonExpression::IsComparison(filter)) {
-			return false;
-		}
-		auto &comparison = filter.Cast<BoundFunctionExpression>();
-		auto &left = BoundComparisonExpression::Left(comparison);
-		auto &right = BoundComparisonExpression::Right(comparison);
-		auto type = filter.GetExpressionType();
-		Value constant;
-		if (IsKey(left) && ConstantOf(right, constant)) {
-			// key <op> constant
-		} else if (IsKey(right) && ConstantOf(left, constant)) {
-			type = FlipComparisonExpression(type);
-		} else {
-			return false;
-		}
-		return Tighten(type, constant, lower, upper);
 	}
 
 	//! Tightens the bounds with `key <type> constant`; whether a bound moved. The constant is read as a HUGEINT, so one
@@ -1517,61 +1698,6 @@ private:
 		lower = new_lower;
 		upper = new_upper;
 		return moved;
-	}
-
-	//! The constants an equality, an IN, or an OR of those compares the key with; false for another shape
-	bool EqualityConstantsOf(const Expression &filter, vector<Value> &constants) const {
-		if (BoundComparisonExpression::IsComparison(filter)) {
-			if (filter.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
-				return false;
-			}
-			auto &comparison = filter.Cast<BoundFunctionExpression>();
-			auto &left = BoundComparisonExpression::Left(comparison);
-			auto &right = BoundComparisonExpression::Right(comparison);
-			Value constant;
-			if ((IsKey(left) && ConstantOf(right, constant)) || (IsKey(right) && ConstantOf(left, constant))) {
-				constants.push_back(std::move(constant));
-				return true;
-			}
-			return false;
-		}
-		switch (filter.GetExpressionClass()) {
-		case ExpressionClass::BOUND_OPERATOR: {
-			auto &op = filter.Cast<BoundOperatorExpression>();
-			auto &children = op.GetChildren();
-			if (op.GetExpressionType() != ExpressionType::COMPARE_IN || children.empty() || !IsKey(*children[0])) {
-				return false;
-			}
-			for (idx_t i = 1; i < children.size(); i++) {
-				Value constant;
-				if (!ConstantOf(*children[i], constant)) {
-					return false;
-				}
-				constants.push_back(std::move(constant));
-			}
-			return true;
-		}
-		case ExpressionClass::BOUND_CONJUNCTION: {
-			auto &conjunction = filter.Cast<BoundConjunctionExpression>();
-			if (conjunction.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
-				for (auto &child : conjunction.GetChildren()) {
-					if (!EqualityConstantsOf(*child, constants)) {
-						return false;
-					}
-				}
-				return true;
-			}
-			// AND: the constants of any equality in it; Keep checks the other members
-			for (auto &child : conjunction.GetChildren()) {
-				if (EqualityConstantsOf(*child, constants)) {
-					return true;
-				}
-			}
-			return false;
-		}
-		default:
-			return false;
-		}
 	}
 
 	ClientContext &context;

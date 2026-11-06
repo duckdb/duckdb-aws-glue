@@ -1046,15 +1046,20 @@ SELECT count(*) FROM my_datalake.default.pp_bad;
 0
 
 #---------------------------------------------------------------------------
-# the injected type is refused, naming the column
+# an injected key takes its values from the query: without an equality on it the scan fails naming the column
 #---------------------------------------------------------------------------
 statement ok
 ALTER TABLE my_datalake.default.pp_bad SET ('projection.region.type' = 'injected');
 
 statement error
+SELECT count(*) FROM my_datalake.default.pp_bad;
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_bad': the injected partition column 'region' \(projection\.region\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+query I
 SELECT count(*) FROM my_datalake.default.pp_bad WHERE region = 'us';
 ----
-Not implemented Error: Glue table 'default.pp_bad': partition column 'region' uses the injected projection type (projection.region.type), which is not supported yet
+0
 
 statement ok
 DROP TABLE my_datalake.default.pp_bad;
@@ -1730,6 +1735,24 @@ statement error
 SELECT count(*) FROM my_datalake.default.pp_sat WHERE CAST(hour // 2 AS BIGINT) = 5000000000 AND account = 1;
 ----
 would derive more than 1 partitions (glue_projection_max_partitions)
+
+# IS NULL, IS NOT DISTINCT FROM and an OR whose IS NULL member names no value take the equality path as = and IN do:
+# account's 2^63 values are never enumerated and the cap is not reached (a projected value is never NULL, as in
+# Athena); before the shape table these three went through the enumeration and failed at the cap
+query I
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE account IS NULL AND hour = 2;
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE account IS NOT DISTINCT FROM 1 AND hour = 2;
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_sat WHERE (account = 1 OR account IS NULL) AND hour = 2;
+----
+1
 
 statement ok
 RESET glue_projection_max_partitions;
@@ -2634,3 +2657,539 @@ RESET max_execution_time;
 
 statement ok
 DROP TABLE my_datalake.default.pp_fine;
+
+#---------------------------------------------------------------------------
+# injected keys: the query's equality or IN on the column supplies the values (Athena's projection.<key>.type = injected)
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj (id INTEGER, k VARCHAR) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj/k=a/a.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj/k=b/b.parquet';
+
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj/k=a:b/c.parquet';
+
+statement ok
+COPY (SELECT 4 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj/k=x/y/d.parquet';
+
+# source: Athena docs, dynamic ID partitioning; live probe evidence/athena-injected.txt Q2 (`k = 'a'` reads the a
+# partition and nothing else)
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k = 'a';
+----
+1	a
+
+query I
+SELECT DISTINCT dir FROM listed_dirs();
+----
+pp_inj/k=a/
+
+# the values an IN, an OR of equalities or a folded constant names (Athena Q3, Q4, Q14); a value with no directory reads
+# nothing (Q11); NULL in the list is dropped (Q12); another predicate on the row (Q13) or on the column (Q7, batch 2:
+# `k LIKE 'a%'`, `k <> 'b'`, `k = CAST(1 AS VARCHAR)`) filters; `a:b` and `x/y` are directories as written (Q9, Q10)
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k IN ('a', 'b') ORDER BY id;
+----
+1	a
+2	b
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k = 'a' OR k = 'b' ORDER BY id;
+----
+1	a
+2	b
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k = lower('A');
+----
+1	a
+
+# a NULL in the set names no value, as in an IN list (Athena athena-injected-3.txt: `k = 'a' OR k IS NULL` reads a)
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k = 'a' OR k IS NULL;
+----
+1	a
+
+# IS NOT DISTINCT FROM names its value as an equality does (athena-injected-5.txt)
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k IS NOT DISTINCT FROM 'a';
+----
+1	a
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k = 'missing';
+----
+0
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k IN ('a', NULL);
+----
+1	a
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k = 'a' AND id = 1;
+----
+1	a
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k = 'a' AND k = 'b';
+----
+0
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k = 'a' AND k LIKE 'a%';
+----
+1	a
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k IN ('a', 'b') AND k <> 'b';
+----
+1	a
+
+# EXPLAIN counts the values given against those kept
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_inj WHERE k IN ('a', 'b') AND k <> 'b';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/2.*
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k = CAST(1 AS VARCHAR);
+----
+0
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k = 'a:b';
+----
+3	a:b
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE k = 'x/y';
+----
+4	x/y
+
+query I
+SELECT DISTINCT dir FROM listed_dirs() ORDER BY dir;
+----
+pp_inj/k=a:b/
+pp_inj/k=x/y/
+
+# a plan copied before the filters are pushed down derives each copy from its own predicate
+query I
+WITH p AS NOT MATERIALIZED (SELECT id FROM my_datalake.default.pp_inj WHERE k = 'a')
+SELECT * FROM p UNION ALL SELECT * FROM p;
+----
+1
+1
+
+query I
+WITH t AS NOT MATERIALIZED (SELECT * FROM my_datalake.default.pp_inj)
+SELECT id FROM t WHERE k = 'a' UNION ALL SELECT id FROM t WHERE k = 'b' ORDER BY 1;
+----
+1
+2
+
+# without a static equality or IN on the column the scan fails (Athena: CONSTRAINT_VIOLATION, evidence/athena-injected.txt
+# Q1 Q5 Q6 Q8 Q17 Q20, athena-injected-2.txt, athena-injected-3.txt), in this extension's wording. Athena adds its second
+# sentence only when the column's predicate constrains it to a range rather than a set of values (>, <>, LIKE,
+# IS NOT NULL, NOT k); a predicate that leaves the column unconstrained (a function of it, a disjunction across
+# columns) or names no usable value (IS NULL, '') gets the first sentence alone
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj;
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE id = 1;
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k = 'a' OR id = 1;
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k > 'a';
+----
+Invalid Input Error: Glue table 'default.pp_inj': the injected partition column 'k' (projection.k.type) needs an equality or IN on it in the WHERE clause, as Athena requires; the predicate given does not name its values
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k LIKE 'a%';
+----
+as Athena requires; the predicate given does not name its values
+
+# a LIKE the optimizer leaves as is (a_) bounds the key to a range when the pattern starts with a literal character
+# (athena-injected-7.txt). LIKE ... ESCAPE binds to the three-argument like_escape, which is not read: the first
+# sentence, where Athena gives the second for a literal prefix (-7.txt `a%` with ESCAPE '!'); NOT LIKE ... ESCAPE gets
+# the first sentence on both sides
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k LIKE 'a_';
+----
+as Athena requires; the predicate given does not name its values
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k LIKE 'a%' ESCAPE '!';
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k NOT LIKE 'a%' ESCAPE '!';
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k <> 'a';
+----
+as Athena requires; the predicate given does not name its values
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k IS NOT NULL;
+----
+as Athena requires; the predicate given does not name its values
+
+# NOT of a set or of IS NULL leaves a range (athena-injected-5.txt `k NOT IN`, -6.txt `NOT (k IS NULL)`), and NOT of
+# that NOT is the set again (-7.txt `NOT (k NOT IN ('a', 'b'))` reads a and b); NOT of a function of the key (NOT
+# LIKE arrives as NOT prefix(k, 'a')), a suffix and a regular expression name nothing Athena can read a value from
+# (-5.txt `k NOT LIKE 'a%'`, -6.txt `k LIKE '%a'`, -7.txt `regexp_like(k, 'a.')`): the first sentence. A regular
+# expression that is a literal anchored at the start or the end (`^a`, `a$`) is rewritten to prefix(k, 'a') or
+# suffix(k, 'a') by the optimizer before the scan sees it, where Athena's own translation reads nothing; `a.` stays
+# a regular expression
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k NOT IN ('a', 'b');
+----
+as Athena requires; the predicate given does not name its values
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE NOT (k IS NULL);
+----
+as Athena requires; the predicate given does not name its values
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj WHERE NOT (k NOT IN ('a', 'b')) ORDER BY id;
+----
+1	a
+2	b
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k NOT LIKE 'a%';
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k LIKE '%a';
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE regexp_matches(k, 'a.');
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE upper(k) = 'A';
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+# NULL and the empty string name no value (Athena: Q8, batch 2 `k = ''`: the first sentence alone)
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k IS NULL;
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj WHERE k = '';
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj;
+
+# the template location substitutes the value as for other key types (Athena Q19, Q20)
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj_tpl;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_tpl (id INTEGER, k VARCHAR) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_tpl',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected',
+    'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_tpl_data/${k}/'
+);
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_tpl_data/b/x.parquet';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_tpl WHERE k = 'b';
+----
+2	b
+
+query I
+SELECT DISTINCT dir FROM listed_dirs();
+----
+pp_inj_tpl_data/b/
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj_tpl;
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj_tpl': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj_tpl;
+
+# a typed injected column spells the value as the column's text, which the partition column reads back (Athena
+# evidence/athena-injected-types.txt: bigint, smallint, boolean, date, decimal(5,2), double read; timestamp fails;
+# float reads nothing in Athena, which mis-spells it, and reads its directory here)
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj_int;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_int (id INTEGER, k INTEGER) PARTITIONED BY (k)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_int', 'projection.enabled' = 'true', 'projection.k.type' = 'injected');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_int/k=1/a.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_int/k=2/b.parquet';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_int WHERE k = 1;
+----
+1	1
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_int WHERE k IN (1, 2) ORDER BY id;
+----
+1	1
+2	2
+
+# a constant the column can not hold names no value: the first sentence, as for an empty string
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj_int WHERE k = 100000000000;
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj_int': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj_int;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj_bool;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_bool (id INTEGER, k BOOLEAN) PARTITIONED BY (k)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_bool', 'projection.enabled' = 'true', 'projection.k.type' = 'injected');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_bool/k=true/a.parquet';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_bool WHERE k = true;
+----
+1	true
+
+# the bare column is `k = true` (Athena athena-injected-4.txt); NOT k constrains it to a range in Athena's eyes
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_bool WHERE k;
+----
+1	true
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj_bool WHERE NOT k;
+----
+as Athena requires; the predicate given does not name its values
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj_bool;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj_dec;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_dec (id INTEGER, k DECIMAL(5,2)) PARTITIONED BY (k)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_dec', 'projection.enabled' = 'true', 'projection.k.type' = 'injected');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_dec/k=12.34/a.parquet';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_dec WHERE k = 12.34;
+----
+1	12.34
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj_dec;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj_date;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_date (id INTEGER, k DATE) PARTITIONED BY (k)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_date', 'projection.enabled' = 'true', 'projection.k.type' = 'injected');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_date/k=2024-01-15/a.parquet';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_date WHERE k = DATE '2024-01-15';
+----
+1	2024-01-15
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj_date;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj_float;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_float (id INTEGER, k FLOAT) PARTITIONED BY (k)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_float', 'projection.enabled' = 'true', 'projection.k.type' = 'injected');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_float/k=2.5/a.parquet';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_float WHERE k = 2.5;
+----
+1	2.5
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj_float;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj_ts;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_ts (id INTEGER, k TIMESTAMP) PARTITIONED BY (k)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_ts', 'projection.enabled' = 'true', 'projection.k.type' = 'injected');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj_ts WHERE k = TIMESTAMP '2024-01-15 10:30:00';
+----
+Invalid Input Error: Glue table 'default.pp_inj_ts': the injected partition column 'k' (projection.k.type) needs an equality or IN on it in the WHERE clause, as Athena requires; the predicate given does not name its values
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj_ts;
+
+# an injected key crossed with an integer key (Athena Q16-Q18, batch 2 `k = 'a' AND hour > 0`): EXPLAIN counts the
+# injected values as given, the cap counts the product, a predicate on the other key alone does not supply the value
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_inj_mix;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_mix (id INTEGER, k VARCHAR, hour INTEGER) PARTITIONED BY (k, hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_mix',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,3'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_mix/k=a/hour=1/a.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_mix/k=b/hour=2/b.parquet';
+
+query III
+SELECT id, k, hour FROM my_datalake.default.pp_inj_mix WHERE k = 'a';
+----
+1	a	1
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_inj_mix WHERE k = 'a';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 4/4.*
+
+query III
+SELECT id, k, hour FROM my_datalake.default.pp_inj_mix WHERE k IN ('a', 'b') AND hour = 2;
+----
+2	b	2
+
+# two values of k times the one hour: two partitions derived of the eight the predicates describe
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_inj_mix WHERE k IN ('a', 'b') AND hour = 2;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 2/8.*
+
+query III
+SELECT id, k, hour FROM my_datalake.default.pp_inj_mix WHERE k = 'a' AND hour > 0;
+----
+1	a	1
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj_mix WHERE hour = 1;
+----
+<REGEX>:Invalid Input Error: Glue table 'default\.pp_inj_mix': the injected partition column 'k' \(projection\.k\.type\) needs an equality or IN on it in the WHERE clause, as Athena requires\s*
+
+statement ok
+SET glue_projection_max_partitions = 3;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj_mix WHERE k IN ('a', 'b');
+----
+would derive more than 3 partitions (glue_projection_max_partitions)
+
+statement ok
+RESET glue_projection_max_partitions;
+
+# the table location holds whatever values were ever written, which no parameter bounds: the derived partitions are
+# listed one by one however many, never the root (12 is where the root estimate of a bounded projection would list it);
+# an explicit hive_partition_listing_threshold keeps its meaning
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_inj_mix WHERE k IN ('a', 'b', 'c');
+----
+2
+
+query II
+SELECT count(*), count(*) FILTER (dir = 'pp_inj_mix/') FROM listed_dirs();
+----
+12	0
+
+statement ok
+SET hive_partition_listing_threshold = 1;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_inj_mix WHERE k IN ('a', 'b', 'c');
+----
+2
+
+query I
+SELECT DISTINCT dir FROM listed_dirs();
+----
+pp_inj_mix/
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.pp_inj_mix;

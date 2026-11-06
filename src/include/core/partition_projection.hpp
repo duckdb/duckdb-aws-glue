@@ -16,7 +16,7 @@ class Serializer;
 class Deserializer;
 class ClientContext;
 
-enum class PartitionProjectionType : uint8_t { ENUM, INTEGER, DATE };
+enum class PartitionProjectionType : uint8_t { ENUM, INTEGER, DATE, INJECTED };
 
 //! A bound of a date range: a fixed instant, or NOW (the start of the transaction) plus an offset
 struct DateBound {
@@ -49,9 +49,12 @@ struct PartitionProjectionKey {
 class PartitionProjection {
 public:
 	//! Parse the projection.* parameters of 'table' for its partition keys; 'key_types' are the partition columns'
-	//! types in key order. Throws InvalidInputException for a missing or malformed parameter and
-	//! NotImplementedException for an injected key
+	//! types in key order. Throws InvalidInputException for a missing or malformed parameter. An injected key has no
+	//! parameters beyond its type: the query supplies its values
 	static unique_ptr<PartitionProjection> Parse(const GlueTableInfo &table, const vector<LogicalType> &key_types);
+	//! Whether a key is injected: the table location then holds whatever values were ever written, which no
+	//! parameter bounds
+	bool HasInjectedKey() const;
 
 	//! A predicate of the query on one key, applied to the key's values while they are enumerated
 	class KeyFilter {
@@ -59,8 +62,14 @@ public:
 		virtual ~KeyFilter() = default;
 		//! Whether a value of the key (as the partition column reads it) passes the predicate
 		virtual bool Keep(const string &value) const = 0;
-		//! The values an equality or IN predicate names; false when the predicate is of another shape
+		//! The values an equality or IN predicate names (NULL among them names none); false when the predicate is of
+		//! another shape
 		virtual bool EqualityConstants(vector<Value> &constants) const = 0;
+		//! Whether the predicate constrains the key to a range rather than a set of values (a comparison other than
+		//! equality, BETWEEN, a LIKE with a literal prefix, IS NOT NULL, NOT of the key or of a set): what Athena calls
+		//! a predicate that "cannot be converted to a valid partition", as opposed to one that leaves the key
+		//! unconstrained or names no value
+		virtual bool ConstrainsRange() const = 0;
 		//! Tightens the inclusive bounds of an integer key with the predicate's comparisons of the key itself with a
 		//! constant (`hour > 5`, `hour <= 9`); a predicate of another shape leaves them
 		virtual void NarrowIntegerRange(int64_t &lower, int64_t &upper) const = 0;
@@ -121,6 +130,11 @@ private:
 	//! and an integer key with more candidates than 'max_kept' is not enumerated at all
 	KeyValues ProjectedValues(ClientContext &context, const PartitionProjectionKey &key,
 	                          optional_ptr<const KeyFilter> filter, idx_t max_kept) const;
+	//! The values of an injected key: the constants the query's equality or IN on the column names, spelled as the
+	//! column type's text; without such a predicate the scan fails, as Athena's does
+	KeyValues InjectedValues(const PartitionProjectionKey &key, optional_ptr<const KeyFilter> filter,
+	                         idx_t max_kept) const;
+	[[noreturn]] void ThrowInjectedNeedsEquality(const PartitionProjectionKey &key, bool predicate_given) const;
 	[[noreturn]] void ThrowTooManyPartitions(idx_t max_partitions) const;
 	string DateValue(const PartitionProjectionKey &key, timestamp_t value) const;
 	timestamp_t ResolveBound(ClientContext &context, const PartitionProjectionKey &key, const DateBound &bound) const;

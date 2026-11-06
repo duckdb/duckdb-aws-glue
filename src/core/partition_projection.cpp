@@ -319,10 +319,8 @@ unique_ptr<PartitionProjection> PartitionProjection::Parse(const GlueTableInfo &
 			key.type = PartitionProjectionType::DATE;
 			ParseDateKey(table, result->table_description, key);
 		} else if (type == "injected") {
-			throw NotImplementedException("Glue table '%s': partition column '%s' uses the injected projection type "
-			                              "(%s), which is not supported yet: Athena takes its values from the "
-			                              "query's WHERE clause instead of the table parameters",
-			                              result->table_description, key.name, type_parameter);
+			// the query's equality or IN on the column supplies the values; no other parameter applies
+			key.type = PartitionProjectionType::INJECTED;
 		} else {
 			throw InvalidInputException("Glue table '%s': %s is '%s', expected enum, integer, date or injected",
 			                            result->table_description, type_parameter, table.GetParameter(type_parameter));
@@ -457,10 +455,89 @@ static int64_t IntervalMicros(const interval_t &interval, bool shortest) {
 	return micros > max ? NumericLimits<int64_t>::Maximum() : Hugeint::Cast<int64_t>(micros);
 }
 
+bool PartitionProjection::HasInjectedKey() const {
+	for (auto &key : keys) {
+		if (key.type == PartitionProjectionType::INJECTED) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void PartitionProjection::ThrowInjectedNeedsEquality(const PartitionProjectionKey &key, bool predicate_given) const {
+	throw InvalidInputException("Glue table '%s': the injected partition column '%s' (projection.%s.type) needs an "
+	                            "equality or IN on it in the WHERE clause, as Athena requires%s",
+	                            table_description, key.name, key.name,
+	                            predicate_given ? "; the predicate given does not name its values" : "");
+}
+
+PartitionProjection::KeyValues PartitionProjection::InjectedValues(const PartitionProjectionKey &key,
+                                                                   optional_ptr<const KeyFilter> filter,
+                                                                   idx_t max_kept) const {
+	// Athena's message for a missing value has a second sentence only when the column is constrained to a range: a
+	// column left alone (no predicate, a function of it) or named nothing usable (IS NULL, '') gets the first alone
+	vector<Value> constants;
+	if (!filter) {
+		ThrowInjectedNeedsEquality(key, false);
+	}
+	if (!filter->EqualityConstants(constants)) {
+		ThrowInjectedNeedsEquality(key, filter->ConstrainsRange());
+	}
+	switch (key.column_type.id()) {
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_SEC:
+	case LogicalTypeId::TIMESTAMP_MS:
+	case LogicalTypeId::TIMESTAMP_NS:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		// Athena spells no timestamp into a partition path
+		ThrowInjectedNeedsEquality(key, true);
+	default:
+		break;
+	}
+	// the constants as the column type's text, which is what the partition column reads back from the directory; a
+	// NULL or a constant the type can not hold names no value
+	vector<string> texts;
+	for (auto &constant : constants) {
+		if (constant.IsNull()) {
+			continue;
+		}
+		auto typed = constant.DefaultTryCastAs(key.column_type, nullptr, true);
+		if (!typed || typed->IsNull()) {
+			continue;
+		}
+		auto text = typed->ToString();
+		if (!text.empty()) {
+			texts.push_back(std::move(text));
+		}
+	}
+	if (texts.empty()) {
+		// `k = ''`, `k IN (NULL)`: a predicate on the column that names no value Athena can spell
+		ThrowInjectedNeedsEquality(key, false);
+	}
+	std::sort(texts.begin(), texts.end());
+	texts.erase(std::unique(texts.begin(), texts.end()), texts.end());
+	KeyValues result;
+	result.count = texts.size();
+	for (auto &text : texts) {
+		if (!filter->Keep(text)) {
+			continue;
+		}
+		if (result.values.size() >= max_kept) {
+			result.exceeded = true;
+			break;
+		}
+		result.values.push_back(ProjectedValue {text, text});
+	}
+	return result;
+}
+
 PartitionProjection::KeyValues PartitionProjection::ProjectedValues(ClientContext &context,
                                                                     const PartitionProjectionKey &key,
                                                                     optional_ptr<const KeyFilter> filter,
                                                                     idx_t max_kept) const {
+	if (key.type == PartitionProjectionType::INJECTED) {
+		return InjectedValues(key, filter, max_kept);
+	}
 	KeyValues result;
 	vector<Value> constants;
 	// the values the predicate names are checked against the range instead of enumerating it; only for a column type
@@ -504,6 +581,8 @@ PartitionProjection::KeyValues PartitionProjection::ProjectedValues(ClientContex
 		return true;
 	};
 	switch (key.type) {
+	case PartitionProjectionType::INJECTED:
+		throw InternalException("an injected key's values are derived by InjectedValues");
 	case PartitionProjectionType::ENUM:
 		for (auto &value : key.enum_values) {
 			if (!add(ProjectedValue {value, value})) {
@@ -688,7 +767,9 @@ PartitionProjection::Derivation PartitionProjection::Derive(ClientContext &conte
 	vector<vector<ProjectedValue>> key_values;
 	for (idx_t i = 0; i < keys.size(); i++) {
 		auto values = ProjectedValues(context, keys[i], filters[i], max_partitions);
-		result.narrowed.push_back(values.values.size() < values.count);
+		// an injected key's predicate is what produced its values: it decided the files, as a narrowing one did
+		result.narrowed.push_back(keys[i].type == PartitionProjectionType::INJECTED ||
+		                          values.values.size() < values.count);
 		result.unfiltered = SaturatingMultiply(result.unfiltered, values.count);
 		derived = SaturatingMultiply(derived, values.values.size());
 		exceeded = exceeded || values.exceeded;
