@@ -153,6 +153,10 @@ private:
 	//! The partition of the deepest registered location containing the file, searching no shorter than
 	//! 'min_directory_size' characters of its ComparableLocation
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
+	//! IsDataFile for a file of the root listing: a hidden component counts only below the location of the file's
+	//! partition, as Hive engines list it, so the directories of a partition key such as '_k' are read
+	bool IsRootListedDataFile(const OpenFileInfo &file, const string &root_prefix, idx_t comparable_root_size,
+	                          const vector<GluePartitionInfo> &partitions) const;
 	//! Add a listed file of the partition unless this list already has it. Called with
 	//! HiveScanInfo::file_partitions_lock held.
 	void AddFile(OpenFileInfo file, idx_t partition_index) const;
