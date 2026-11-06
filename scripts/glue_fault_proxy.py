@@ -7,7 +7,8 @@ the description 'created by another client', a table one more column 'created_by
 'SELECT 2 AS one'. An UpdateTable on a fault_concurrent_update* database is preceded by another client's update,
 which sets the table parameter 'changed_by_another_client', and is then refused with ConcurrentModificationException
 if its VersionId is not the table's current one, as Glue does (moto ignores VersionId); without a VersionId it is
-forwarded and overwrites the other client's change."""
+forwarded and overwrites the other client's change. A request on a fault_throttled* database is answered with
+ThrottlingException on its first attempt (the SDK's amz-sdk-request header) and forwarded when the SDK retries it."""
 
 import argparse
 import http.client
@@ -21,6 +22,8 @@ LISTING_FAULTS = {"fault_access_denied": "AccessDeniedException", "fault_invalid
 RACED_CREATE_PREFIX = "fault_already_exists"
 # UpdateTable on a database with this prefix races another client's update of the same table
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
+# the first attempt of a request on a database with this prefix is throttled, its retries are not
+THROTTLED_PREFIX = "fault_throttled"
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -64,6 +67,11 @@ def as_other_clients_object(target, request):
     return json.dumps(request).encode()
 
 
+def is_throttled(database, sdk_request):
+    attempts = (sdk_request or "").replace(" ", "").split(";")
+    return database.startswith(THROTTLED_PREFIX) and "attempt=1" in attempts
+
+
 def is_raced_update(target, database):
     return target == "AWSGlue.UpdateTable" and database.startswith(RACED_UPDATE_PREFIX)
 
@@ -83,6 +91,8 @@ class Handler(BaseHTTPRequestHandler):
         request = parse_request(body)
         database = request_database(target, request)
         error = listing_error(target, database)
+        if not error and is_throttled(database, self.headers.get("amz-sdk-request")):
+            error = "ThrottlingException"
         if error:
             self.reply_error(error)
             return

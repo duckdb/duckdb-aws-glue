@@ -499,6 +499,20 @@ SELECT "table", scan_id, event, partitions, partitions_read, listings, files, du
 FROM duckdb_logs_parsed('GlueScan');
 ```
 
+The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry strategy decides on for a Glue API call,
+before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its `message` and
+HTTP `status`, the `retry` number (1 for the first), `max_retries` (`glue_max_retries`, or the limit of the SDK's
+default policy), the `delay_ms` before the retry and the `request_id` of the failed attempt. `status` is NULL when the
+request got no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection), and
+`max_retries` when the strategy reports no limit. A retry the SDK makes to correct clock skew does not go through the
+retry strategy and is not logged.
+
+```sql
+CALL enable_logging('GlueRetry', storage = 'memory');
+-- ... run queries ...
+SELECT error, status, count(*) FROM duckdb_logs_parsed('GlueRetry') GROUP BY ALL;
+```
+
 ## Testing
 
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:
@@ -515,8 +529,9 @@ which the tests use in their ATTACH; tests are skipped without a config (`requir
 The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
 GetTables on a database named `fault_access_denied*` / `fault_invalid_input*` with that Glue error, and carries out
 CreateDatabase / CreateTable on a `fault_already_exists*` database before answering AlreadyExistsException (what it
-creates differs from what was asked for); tests that need it are skipped without it. It also sets
-`GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
+creates differs from what was asked for), and refuses the first attempt of each request on a `fault_throttled*`
+database with ThrottlingException, letting the SDK's retries through; tests that need it are skipped without it. It
+also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
 `link_db` as Glue does through a database resource link whose target is `target_db`.
 
 ```sh

@@ -45,9 +45,34 @@ string GlueScanLogType::ConstructLogMessage(const GlueScanEvent &event) {
 	return Value::STRUCT(std::move(children)).ToString();
 }
 
+constexpr LogLevel GlueRetryLogType::LEVEL;
+
+GlueRetryLogType::GlueRetryLogType() : LogType(NAME, LEVEL, GetLogType()) {
+}
+
+LogicalType GlueRetryLogType::GetLogType() {
+	child_list_t<LogicalType> children = {{"error", LogicalType::VARCHAR},       {"message", LogicalType::VARCHAR},
+	                                      {"status", LogicalType::UBIGINT},      {"retry", LogicalType::UBIGINT},
+	                                      {"max_retries", LogicalType::UBIGINT}, {"delay_ms", LogicalType::UBIGINT},
+	                                      {"request_id", LogicalType::VARCHAR}};
+	return LogicalType::STRUCT(children);
+}
+
+string GlueRetryLogType::ConstructLogMessage(const GlueRetryEvent &event) {
+	child_list_t<Value> children = {{"error", OptionalString(event.error)},
+	                                {"message", OptionalString(event.message)},
+	                                {"status", OptionalCount(event.status)},
+	                                {"retry", Value::UBIGINT(event.retry)},
+	                                {"max_retries", OptionalCount(event.max_retries)},
+	                                {"delay_ms", Value::UBIGINT(event.delay_ms)},
+	                                {"request_id", OptionalString(event.request_id)}};
+	return Value::STRUCT(std::move(children)).ToString();
+}
+
 void RegisterGlueLogTypes(DatabaseInstance &db) {
 	auto &log_manager = db.GetLogManager();
 	log_manager.RegisterLogType(make_uniq<GlueScanLogType>());
+	log_manager.RegisterLogType(make_uniq<GlueRetryLogType>());
 }
 
 // The operation is the X-Amz-Target header, which the HTTP log does not redact
