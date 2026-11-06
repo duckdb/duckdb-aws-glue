@@ -21,7 +21,10 @@
 # 'fault-proxy' (port 5556, GLUE_FAULT_ENDPOINT) forwards to moto, except GetTables on a database named fault_*, which
 # fails with the Glue error scripts/glue_fault_proxy.py assigns to that prefix, and CreateDatabase / CreateTable on a
 # fault_already_exists* database, which is carried out and then answered with AlreadyExistsException (a lost race),
-# and UpdateTable on a fault_concurrent_update* database, which another client's update precedes (a lost update).
+# UpdateTable on a fault_concurrent_update* database, which another client's update precedes (a lost update), and
+# BatchCreatePartition on a fault_partition_elsewhere* database, which another client's registration of the same
+# partitions at other locations precedes, and CreatePartition on a fault_noncanonical_values* database, which
+# registers each value with a leading '0'.
 # 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link
 # link_db whose target is target_db (scripts/resource_link_proxy.py).
 # Ports are published on 127.0.0.1 only, so the servers are not reachable from other machines.
