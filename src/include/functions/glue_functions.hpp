@@ -26,6 +26,9 @@ struct GluePartitionTarget {
 //! require_partitions, unpartitioned tables
 GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
                                      bool require_partitions = true);
+//! Throws for a table with an InputFormat Hive does not use for its SerDe: its engine lays out the files below the
+//! table location, so a partition registered the way Hive does may not hold the table's files
+void ThrowIfForeignLayout(const string &operation, const GluePartitionTarget &target);
 //! GlueTypes::PartitionValue, but a partition value that can't be cast to the key's type is NULL instead of throwing,
 //! so one bad partition doesn't make the whole glue_partitions() listing fail (e.g. 'abc' for an INT key lists as
 //! NULL).

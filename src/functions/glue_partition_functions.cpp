@@ -54,6 +54,19 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 	return result;
 }
 
+void ThrowIfForeignLayout(const string &operation, const GluePartitionTarget &target) {
+	auto &table = target.table;
+	auto file_format = table.GetFileFormat();
+	if (table.GetFormat().IsWritable(table, file_format)) {
+		return;
+	}
+	throw NotImplementedException(
+	    "%s on Glue table '%s' is not supported: its InputFormat '%s' is not one Hive uses for "
+	    "%s tables, so DuckDB does not know how the files below the table location are laid "
+	    "out",
+	    operation, target.TableName(), table.input_format, HiveFileFormatToString(file_format));
+}
+
 Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
                             const LogicalType &type) {
 	try {
@@ -307,6 +320,7 @@ unique_ptr<FunctionData> GlueAddPartitionBind(ClientContext &context, TableFunct
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_add_partition", input.inputs[0]);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_add_partition");
+	ThrowIfForeignLayout("glue_add_partition", result->target);
 	result->values = ParsePartitionSpec("glue_add_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
@@ -768,6 +782,7 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		step.if_not_exists = !if_not_exists.IsNull() && if_not_exists.GetValue<bool>();
 		step.if_exists = !if_exists.IsNull() && if_exists.GetValue<bool>();
 		if (name == "add") {
+			ThrowIfForeignLayout("ALTER TABLE ADD PARTITION", result->target);
 			step.action = GlueAlterAction::ADD;
 			step.values = ParsePartitionPairsValue("ALTER TABLE ADD PARTITION", result->target, partition);
 			step.location = location.IsNull() ? DefaultPartitionLocation(result->target, step.values)

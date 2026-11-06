@@ -77,6 +77,35 @@ INSERT INTO my_datalake.default.fixture_foreign_input_format VALUES (1, 1.0);
 ----
 INSERT into Glue table 'fixture_foreign_input_format' is not supported: its InputFormat 'com.example.hadoop.ManifestedParquetInputFormat' is not one Hive uses for parquet tables
 
+# A partition registered the way Hive registers them may not hold such a table's files: adding one is refused, in the
+# function and the SQL form, and nothing is registered
+statement error
+CALL glue_add_partition('my_datalake.default.fixture_foreign_input_format_partitioned', {dt: 'a'});
+----
+Not implemented Error: glue_add_partition on Glue table 'default.fixture_foreign_input_format_partitioned' is not supported: its InputFormat 'com.example.hadoop.ManifestedParquetInputFormat' is not one Hive uses for parquet tables
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement error
+ALTER TABLE my_datalake.default.fixture_foreign_input_format_partitioned ADD PARTITION (dt = 'a');
+----
+Not implemented Error: ALTER TABLE ADD PARTITION on Glue table 'default.fixture_foreign_input_format_partitioned' is not supported: its InputFormat 'com.example.hadoop.ManifestedParquetInputFormat' is not one Hive uses for parquet tables
+
+statement ok
+RESET active_grammar_extensions;
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.fixture_foreign_input_format_partitioned');
+----
+0
+
+# the table still reads, with no partitions
+query I
+SELECT count(*) FROM my_datalake.default.fixture_foreign_input_format_partitioned;
+----
+0
+
 # nothing was written below the locations of the refused tables
 query I
 SELECT count(*) FROM (

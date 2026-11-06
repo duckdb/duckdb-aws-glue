@@ -108,8 +108,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   registered, including a `//` in its path. A table without data files (just created) scans as empty.
 - A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
   rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
-  ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
-  `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
+  ones, which such a table usually has none of, so a scan would silently read nothing. `glue_repair_table` is refused
+  for the same reason. To read it, set `projection.enabled` to `false` and register its partitions (`ALTER TABLE ...
+  ADD PARTITION`, `glue_add_partition`, `glue_repair_table`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
@@ -216,7 +217,8 @@ their codec themselves.
   (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read. `INSERT` also requires the table's InputFormat to
   be one Hive uses for its file format (`MapredParquetInputFormat`, `TextInputFormat` or `CombineTextInputFormat` for
   csv and json, `AvroContainerInputFormat`) or empty: another engine's InputFormat means a layout DuckDB does not
-  know, and files written into it could corrupt the table.
+  know, and files written into it could corrupt the table. Adding a partition to such a table (`glue_add_partition`,
+  `ALTER TABLE ... ADD PARTITION`) is refused too: a partition registered the way Hive does may not hold its files.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.

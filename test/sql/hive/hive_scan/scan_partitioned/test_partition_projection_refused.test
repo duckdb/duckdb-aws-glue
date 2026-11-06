@@ -66,6 +66,17 @@ COPY my_datalake.default.pp_events FROM '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_src
 ----
 INSERT into Glue table 'pp_events' is not supported: the table uses Athena partition projection
 
+# and so is a repair: the partitions it would register are ignored by Athena too
+statement error
+SELECT * FROM glue_repair_table('my_datalake.default.pp_events');
+----
+Not implemented Error: glue_repair_table of Glue table 'default.pp_events' is not supported: the table uses Athena partition projection (projection.enabled), so the partitions it would register are ignored by Athena. Set projection.enabled to false to repair it
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.pp_events');
+----
+0
+
 # and so is CREATE TABLE ... AS, which would otherwise create and fill a table this extension then refuses to read
 statement error
 CREATE TABLE my_datalake.default.pp_ctas PARTITIONED BY (region)
@@ -128,8 +139,10 @@ SELECT count(*) FROM my_datalake.default.pp_events;
 ----
 0
 
-statement ok
-CALL glue_add_partition('my_datalake.default.pp_events', {region: 'us', hour: 7});
+query II
+SELECT region, hour FROM glue_repair_table('my_datalake.default.pp_events');
+----
+us	7
 
 query III
 SELECT id, region, hour FROM my_datalake.default.pp_events;
