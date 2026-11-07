@@ -103,6 +103,11 @@ public:
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const GluePartitionDetails &partition,
 	                                 const string &location);
+	//! Replace the data columns a partition declares. 'partition' is the partition as fetched, as for
+	//! SetPartitionLocation.
+	static void SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                const string &table_name, const GluePartitionDetails &partition,
+	                                const vector<GlueColumn> &columns);
 	//! Fetch a single partition by its values, returns false if it does not exist
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result);
