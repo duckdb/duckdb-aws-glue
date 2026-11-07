@@ -395,8 +395,12 @@ Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
 statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The checks fetch
 the partitions they look at with `BatchGetPartition`, and consecutive drops go out as `BatchDeletePartition` calls of
-up to 25 partitions, so dropping partitions needs `glue:BatchGetPartition` and `glue:BatchDeletePartition`. The table
-name may be partially qualified; it is resolved like in a query.
+up to 25 partitions, so adding partitions needs `glue:BatchGetPartition` and `glue:BatchCreatePartition`, and dropping
+them `glue:BatchGetPartition` and `glue:BatchDeletePartition`. The table name may be partially qualified; it is resolved
+like in a query. `glue_add_partition`, `glue_drop_partition`, `glue_rename_partition`, `glue_set_partition_location`
+and `glue_set_table_location` are `glue_alter_table` with their one action, so they check their arguments and call Glue
+as the SQL form does: a location must be an `s3://` or `s3a://` location, and a NULL `location` of
+`glue_add_partition` is the default one.
 
 `glue_partitions` lists every registered partition with a typed column per partition key, its `location` and
 `partition_values`, the strings Glue stores. A typed column is NULL for the NULL partition (Glue stores

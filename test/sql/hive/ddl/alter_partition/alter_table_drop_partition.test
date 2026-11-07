@@ -95,8 +95,16 @@ CALL glue_drop_partition('my_datalake.default.orders_drop', {dt: '2014-05-14', c
 ----
 does not exist
 
-statement ok
+query I
 CALL glue_drop_partition('my_datalake.default.orders_drop', {dt: '2014-05-14', country: 'IN'}, if_exists := true);
+----
+false
+
+# a NULL flag is false
+statement error
+CALL glue_drop_partition('my_datalake.default.orders_drop', {dt: '2014-05-14', country: 'IN'}, if_exists := NULL);
+----
+does not exist
 
 # the partition spec must name every partition key (there is no syntax for dropping a range of partitions)
 statement error

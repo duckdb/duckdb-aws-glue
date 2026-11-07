@@ -9,9 +9,9 @@ which sets the table parameter 'changed_by_another_client', and is then refused 
 if its VersionId is not the table's current one, as Glue does (moto ignores VersionId); without a VersionId it is
 forwarded and overwrites the other client's change. A BatchCreatePartition on a fault_partition_elsewhere* database is
 preceded by another client's registration of the same partitions at '<location>_by_another_client', so that each is
-refused with AlreadyExistsException while its files are not where Glue points. A CreatePartition on a
-fault_noncanonical_values* database registers each value with a leading '0', as another engine may spell an integer
-('01' for 1)."""
+refused with AlreadyExistsException while its files are not where Glue points. A CreatePartition or
+BatchCreatePartition on a fault_noncanonical_values* database registers each value with a leading '0', as another
+engine may spell an integer ('01' for 1)."""
 
 import argparse
 import http.client
@@ -27,7 +27,7 @@ RACED_CREATE_PREFIX = "fault_already_exists"
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
 # BatchCreatePartition on a database with this prefix races another client registering the partitions elsewhere
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
-# CreatePartition on a database with this prefix registers each value with a leading '0'
+# CreatePartition or BatchCreatePartition on a database with this prefix registers each value with a leading '0'
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
@@ -81,13 +81,15 @@ def is_raced_partition_create(target, database):
 
 
 def is_noncanonical_create(target, database):
-    return target == "AWSGlue.CreatePartition" and database.startswith(NONCANONICAL_PREFIX)
+    return target in ("AWSGlue.CreatePartition", "AWSGlue.BatchCreatePartition") and database.startswith(
+        NONCANONICAL_PREFIX)
 
 
 def with_noncanonical_values(request):
     """The partition as another engine registers it: each value with a leading '0'."""
-    partition = request.get("PartitionInput", {})
-    partition["Values"] = ["0" + value for value in partition.get("Values", [])]
+    partitions = request.get("PartitionInputList", [request.get("PartitionInput", {})])
+    for partition in partitions:
+        partition["Values"] = ["0" + value for value in partition.get("Values", [])]
     return json.dumps(request).encode()
 
 

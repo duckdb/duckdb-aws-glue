@@ -64,7 +64,8 @@ SELECT id, k FROM my_datalake.fault_partition_elsewhere.t;
 statement ok
 DROP SCHEMA my_datalake.fault_partition_elsewhere CASCADE;
 
-# the fault proxy registers each value of a CreatePartition on a fault_noncanonical_values* database with a leading '0'
+# the fault proxy registers each value of a CreatePartition or BatchCreatePartition on a fault_noncanonical_values*
+# database with a leading '0'
 statement ok
 DROP SCHEMA IF EXISTS my_datalake.fault_noncanonical_values CASCADE;
 

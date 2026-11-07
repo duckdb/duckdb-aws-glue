@@ -318,7 +318,8 @@ CALL glue_rename_partition('my_datalake.default.calls_orders', {dt: '2026-01-03'
 query II
 FROM glue_calls();
 ----
-GetPartition	2
+BatchGetPartition	1
+GetPartition	1
 GetTable	1
 UpdatePartition	1
 
@@ -399,7 +400,8 @@ CALL glue_add_partition('my_datalake.default.calls_orders', {dt: '2026-01-05'});
 query II
 FROM glue_calls();
 ----
-CreatePartition	1
+BatchCreatePartition	1
+BatchGetPartition	1
 GetTable	1
 
 #---------------------------------------------------------------------------
@@ -427,7 +429,8 @@ CALL glue_drop_partition('my_datalake.default.calls_orders', {dt: '2026-01-05'})
 query II
 FROM glue_calls();
 ----
-DeletePartition	1
+BatchDeletePartition	1
+BatchGetPartition	1
 GetTable	1
 
 #---------------------------------------------------------------------------
