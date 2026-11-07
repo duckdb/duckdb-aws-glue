@@ -1,0 +1,68 @@
+# name: test/sql/cloud/partition_projection_backslash.test
+# description: A projected value with a backslash is one literal directory on S3; the local fixture cannot store it
+# group: [cloud]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_TEST_CONFIG cloud
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_backslash;
+
+# the value is substituted as written (Athena); the listing escapes the glob characters * ? [ \ of the directory, so
+# k=x\y/ is listed as a prefix and not as the pattern k=xy/, whose files belong to no projected value
+statement ok
+CREATE TABLE my_datalake.default.pp_backslash (id INTEGER, k VARCHAR) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_backslash',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'enum',
+    'projection.k.values' = 'x\y,plain'
+);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_backslash/k=x\y/a.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_backslash/k=plain/b.parquet';
+
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_backslash/k=xy/c.parquet';
+
+# from one listing per partition and from one listing of the table root
+foreach threshold 1 100
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT id, k FROM my_datalake.default.pp_backslash ORDER BY id;
+----
+1	x\y
+2	plain
+
+query II
+SELECT id, k FROM my_datalake.default.pp_backslash WHERE k = 'x\y';
+----
+1	x\y
+
+endloop
+
+statement ok
+DROP TABLE my_datalake.default.pp_backslash;

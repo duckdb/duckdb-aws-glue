@@ -110,10 +110,47 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   reads one of them and the location holds data files: Hive engines read such a file once for each partition, which
   DuckDB does not. `s3a://` and `s3n://` locations name the same bucket and key as `s3://`, and a location is read as
   registered, including a `//` in its path. A table without data files (just created) scans as empty.
-- A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
-  rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
-  ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
-  `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
+- A partitioned table with Athena partition projection (`projection.enabled = true`, trimmed, case-insensitive) is
+  read the way Athena reads it: the partitions are the cross product of every partition key's projected values, as
+  the `projection.<key>.*` table parameters describe them, and the partitions registered in Glue are ignored (no
+  `GetPartitions` call). A projected partition without files reads as empty; a value outside the projected ones is
+  not an error. Supported, as Athena documents them:
+  - `type = enum`: `values`, comma-separated; white space is part of a value, an empty element is skipped, a repeated
+    value counts once.
+  - `type = integer`: `range = min,max` (inclusive, 64-bit), `interval` (default 1), `digits` (zero-padded width,
+    the sign included, as Java's `%0Nd`).
+  - `type = date`: `range = min,max` with each bound written in `format` or as `NOW[ +|- n YEARS|MONTHS|WEEKS|DAYS|
+    HOURS|MINUTES|SECONDS]` (singular too, any case); `NOW` is the start of the transaction (what `now()` returns),
+    in UTC. `interval` and `interval.unit` (any `java.time` `ChronoUnit` from `MILLENNIA` to `NANOS`, as in Athena)
+    step from the lower bound and count only together, as in Athena (an `interval` without its unit is ignored, and so
+    is a unit without an `interval`, which still has to name a unit); otherwise
+    the step is one of the format's finest field: a day with a day field, a month with a month field and no day, a year
+    with only a year; a format with time fields requires both. Both bounds are truncated to the format's precision
+    first. A step finer than the format spells
+    each partition once, and a DATE or TIMESTAMP column reads the directory (`y=2021` is 2021-01-01).
+    Stepping by months clamps the day to the month's length and carries on from there (`01-31, 02-29, 03-29, ...`),
+    as Java does. `format` is a Java `DateTimeFormatter` pattern with a year field, restricted to the letters `y` `M`
+    `d` `H` `m` `s` `S` with Java's rules (one letter the minimum digits, more a zero-padded width, `yy` the last two
+    digits, `MMM` / `MMMM` the English month name, `S...` the fraction truncated to the count), quoted literals (`'T'`,
+    `''` a quote) and punctuation; any other letter, `[ ] { } #`, an unterminated quote or a pattern without a year
+    field fails the scan naming it. A `DATE`
+    partition column reads the value as a date and a `TIMESTAMP` column as a timestamp whatever the directory
+    format; a string column reads the formatted text.
+  - `type = injected` is not supported: the scan fails naming the column.
+  - Locations: `storage.location.template` with a `${key}` placeholder for every partition key, else
+    `<location>/<key1>=<value1>/<key2>=<value2>/`. Values are substituted as written in both, as Athena does: no
+    escaping, so `a:b` is the directory `k=a:b/` (Hive would write `k=a%3Ab/`).
+  - A missing or malformed parameter (a key without `projection.<key>.type`, a range that is not two values or runs
+    backwards, a template without a key's placeholder, ...) fails the scan with an `Invalid Input Error` naming the
+    parameter or column.
+  - Filters on the partition columns prune the derived partitions before anything is listed, as for registered
+    partitions. `glue_projection_max_partitions` (default 100000) is the most derived partitions a scan may still
+    have to list after that pruning (as the planner knows it; a join filter applied when the scan starts prunes
+    later): over it the scan fails naming the count and the setting, so an open-ended date range or a wide integer
+    range does not list S3 for hours. The cross product itself is not capped.
+  - Writes (`INSERT`, `COPY ... FROM`, `CREATE TABLE ... AS`) into such a table stay refused: the partitions they
+    would register are ignored by Athena. `glue_partitions()` keeps listing the registered partitions only, as
+    Athena's `SHOW PARTITIONS` does.
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
