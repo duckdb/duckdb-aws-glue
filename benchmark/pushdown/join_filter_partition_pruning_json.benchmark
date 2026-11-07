@@ -56,10 +56,12 @@ ATTACH '123456789012' AS my_datalake (
     DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
 );
 SET enable_external_file_cache=false;
+SET glue_enable_partition_key_statistics=false;
 SET debug_fs_delay_mean_ms=20;
 
 run
 SET enable_external_file_cache=false;
+SET glue_enable_partition_key_statistics=false;
 SET debug_fs_delay_mean_ms=20;
 SELECT count(*), sum(f.id) FROM my_datalake.bench_pushdown_text.fact_json f JOIN my_datalake.bench_pushdown_text.dim_json d ON f.dk = d.dk WHERE d.grp = 7;
 

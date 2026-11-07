@@ -34,6 +34,12 @@ CREATE TABLE my_datalake.default.noprune (id INTEGER, k VARCHAR) PARTITIONED BY 
 statement ok
 INSERT INTO my_datalake.default.noprune VALUES (1, 'a b'), (2, 'plain'), (3, NULL);
 
+# every answer below with partition-key statistics off (default) and on
+foreach stats false true
+
+statement ok
+SET glue_enable_partition_key_statistics = ${stats};
+
 query IT
 SELECT id, k FROM my_datalake.default.noprune ORDER BY id;
 ----
@@ -97,6 +103,8 @@ query I
 SELECT count(*) FROM my_datalake.default.noprune WHERE k BETWEEN 'a' AND 'b';
 ----
 1
+
+endloop
 
 statement ok
 DROP TABLE my_datalake.default.noprune;

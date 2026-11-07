@@ -109,6 +109,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "superseded files, until then. Default false.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
+	config.AddExtensionOption("glue_enable_partition_key_statistics",
+	                          "Give the optimizer the bounds and distinct count of a Hive table's partition keys, from "
+	                          "the partitions a scan reads. Default false, as for read_parquet with hive partitioning.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	config.AddExtensionOption("hive_partition_listing_threshold",
 	                          "When set, a scan reading at least this many partitions below the table location lists "
 	                          "the location once (recursively) instead of one listing per partition. Unset (default), "

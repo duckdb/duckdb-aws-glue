@@ -141,6 +141,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
   the listing. Avro tables are not measured, so planning them lists nothing.
+- Partition keys have no optimizer statistics by default, as for `read_parquet` with hive partitioning. With
+  `SET glue_enable_partition_key_statistics = true` they get the bounds and exact distinct count of the partitions a
+  scan reads: the group estimate on a key is exact, but the optimizer can then push aggregates below a join on the
+  key and lose that join's run-time partition pruning.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
