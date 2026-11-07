@@ -4,6 +4,7 @@
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional.hpp"
+#include "duckdb/common/set.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
@@ -733,6 +734,58 @@ vector<string> ParsePartitionPairsValue(const string &function_name, const GlueP
 	return ParsePartitionPairs(function_name, target, result);
 }
 
+string DescribeAction(GlueAlterAction action) {
+	switch (action) {
+	case GlueAlterAction::ADD:
+		return "add partition";
+	case GlueAlterAction::DROP:
+		return "drop partition";
+	case GlueAlterAction::RENAME:
+		return "rename partition";
+	case GlueAlterAction::SET_PARTITION_LOCATION:
+		return "set partition location";
+	case GlueAlterAction::SET_TABLE_LOCATION:
+		return "set table location";
+	}
+	return "unknown";
+}
+
+//! A partition is rewritten from what the pre-check fetched, so two changes to one partition can not share a statement
+void CheckAlterSteps(const vector<GlueAlterStep> &steps) {
+	if (steps.empty()) {
+		return;
+	}
+	auto action = steps[0].action;
+	for (auto &step : steps) {
+		if (step.action != action) {
+			throw BinderException("glue_alter_table: %s and %s can not be combined in one statement",
+			                      DescribeAction(action), DescribeAction(step.action));
+		}
+	}
+	if (action == GlueAlterAction::RENAME && steps.size() > 1) {
+		throw BinderException("glue_alter_table: only one partition can be renamed per statement");
+	}
+	// every UpdateTable sends the VersionId of the one table definition bind fetched
+	if (action == GlueAlterAction::SET_TABLE_LOCATION && steps.size() > 1) {
+		throw BinderException("glue_alter_table: the table location can only be set once per statement");
+	}
+	set<vector<string>> seen;
+	for (auto &step : steps) {
+		if (step.values.empty() || seen.insert(step.values).second) {
+			continue;
+		}
+		auto partition = StringUtil::Join(step.values, ", ");
+		switch (action) {
+		case GlueAlterAction::ADD:
+			throw BinderException("glue_alter_table: partition [%s] is added more than once", partition);
+		case GlueAlterAction::DROP:
+			throw BinderException("glue_alter_table: partition [%s] is dropped more than once", partition);
+		default:
+			throw BinderException("glue_alter_table: the location of partition [%s] is set more than once", partition);
+		}
+	}
+}
+
 unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GlueAlterTableBindData>();
@@ -787,25 +840,10 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		}
 		result->steps.push_back(std::move(step));
 	}
+	CheckAlterSteps(result->steps);
 	names = {"action", "partition", "location"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
 	return std::move(result);
-}
-
-string DescribeAction(GlueAlterAction action) {
-	switch (action) {
-	case GlueAlterAction::ADD:
-		return "add partition";
-	case GlueAlterAction::DROP:
-		return "drop partition";
-	case GlueAlterAction::RENAME:
-		return "rename partition";
-	case GlueAlterAction::SET_PARTITION_LOCATION:
-		return "set partition location";
-	case GlueAlterAction::SET_TABLE_LOCATION:
-		return "set table location";
-	}
-	return "unknown";
 }
 
 //! Apply every action, once, and record the row each one reports. Kept separate from emitting them because
