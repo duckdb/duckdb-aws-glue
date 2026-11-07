@@ -103,10 +103,11 @@ static string BucketingOptionFor(const string &key) {
 
 //! The spelling to use for another engine's CREATE TABLE option, empty if the key is none of them
 static string OtherEngineOptionFor(const string &key) {
-	static const case_insensitive_map_t<string> SPELLINGS = {{"partitioned_by", "a PARTITIONED BY (...) clause"},
-	                                                         {"partitioning", "a PARTITIONED BY (...) clause"},
-	                                                         {"external_location", "option 'location'"},
-	                                                         {"field_delimiter", "option 'delimiter'"}};
+	static const case_insensitive_map_t<string> SPELLINGS = {
+	    {"partitioned_by", "a PARTITIONED BY (...) clause"}, {"partitioning", "a PARTITIONED BY (...) clause"},
+	    {"partition_by", "a PARTITIONED BY (...) clause"},   {"partition_columns", "a PARTITIONED BY (...) clause"},
+	    {"partition_keys", "a PARTITIONED BY (...) clause"}, {"PartitionKeys", "a PARTITIONED BY (...) clause"},
+	    {"external_location", "option 'location'"},          {"field_delimiter", "option 'delimiter'"}};
 	return LookupSpelling(SPELLINGS, key);
 }
 
