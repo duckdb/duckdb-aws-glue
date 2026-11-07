@@ -1,5 +1,5 @@
 # name: test/sql/hive/catalog/batch_table_lookup_errors.test
-# description: A GetTables page refused for lack of permission stops bulk lookups for the attach, another Glue error only degrades the lookup, and a listing still reads a refusal as no tables
+# description: A GetTables page refused for lack of permission stops bulk lookups for the attach, another Glue error only degrades the lookup, and a listing reads a refusal as no tables beyond the ones looked up by name
 # group: [catalog]
 
 require httpfs
@@ -154,8 +154,33 @@ attach '{GLUE_CATALOG_ID}' as listing_dl (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
+statement ok con4
+SET redact_http_logs = false;
+
+statement ok con4
+CALL enable_logging('HTTP', storage := 'memory');
+
 query I con4
 SELECT count(*) FROM duckdb_tables() WHERE database_name = 'listing_dl' AND schema_name = 'fault_access_denied_btl';
+----
+0
+
+# a table looked up by name stays listed when the listing is refused, and the refusal is not retried
+query I con4
+SELECT id FROM listing_dl.fault_access_denied_btl.t1;
+----
+1
+
+statement ok con4
+CALL truncate_duckdb_logs();
+
+query I con4
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'listing_dl' AND schema_name = 'fault_access_denied_btl';
+----
+t1
+
+query I con4
+SELECT glue_calls('GetTables');
 ----
 0
 
