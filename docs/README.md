@@ -212,8 +212,9 @@ their codec themselves.
   which would read as rows of the new table. `WITH (overwrite = true)` deletes those files instead, in one
   `RemoveFiles` call when the statement starts executing and before the table is created: they stay deleted if the
   statement then fails, and a failed delete may leave some of them (the table is then not created). It is refused
-  when the location is, holds or lies inside the location of another table in the same Glue database; tables in
-  other databases, catalogs or accounts are not checked. `CREATE OR REPLACE` refuses `overwrite`. Files a scan skips
+  when the location is, holds or lies inside the location of another table in the same Glue database, or of a
+  partition of one (a partition can lie outside its table's location); tables in other databases, catalogs or
+  accounts are not checked. `CREATE OR REPLACE` refuses `overwrite`. Files a scan skips
   (`_SUCCESS`, hidden files) are left. `overwrite` is not stored as a table parameter, and a `CREATE TABLE` without a
   query refuses it. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
