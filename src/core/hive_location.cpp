@@ -1,5 +1,7 @@
 #include "core/hive_location.hpp"
 
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 
@@ -19,6 +21,14 @@ string ComparableLocation(const string &location) {
 
 bool LocationsOverlap(const string &a, const string &b) {
 	return a == b || StringUtil::StartsWith(a, b + "/") || StringUtil::StartsWith(b, a + "/");
+}
+
+bool LocationHasGlob(const string &location) {
+	return FileSystem::HasGlob(location);
+}
+
+unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location) {
+	return fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
 }
 
 Path HivePartitionDirectory(const vector<string> &keys, const vector<string> &values) {

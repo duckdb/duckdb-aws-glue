@@ -6,12 +6,14 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "core/hive_location.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/logging/logger.hpp"
 
 namespace duckdb {
 
@@ -39,14 +41,13 @@ static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema
 //! the data files are deleted instead.
 static void ClearLocation(ClientContext &context, GlueSchemaEntry &schema, const GlueTableInfo &table_info,
                           const string &location, bool overwrite) {
-	// the location is listed with a glob, which would miss its own files and match those of other prefixes
-	if (location.find_first_of("*?[") != string::npos) {
+	if (LocationHasGlob(location)) {
 		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
 		                            "contains a glob character (*, ? or [)",
 		                            table_info.schema_name, table_info.name, location);
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto listing = fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
+	auto listing = ListLocation(fs, location);
 	vector<string> data_files;
 	for (auto &file : listing->Files()) {
 		if (!IsDataFile(file, location + "/")) {
@@ -76,40 +77,50 @@ static void ClearLocation(ClientContext &context, GlueSchemaEntry &schema, const
 }
 
 GlueHiveCopy::GlueHiveCopy(PhysicalPlan &physical_plan, vector<LogicalType> types, CopyFunction function,
-                           unique_ptr<FunctionData> bind_data, idx_t estimated_cardinality,
+                           unique_ptr<FunctionData> bind_data, idx_t estimated_cardinality, GlueCatalog &catalog_p,
                            optional_ptr<GlueSchemaEntry> schema_p, unique_ptr<BoundCreateTableInfo> info_p,
-                           GlueTableInfo table_info_p)
+                           GlueTableInfo table_info_p, string write_id_p, string location_p)
     : PhysicalCopyToFile(physical_plan, std::move(types), std::move(function), std::move(bind_data),
                          estimated_cardinality),
-      schema(schema_p), info(std::move(info_p)), table_info(std::move(table_info_p)) {
+      catalog(catalog_p), schema(schema_p), info(std::move(info_p)), table_info(std::move(table_info_p)),
+      write_id(std::move(write_id_p)), location(std::move(location_p)) {
 	D_ASSERT((schema != nullptr) == (info != nullptr));
 }
 
 unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &context) const {
-	if (info) {
-		// CREATE TABLE AS
-		annotated_lock_guard<annotated_mutex> guard(create_lock);
-		if (!table_created) {
-			auto location = table_info.location;
-			StringUtil::RTrim(location, "/");
+	annotated_lock_guard<annotated_mutex> guard(start_lock);
+	auto &transaction = GlueTransaction::Get(context, catalog);
+	// keyed on the transaction, not this operator: each execution of the plan registers its write
+	if (!transaction.FindHiveWrite(write_id)) {
+		GlueHiveWrite write;
+		write.write_id = write_id;
+		write.database_name = table_info.schema_name;
+		write.table_name = table_info.name;
+		write.location = location;
+		if (info) {
+			// CREATE TABLE AS
 			auto overwrite = GlueSchemaEntry::ParseCreateTableOptions(context, info->Base()).overwrite;
+			ClearLocation(context, *schema.get_mutable(), table_info, location, overwrite);
+			// the client to drop the table with is taken first: once the table exists, nothing may stop the undo
+			write.client = GlueAPI::GetClient(context, catalog);
 			auto &create_schema = *schema.get_mutable();
-			ClearLocation(context, create_schema, table_info, location, overwrite);
-			auto &catalog = create_schema.catalog;
 			auto created = create_schema.CreateTableFromInfo(catalog.GetCatalogTransaction(context), *info, table_info);
 			if (!created) {
 				throw CatalogException("Table with name \"%s\" appeared between planning and execution; retry CREATE "
 				                       "TABLE IF NOT EXISTS",
 				                       table_info.name);
 			}
-			// Record the table for cleanup only after we actually created it. CreateTableFromInfo returns
-			// non-null only when this statement created the table; it returns null when the table already
-			// existed (CREATE TABLE IF NOT EXISTS, or another client winning a create race), and we throw above
-			// before recording it. So a rollback only ever drops a table this statement itself created.
-			GlueAPI::RegisterTableCleanup(context, catalog.Cast<GlueCatalog>(), table_info.schema_name,
-			                              table_info.name);
-			table_created = true;
+			write.created_table = true;
+			try {
+				write.created_table_time =
+				    GlueAPI::GetTableCreateTime(write.client, catalog, table_info.schema_name, table_info.name);
+			} catch (std::exception &ex) {
+				// not known: the undo then drops the table if it holds no other writer's files
+				DUCKDB_LOG_WARNING(context, "Could not fetch the Glue table '%s.%s' just created: %s",
+				                   table_info.schema_name, table_info.name, ErrorData(ex).RawMessage());
+			}
 		}
+		transaction.AddHiveWrite(std::move(write));
 	}
 	return PhysicalCopyToFile::GetGlobalSinkState(context);
 }

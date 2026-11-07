@@ -1,0 +1,53 @@
+# name: test/sql/hive/dml/insert/insert_interrupted_undo.test_slow
+# description: a partitioned INSERT stopped by a timeout leaves no files behind, so a later INSERT into one of its partitions does not bring its rows back
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_interrupted;
+
+statement ok
+CREATE TABLE my_datalake.default.undo_interrupted PARTITIONED BY (k) AS SELECT -1::BIGINT AS id, -1 AS k;
+
+# one file per partition: far more than can be written before the timeout
+statement ok
+SET max_execution_time = 3000;
+
+statement error
+INSERT INTO my_datalake.default.undo_interrupted SELECT range, range::INT FROM range(20000);
+----
+<REGEX>:.*(Interrupt|maximum execution time).*
+
+statement ok
+RESET max_execution_time;
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_interrupted/**/*.parquet');
+----
+1
+
+# partition k=10 is registered now: it must hold only the new row, not the interrupted INSERT's
+statement ok
+INSERT INTO my_datalake.default.undo_interrupted VALUES (-2, 10), (-3, 20);
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.undo_interrupted;
+----
+3	-6
+
+statement ok
+DROP TABLE my_datalake.default.undo_interrupted;

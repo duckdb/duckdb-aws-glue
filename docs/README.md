@@ -207,9 +207,9 @@ their codec themselves.
   stay, empty), so the statement can be run again without adding its
   rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
-  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
-  (empty) table stays. It is refused when the location already holds data files, such as those of a dropped table,
-  which would read as rows of the new table. `WITH (overwrite = true)` deletes those files instead, in one
+  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing). It is refused when the
+  location already holds data files, such as those of a dropped table, which would read as rows of the new table.
+  `WITH (overwrite = true)` deletes those files instead, in one
   `RemoveFiles` call when the statement starts executing and before the table is created: they stay deleted if the
   statement then fails, and a failed delete may leave some of them (the table is then not created). It is refused
   when the location is, holds or lies inside the location of another table in the same Glue database; tables in
@@ -223,6 +223,17 @@ their codec themselves.
   be one Hive uses for its file format (`MapredParquetInputFormat`, `TextInputFormat` or `CombineTextInputFormat` for
   csv and json, `AvroContainerInputFormat`) or empty: another engine's InputFormat means a layout DuckDB does not
   know, and files written into it could corrupt the table.
+- The files of one `INSERT` or `CREATE TABLE ... AS` are named `<write id>_<file id>.<extension>`, with a new write
+  id (a UUIDv7) per statement. The write is registered with the Glue transaction when it starts and completed when
+  its partitions are registered; a write that is still registered when the transaction ends belongs to a statement
+  that failed, and the rollback deletes the files named after its write and, for `CREATE TABLE ... AS`, the Glue
+  table it created, so the statement can be run again. To find the files, the rollback lists every object below the
+  table's location, which takes one LIST request per 1,000 objects; it lists nothing, and deletes nothing, if the
+  location contains a glob character (`*`, `?`, `[`). A table `CREATE TABLE ... AS` created is kept if it holds files
+  of another writer, or if another client dropped and created it again while the statement ran. This is best effort:
+  a step that fails is logged as a warning (`CALL enable_logging(level := 'warning')` shows it). If the process
+  dies, nothing is cleaned up: the files stay, and the rows in them appear once their partition is registered, by a
+  later `INSERT`, `MSCK REPAIR` or a crawler. Other queries can read the files of an insert before it finishes.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.

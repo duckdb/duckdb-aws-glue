@@ -431,17 +431,48 @@ void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog
 	});
 }
 
+static Aws::Glue::Model::DeleteTableOutcome RequestDeleteTable(Aws::Glue::GlueClient &client, GlueCatalog &catalog,
+                                                               const string &database_name, const string &table_name) {
+	Aws::Glue::Model::DeleteTableRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetName(table_name);
+	return client.DeleteTable(request);
+}
+
+void GlueAPI::DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glue::GlueClient> &client,
+                          GlueCatalog &catalog, const string &database_name, const string &table_name) {
+	// no GlueHttpClientContextScope: the connection's HTTP parameters need its transaction, the database's do not
+	auto outcome = RequestDeleteTable(*client, catalog, database_name, table_name);
+	if (!outcome.IsSuccess() && !IsEntityNotFound(outcome)) {
+		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
+	}
+}
+
+optional_idx GlueAPI::GetTableCreateTime(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                                         const string &database_name, const string &table_name) {
+	Aws::Glue::Model::GetTableRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetName(table_name);
+	auto outcome = client->GetTable(request);
+	if (!outcome.IsSuccess()) {
+		if (IsEntityNotFound(outcome)) {
+			return optional_idx();
+		}
+		ThrowGlueError(outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
+	}
+	auto create_time_ms = ToTableInfo(outcome.GetResult().GetTable(), database_name).create_time_ms;
+	return optional_idx(create_time_ms > 0 ? static_cast<idx_t>(create_time_ms) : idx_t(0));
+}
+
 void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                           const string &table_name) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "DeleteTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::DeleteTableRequest request;
-	SetCatalogId(request, catalog);
-	request.SetDatabaseName(database_name);
-	request.SetName(table_name);
-	auto outcome = client->DeleteTable(request);
+	auto outcome = RequestDeleteTable(*client, catalog, database_name, table_name);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
 			throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
@@ -449,29 +480,6 @@ void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const st
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
 	}
-}
-
-void GlueAPI::DropCreatedTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, const string &catalog_id,
-                               const string &database_name, const string &table_name) {
-	Aws::Glue::Model::DeleteTableRequest request;
-	if (!catalog_id.empty()) {
-		request.SetCatalogId(catalog_id);
-	}
-	request.SetDatabaseName(database_name);
-	request.SetName(table_name);
-	auto outcome = client->DeleteTable(request);
-	if (!outcome.IsSuccess() && !IsEntityNotFound(outcome)) {
-		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
-	}
-}
-
-void GlueAPI::RegisterTableCleanup(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                   const string &table_name) {
-	// Capture the client now (while the transaction is active) and hand the table to the catalog's transaction;
-	// its Rollback() drops the table with this client, its Commit() keeps it.
-	auto client = GetClient(context, catalog);
-	GlueTransaction::Get(context, catalog)
-	    .AddCreatedTable(std::move(client), catalog.options.catalog_id, database_name, table_name);
 }
 
 } // namespace duckdb

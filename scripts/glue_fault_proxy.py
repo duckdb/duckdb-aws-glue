@@ -11,11 +11,15 @@ forwarded and overwrites the other client's change. A BatchCreatePartition on a 
 preceded by another client's registration of the same partitions at '<location>_by_another_client', so that each is
 refused with AlreadyExistsException while its files are not where Glue points. A CreatePartition on a
 fault_noncanonical_values* database registers each value with a leading '0', as another engine may spell an integer
-('01' for 1)."""
+('01' for 1). A BatchCreatePartition on a fault_slow_partitions* database is
+forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while partitions are registered; one on a
+fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
+with InternalServiceException, so the write that registers them fails with a table that is no longer its own."""
 
 import argparse
 import http.client
 import json
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -25,6 +29,11 @@ LISTING_FAULTS = {"fault_access_denied": "AccessDeniedException", "fault_invalid
 RACED_CREATE_PREFIX = "fault_already_exists"
 # UpdateTable on a database with this prefix races another client's update of the same table
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
+# BatchCreatePartition on a database with this prefix is forwarded after a delay
+SLOW_PARTITIONS_PREFIX = "fault_slow_partitions"
+SLOW_PARTITIONS_SECONDS = 4
+# BatchCreatePartition on a database with this prefix finds its table recreated by another client, and then fails
+RECREATED_PREFIX = "fault_recreated_during_write"
 # BatchCreatePartition on a database with this prefix races another client registering the partitions elsewhere
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
 # CreatePartition on a database with this prefix registers each value with a leading '0'
@@ -76,6 +85,14 @@ def is_raced_update(target, database):
     return target == "AWSGlue.UpdateTable" and database.startswith(RACED_UPDATE_PREFIX)
 
 
+def is_slow_partitions(target, database):
+    return target == "AWSGlue.BatchCreatePartition" and database.startswith(SLOW_PARTITIONS_PREFIX)
+
+
+def is_recreated_during_write(target, database):
+    return target == "AWSGlue.BatchCreatePartition" and database.startswith(RECREATED_PREFIX)
+
+
 def is_raced_partition_create(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(RACED_PARTITION_PREFIX)
 
@@ -117,6 +134,12 @@ class Handler(BaseHTTPRequestHandler):
         error = listing_error(target, database)
         if error:
             self.reply_error(error)
+            return
+        if is_slow_partitions(target, database):
+            time.sleep(SLOW_PARTITIONS_SECONDS)
+        if is_recreated_during_write(target, database):
+            self.recreate_as_other_client(database, request["TableName"])
+            self.reply_error("InternalServiceException")
             return
         if is_raced_update(target, database):
             current_version = self.update_as_other_client(database, request["TableInput"]["Name"])
@@ -169,6 +192,21 @@ class Handler(BaseHTTPRequestHandler):
         if status != 200:
             raise RuntimeError(f"UpdateTable {database}.{name} failed: {data!r}")
         return self.get_table(database, name)["VersionId"]
+
+    def recreate_as_other_client(self, database, name):
+        """Drop the table and create it again, as another client would: a table of the same name, created later."""
+        table = self.get_table(database, name)
+        table_input = {field: table[field] for field in TABLE_INPUT_FIELDS if field in table}
+        status, _, data = self.forward("AWSGlue.DeleteTable",
+                                       json.dumps({"DatabaseName": database, "Name": name}).encode())
+        if status != 200:
+            raise RuntimeError(f"DeleteTable {database}.{name} failed: {data!r}")
+        # a later CreateTime than the dropped table's, even where it is kept to the second
+        time.sleep(1.1)
+        status, _, data = self.forward("AWSGlue.CreateTable",
+                                       json.dumps({"DatabaseName": database, "TableInput": table_input}).encode())
+        if status != 200:
+            raise RuntimeError(f"CreateTable {database}.{name} failed: {data!r}")
 
     def reply_error(self, error):
         payload = json.dumps({"__type": error, "Message": "injected by glue_fault_proxy"}).encode()
