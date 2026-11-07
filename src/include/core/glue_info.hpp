@@ -10,6 +10,7 @@
 #include "duckdb/common/unordered_map.hpp"
 
 #include "core/glue_format.hpp"
+#include "core/hive_serde.hpp"
 #include "core/readers/hive_csv_options.hpp"
 #include "core/readers/hive_json_options.hpp"
 
@@ -56,9 +57,6 @@ bool IsTextFileFormat(HiveFileFormat format);
 //! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
 
-//! The SerDe of a Hive table, decided by its SerializationLibrary; SerDes of one file format can differ in how they
-//! read the data files and which engines write them
-enum class HiveSerDe : uint8_t { PARQUET, LAZY_SIMPLE, OPEN_CSV, HIVE_JSON, OPENX_JSON, AVRO };
 HiveFileFormat HiveSerDeFileFormat(HiveSerDe serde);
 
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
