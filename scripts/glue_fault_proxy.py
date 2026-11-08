@@ -11,7 +11,8 @@ forwarded and overwrites the other client's change. A BatchCreatePartition on a 
 preceded by another client's registration of the same partitions at '<location>_by_another_client', so that each is
 refused with AlreadyExistsException while its files are not where Glue points. A CreatePartition or
 BatchCreatePartition on a fault_noncanonical_values* database registers each value with a leading '0', as another
-engine may spell an integer ('01' for 1)."""
+engine may spell an integer ('01' for 1). A BatchDeletePartition on a fault_partition_dropped* database is preceded
+by another client's drop of the same partitions, so that Glue reports each as EntityNotFoundException."""
 
 import argparse
 import http.client
@@ -29,6 +30,8 @@ RACED_UPDATE_PREFIX = "fault_concurrent_update"
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
 # CreatePartition or BatchCreatePartition on a database with this prefix registers each value with a leading '0'
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
+# BatchDeletePartition on a database with this prefix races another client dropping the partitions
+RACED_DROP_PREFIX = "fault_partition_dropped"
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -80,6 +83,10 @@ def is_raced_partition_create(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(RACED_PARTITION_PREFIX)
 
 
+def is_raced_partition_drop(target, database):
+    return target == "AWSGlue.BatchDeletePartition" and database.startswith(RACED_DROP_PREFIX)
+
+
 def is_noncanonical_create(target, database):
     return target in ("AWSGlue.CreatePartition", "AWSGlue.BatchCreatePartition") and database.startswith(
         NONCANONICAL_PREFIX)
@@ -129,6 +136,10 @@ class Handler(BaseHTTPRequestHandler):
             status, _, data = self.forward(target, as_other_clients_partitions(request))
             if status != 200:
                 raise RuntimeError(f"BatchCreatePartition as another client failed: {data!r}")
+        if is_raced_partition_drop(target, database):
+            status, _, data = self.forward(target, body)
+            if status != 200:
+                raise RuntimeError(f"BatchDeletePartition as another client failed: {data!r}")
         if is_noncanonical_create(target, database):
             body = with_noncanonical_values(request)
         raced = is_raced_create(target, database)

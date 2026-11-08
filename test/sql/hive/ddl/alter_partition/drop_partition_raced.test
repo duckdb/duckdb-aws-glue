@@ -1,0 +1,72 @@
+# name: test/sql/hive/ddl/alter_partition/drop_partition_raced.test
+# description: when another client drops a partition between the check and the BatchDeletePartition, glue_drop_partition and ALTER TABLE DROP PARTITION fail, and with IF EXISTS they succeed and report that nothing was dropped
+# group: [alter_partition]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fault proxy drops the partitions of a BatchDeletePartition on a fault_partition_dropped* database first, as
+# another client that won the race would, so Glue answers each with EntityNotFoundException
+statement ok
+attach '{GLUE_CATALOG_ID}' as raced_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_partition_dropped CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_partition_dropped;
+
+statement ok
+CREATE TABLE my_datalake.fault_partition_dropped.t (id INTEGER, k INTEGER) PARTITIONED BY (k);
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+ALTER TABLE my_datalake.fault_partition_dropped.t ADD PARTITION (k = 1) PARTITION (k = 2) PARTITION (k = 3);
+
+statement error
+CALL glue_drop_partition('raced_dl.fault_partition_dropped.t', {k: 1});
+----
+<REGEX>:Catalog Error.*Partition \[1\] does not exist in Glue table 'fault_partition_dropped\.t': another client dropped it after it was checked.*
+
+statement error
+ALTER TABLE raced_dl.fault_partition_dropped.t DROP PARTITION (k = 2);
+----
+<REGEX>:Catalog Error.*Partition \[2\] does not exist in Glue table 'fault_partition_dropped\.t': another client dropped it after it was checked.*
+
+query I
+CALL glue_drop_partition('raced_dl.fault_partition_dropped.t', {k: 3}, if_exists := true);
+----
+false
+
+statement ok
+ALTER TABLE my_datalake.fault_partition_dropped.t ADD PARTITION (k = 4);
+
+statement ok
+ALTER TABLE raced_dl.fault_partition_dropped.t DROP IF EXISTS PARTITION (k = 4);
+
+# the other client dropped every partition
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.fault_partition_dropped.t');
+----
+0
+
+statement ok
+DROP SCHEMA my_datalake.fault_partition_dropped CASCADE;
