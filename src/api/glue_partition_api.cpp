@@ -51,16 +51,6 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 }
 
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                           const string &table_name, const vector<string> &values, GluePartitionInfo &result) {
-	GluePartitionDetails details;
-	if (!GetPartition(context, catalog, database_name, table_name, values, details)) {
-		return false;
-	}
-	result = std::move(static_cast<GluePartitionInfo &>(details));
-	return true;
-}
-
-bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                            const string &table_name, const vector<string> &values, GluePartitionDetails &result,
                            string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);

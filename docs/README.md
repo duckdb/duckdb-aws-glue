@@ -393,14 +393,17 @@ ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
 
 Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
-statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The checks fetch
-the partitions they look at with `BatchGetPartition`, and consecutive drops go out as `BatchDeletePartition` calls of
-up to 25 partitions, so adding partitions needs `glue:BatchGetPartition` and `glue:BatchCreatePartition`, and dropping
-them `glue:BatchGetPartition` and `glue:BatchDeletePartition`. The table name may be partially qualified; it is resolved
-like in a query. `glue_add_partition`, `glue_drop_partition`, `glue_rename_partition`, `glue_set_partition_location`
-and `glue_set_table_location` are `glue_alter_table` with their one action, so they check their arguments and call Glue
-as the SQL form does: a location must be an `s3://` or `s3a://` location, and a NULL `location` of
-`glue_add_partition` is the default one.
+statement that fails a check changes nothing. Consecutive adds go out as one `BatchCreatePartition` call and consecutive
+drops as `BatchDeletePartition` calls of up to 25 partitions. When another client registers or drops one of the
+partitions between the check and these calls, the statement fails there, and the actions before it stay applied. Adding
+or dropping the same partition twice in one statement is not an error. The checks fetch the partitions they look at with
+`BatchGetPartition`, so besides `glue:BatchCreatePartition` and `glue:BatchDeletePartition`, adding and dropping
+partitions need `glue:BatchGetPartition`, unless every add has `IF NOT EXISTS` and every drop `IF EXISTS`. Renaming a
+partition needs `glue:BatchGetPartition`, `glue:GetPartition` and `glue:UpdatePartition`. The table name may be
+partially qualified; it is resolved like in a query. `glue_add_partition`, `glue_drop_partition`,
+`glue_rename_partition`, `glue_set_partition_location` and `glue_set_table_location` are `glue_alter_table` with their
+one action, so they check their arguments and call Glue as the SQL form does. For example, a location must be an `s3://`
+or `s3a://` location, and a NULL `location` of `glue_add_partition` is the default one.
 
 `glue_partitions` lists every registered partition with a typed column per partition key, its `location` and
 `partition_values`, the strings Glue stores. A typed column is NULL for the NULL partition (Glue stores

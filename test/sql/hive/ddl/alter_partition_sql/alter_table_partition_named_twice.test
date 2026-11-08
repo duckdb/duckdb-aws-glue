@@ -1,0 +1,55 @@
+# name: test/sql/hive/ddl/alter_partition_sql/alter_table_partition_named_twice.test
+# description: an ALTER TABLE that adds or drops the same partition twice succeeds, also when the two actions go out in different Glue calls
+# group: [alter_partition_sql]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.named_twice;
+
+statement ok
+CREATE TABLE my_datalake.default.named_twice (id INTEGER, k INTEGER) PARTITIONED BY (k);
+
+# both adds go out in one BatchCreatePartition call
+statement ok
+ALTER TABLE my_datalake.default.named_twice ADD PARTITION (k = 1) PARTITION (k = 1);
+
+statement ok
+ALTER TABLE my_datalake.default.named_twice ADD PARTITION (k = 2) ADD IF NOT EXISTS PARTITION (k = 2);
+
+query I
+SELECT k FROM glue_partitions('my_datalake.default.named_twice') ORDER BY k;
+----
+1
+2
+
+# the second drop goes out in another BatchDeletePartition call, after the partition is gone
+statement ok
+ALTER TABLE my_datalake.default.named_twice DROP PARTITION (k = 1) ADD PARTITION (k = 3) DROP PARTITION (k = 1);
+
+# the second add goes out in another BatchCreatePartition call, after the partition is registered
+statement ok
+ALTER TABLE my_datalake.default.named_twice ADD IF NOT EXISTS PARTITION (k = 4) DROP PARTITION (k = 3) ADD PARTITION (k = 4);
+
+query I
+SELECT k FROM glue_partitions('my_datalake.default.named_twice') ORDER BY k;
+----
+2
+4
+
+statement ok
+DROP TABLE my_datalake.default.named_twice;

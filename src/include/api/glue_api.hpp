@@ -103,11 +103,8 @@ public:
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const GluePartitionDetails &partition,
 	                                 const string &location);
-	//! Fetch a single partition by its values, returns false if it does not exist
-	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result);
-	//! GetPartition with the partition's storage descriptor and parameters, and the Partition itself in
-	//! 'result.fetched'. 'raw_json' (optional) receives the Glue Partition object of the response as JSON.
+	//! Fetch a single partition by its values, returns false if it does not exist. 'result.fetched' holds the Partition
+	//! itself; 'raw_json' (optional) receives the Glue Partition object of the response as JSON.
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                         const string &table_name, const vector<string> &values, GluePartitionDetails &result,
 	                         string *raw_json = nullptr);

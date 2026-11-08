@@ -43,8 +43,10 @@ SELECT dt, country FROM glue_partitions('my_datalake.default.orders_drop') ORDER
 #---------------------------------------------------------------------------
 # ALTER TABLE orders DROP PARTITION (dt = '2014-05-14', country = 'IN');
 #---------------------------------------------------------------------------
-statement ok
+query I
 CALL glue_drop_partition('my_datalake.default.orders_drop', {dt: '2014-05-14', country: 'IN'});
+----
+true
 
 query II
 SELECT dt, country FROM glue_partitions('my_datalake.default.orders_drop') ORDER BY dt, country;
