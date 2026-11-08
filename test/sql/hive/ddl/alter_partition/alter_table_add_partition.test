@@ -126,6 +126,34 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.orders_add');
 ----
 4
 
+# a NULL flag is false
+statement error
+CALL glue_add_partition('my_datalake.default.orders_add', {dt: '2016-05-14', country: 'IN'}, if_not_exists := NULL);
+----
+already exists
+
+#---------------------------------------------------------------------------
+# the location is checked as for ALTER TABLE ADD PARTITION ... LOCATION
+#---------------------------------------------------------------------------
+statement error
+CALL glue_add_partition('my_datalake.default.orders_add', {dt: '2016-07-01', country: 'IN'}, location := '/tmp/orders');
+----
+<REGEX>:Binder Error.*glue_add_partition: the location must be an S3 location \(s3://...\), got '/tmp/orders'.*
+
+statement error
+CALL glue_add_partition('my_datalake.default.orders_add', {dt: '2016-07-01', country: 'IN'}, location := '/');
+----
+<REGEX>:Binder Error.*glue_add_partition: the location must not be empty.*
+
+# a NULL location is the default one, as without LOCATION
+query I
+CALL glue_add_partition('my_datalake.default.orders_add', {dt: '2016-07-01', country: 'IN'}, location := NULL);
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_add/dt=2016-07-01/country=IN
+
+statement ok
+CALL glue_drop_partition('my_datalake.default.orders_add', {dt: '2016-07-01', country: 'IN'});
+
 #---------------------------------------------------------------------------
 # the partition spec must name every partition key, and only partition keys
 #---------------------------------------------------------------------------

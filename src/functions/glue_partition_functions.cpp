@@ -177,21 +177,6 @@ string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<
 	return Path::FromString(location).Join(HivePartitionDirectory(keys, values)).ToString();
 }
 
-//! Bind data for the functions that change one partition and report one row when executed
-struct GluePartitionChangeBindData : public TableFunctionData {
-	GluePartitionTarget target;
-
-	//! The table is rewritten from the definition bind fetched: a prepared statement binds again on every execution
-	bool SupportStatementCache() const override {
-		return false;
-	}
-	vector<string> values;
-	vector<string> new_values;
-	string location;
-	bool if_not_exists = false;
-	bool if_exists = false;
-};
-
 struct GluePartitionChangeState : public GlobalTableFunctionState {
 	bool done = false;
 };
@@ -209,16 +194,6 @@ GluePartitionDetails FetchPartition(ClientContext &context, const GluePartitionT
 		                       target.TableName());
 	}
 	return result;
-}
-
-//! Throws a CatalogException if a partition with the given values exists
-void ThrowIfPartitionExists(ClientContext &context, const GluePartitionTarget &target, const vector<string> &values) {
-	GluePartitionInfo existing;
-	if (GlueAPI::GetPartition(context, *target.catalog, target.table.schema_name, target.table.name, values,
-	                          existing)) {
-		throw CatalogException("Partition [%s] already exists in Glue table '%s'", StringUtil::Join(values, ", "),
-		                       target.TableName());
-	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -293,191 +268,6 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 		raw_column.Append(Value::LIST(ListType::GetChildType(raw_column.GetType()), std::move(raw_values)));
 		count++;
 	}
-}
-
-//===--------------------------------------------------------------------===//
-// glue_add_partition
-//===--------------------------------------------------------------------===//
-unique_ptr<FunctionData> GlueAddPartitionBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_add_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_add_partition");
-	result->values = ParsePartitionSpec("glue_add_partition", result->target, input.inputs[1]);
-	for (auto &option : input.named_parameters) {
-		auto name = StringUtil::Lower(option.first.GetIdentifierName());
-		if (name == "location") {
-			result->location = option.second.GetValue<string>();
-			StringUtil::RTrim(result->location, "/");
-			if (result->location.empty()) {
-				throw BinderException("glue_add_partition: 'location' must not be empty");
-			}
-		} else if (name == "if_not_exists") {
-			result->if_not_exists = option.second.GetValue<bool>();
-		}
-	}
-	if (result->location.empty()) {
-		result->location = DefaultPartitionLocation(result->target, result->values);
-	}
-	names = {"location"};
-	return_types = {LogicalType::VARCHAR};
-	return std::move(result);
-}
-
-void GlueAddPartitionScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<GluePartitionChangeState>();
-	if (state.done) {
-		return;
-	}
-	state.done = true;
-	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
-	auto &table = bind_data.target.table;
-	GluePartitionInput partition;
-	partition.values = bind_data.values;
-	partition.location = bind_data.location;
-	GlueAPI::CreatePartition(context, *bind_data.target.catalog, table, partition, bind_data.if_not_exists);
-	output.data[0].Append(Value(bind_data.location));
-	output.CheckCardinality(1);
-}
-
-//===--------------------------------------------------------------------===//
-// glue_drop_partition
-//===--------------------------------------------------------------------===//
-unique_ptr<FunctionData> GlueDropPartitionBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_drop_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_drop_partition");
-	result->values = ParsePartitionSpec("glue_drop_partition", result->target, input.inputs[1]);
-	for (auto &option : input.named_parameters) {
-		auto name = StringUtil::Lower(option.first.GetIdentifierName());
-		if (name == "if_exists") {
-			result->if_exists = option.second.GetValue<bool>();
-		}
-	}
-	names = {"dropped"};
-	return_types = {LogicalType::BOOLEAN};
-	return std::move(result);
-}
-
-void GlueDropPartitionScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<GluePartitionChangeState>();
-	if (state.done) {
-		return;
-	}
-	state.done = true;
-	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
-	auto &table = bind_data.target.table;
-	auto dropped =
-	    GlueAPI::DeletePartition(context, *bind_data.target.catalog, table.schema_name, table.name, bind_data.values);
-	if (!dropped && !bind_data.if_exists) {
-		throw CatalogException("Partition [%s] does not exist in Glue table '%s'",
-		                       StringUtil::Join(bind_data.values, ", "), bind_data.target.TableName());
-	}
-	output.data[0].Append(Value::BOOLEAN(dropped));
-	output.CheckCardinality(1);
-}
-
-//===--------------------------------------------------------------------===//
-// glue_rename_partition
-//===--------------------------------------------------------------------===//
-unique_ptr<FunctionData> GlueRenamePartitionBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_rename_partition", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_rename_partition");
-	result->values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[1]);
-	result->new_values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[2]);
-	names = {"location"};
-	return_types = {LogicalType::VARCHAR};
-	return std::move(result);
-}
-
-void GlueRenamePartitionScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<GluePartitionChangeState>();
-	if (state.done) {
-		return;
-	}
-	state.done = true;
-	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
-	auto &table = bind_data.target.table;
-	auto &catalog = *bind_data.target.catalog;
-	auto partition = FetchPartition(context, bind_data.target, bind_data.values);
-	ThrowIfPartitionExists(context, bind_data.target, bind_data.new_values);
-	auto location =
-	    GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name, partition, bind_data.new_values);
-	output.data[0].Append(Value(location));
-	output.CheckCardinality(1);
-}
-
-//===--------------------------------------------------------------------===//
-// glue_set_partition_location / glue_set_table_location
-//===--------------------------------------------------------------------===//
-string ParseLocation(const string &function_name, const Value &location) {
-	if (location.IsNull()) {
-		throw BinderException("%s: the location must not be NULL", function_name);
-	}
-	auto result = location.GetValue<string>();
-	StringUtil::RTrim(result, "/");
-	if (result.empty()) {
-		throw BinderException("%s: the location must not be empty", function_name);
-	}
-	if (!StringUtil::StartsWith(StringUtil::Lower(result), "s3://") &&
-	    !StringUtil::StartsWith(StringUtil::Lower(result), "s3a://")) {
-		throw BinderException("%s: the location must be an S3 location (s3://...), got '%s'", function_name, result);
-	}
-	return result;
-}
-
-unique_ptr<FunctionData> GlueSetPartitionLocationBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_set_partition_location", input.inputs[0]);
-	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_set_partition_location");
-	result->values = ParsePartitionSpec("glue_set_partition_location", result->target, input.inputs[1]);
-	result->location = ParseLocation("glue_set_partition_location", input.inputs[2]);
-	names = {"location"};
-	return_types = {LogicalType::VARCHAR};
-	return std::move(result);
-}
-
-void GlueSetPartitionLocationScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<GluePartitionChangeState>();
-	if (state.done) {
-		return;
-	}
-	state.done = true;
-	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
-	auto &table = bind_data.target.table;
-	auto partition = FetchPartition(context, bind_data.target, bind_data.values);
-	GlueAPI::SetPartitionLocation(context, *bind_data.target.catalog, table.schema_name, table.name, partition,
-	                              bind_data.location);
-	output.data[0].Append(Value(bind_data.location));
-	output.CheckCardinality(1);
-}
-
-unique_ptr<FunctionData> GlueSetTableLocationBind(ClientContext &context, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_set_table_location", input.inputs[0], false);
-	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_set_table_location");
-	result->location = ParseLocation("glue_set_table_location", input.inputs[1]);
-	names = {"location"};
-	return_types = {LogicalType::VARCHAR};
-	return std::move(result);
-}
-
-void GlueSetTableLocationScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<GluePartitionChangeState>();
-	if (state.done) {
-		return;
-	}
-	state.done = true;
-	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
-	auto &table = bind_data.target.table;
-	GlueAPI::SetTableLocation(context, *bind_data.target.catalog, table, bind_data.location);
-	output.data[0].Append(Value(bind_data.location));
-	output.CheckCardinality(1);
 }
 
 //===--------------------------------------------------------------------===//
@@ -670,6 +460,8 @@ struct GlueAlterStep {
 struct GlueAlterTableBindData : public TableFunctionData {
 	GluePartitionTarget target;
 	vector<GlueAlterStep> steps;
+	//! glue_add_partition, glue_drop_partition, ...: report the value of their one action instead of a row per action
+	bool single_action = false;
 
 	//! The table is rewritten from the definition bind fetched: a prepared statement binds again on every execution
 	bool SupportStatementCache() const override {
@@ -678,8 +470,7 @@ struct GlueAlterTableBindData : public TableFunctionData {
 };
 
 //! glue_alter_table reports one row per action and an ALTER TABLE may carry more actions than a DataChunk
-//! holds, so the rows are collected once when the actions are applied and then paged out. Its own state
-//! rather than GluePartitionChangeState, which the single-row functions share and which needs no offset.
+//! holds, so the rows are collected once when the actions are applied and then paged out.
 struct GlueAlterTableState : public GlobalTableFunctionState {
 	struct EmittedRow {
 		Value action;
@@ -687,6 +478,8 @@ struct GlueAlterTableState : public GlobalTableFunctionState {
 		Value location;
 	};
 	vector<EmittedRow> rows;
+	//! per action, the value a single-action function reports
+	vector<Value> results;
 	idx_t offset = 0;
 	//! the Glue calls happen on the first scan only; the later ones just hand out the remaining rows
 	bool applied = false;
@@ -694,6 +487,26 @@ struct GlueAlterTableState : public GlobalTableFunctionState {
 
 unique_ptr<GlobalTableFunctionState> GlueAlterTableInit(ClientContext &context, TableFunctionInitInput &input) {
 	return make_uniq<GlueAlterTableState>();
+}
+
+string ParseLocation(const string &function_name, const Value &location) {
+	if (location.IsNull()) {
+		throw BinderException("%s: the location must not be NULL", function_name);
+	}
+	auto result = location.GetValue<string>();
+	StringUtil::RTrim(result, "/");
+	if (result.empty()) {
+		throw BinderException("%s: the location must not be empty", function_name);
+	}
+	if (!StringUtil::StartsWith(StringUtil::Lower(result), "s3://") &&
+	    !StringUtil::StartsWith(StringUtil::Lower(result), "s3a://")) {
+		throw BinderException("%s: the location must be an S3 location (s3://...), got '%s'", function_name, result);
+	}
+	return result;
+}
+
+bool OptionalFlag(const Value &value) {
+	return !value.IsNull() && value.GetValue<bool>();
 }
 
 //! A struct field by name (case-insensitive), NULL if the struct has no such field
@@ -761,8 +574,8 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		auto partition = GetStructField(action, "partition");
 		auto new_partition = GetStructField(action, "new_partition");
 		auto location = GetStructField(action, "location");
-		step.if_not_exists = !if_not_exists.IsNull() && if_not_exists.GetValue<bool>();
-		step.if_exists = !if_exists.IsNull() && if_exists.GetValue<bool>();
+		step.if_not_exists = OptionalFlag(if_not_exists);
+		step.if_exists = OptionalFlag(if_exists);
 		if (name == "add") {
 			step.action = GlueAlterAction::ADD;
 			step.values = ParsePartitionPairsValue("ALTER TABLE ADD PARTITION", result->target, partition);
@@ -816,6 +629,7 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 	auto &catalog = *bind_data.target.catalog;
 	auto &table = bind_data.target.table;
 	auto table_name = bind_data.target.TableName();
+	state.results.resize(bind_data.steps.size());
 
 	// Glue has no transactions: check everything that can fail against the catalog first, so that a statement
 	// which fails half way registers or removes nothing. Which partitions exist is fetched together, each partition
@@ -889,23 +703,59 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 	};
 	bool table_updated = false;
 	GlueTableInfo refetched_table;
+	// the partitions this statement registered or removed so far: adding or dropping one of them again is no race
+	set<vector<string>> added;
+	set<vector<string>> dropped;
 	vector<GluePartitionInput> pending_adds;
+	set<vector<string>> pending_add_set;
+	set<vector<string>> must_create;
 	auto flush_adds = [&]() {
 		if (pending_adds.empty()) {
 			return;
 		}
-		GlueAPI::BatchCreatePartitions(context, catalog, table, pending_adds);
+		for (auto &refused : GlueAPI::BatchCreatePartitions(context, catalog, table, pending_adds)) {
+			if (must_create.find(refused.values) != must_create.end() && added.find(refused.values) == added.end()) {
+				throw CatalogException("Partition [%s] already exists in Glue table '%s': another client registered it "
+				                       "after it was checked",
+				                       StringUtil::Join(refused.values, ", "), table_name);
+			}
+		}
+		for (auto &partition : pending_adds) {
+			dropped.erase(partition.values);
+			added.insert(partition.values);
+		}
 		pending_adds.clear();
+		pending_add_set.clear();
+		must_create.clear();
 	};
 	vector<vector<string>> pending_drops;
 	set<vector<string>> pending_drop_set;
+	set<vector<string>> must_drop;
+	vector<idx_t> pending_drop_steps;
 	auto flush_drops = [&]() {
 		if (pending_drops.empty()) {
 			return;
 		}
-		GlueAPI::BatchDeletePartitions(context, catalog, table.schema_name, table.name, pending_drops);
+		auto missing = GlueAPI::BatchDeletePartitions(context, catalog, table.schema_name, table.name, pending_drops);
+		for (auto &values : missing) {
+			if (must_drop.find(values) != must_drop.end() && dropped.find(values) == dropped.end()) {
+				throw CatalogException("Partition [%s] does not exist in Glue table '%s': another client dropped it "
+				                       "after it was checked",
+				                       StringUtil::Join(values, ", "), table_name);
+			}
+		}
+		for (auto index : pending_drop_steps) {
+			auto &values = bind_data.steps[index].values;
+			state.results[index] = Value::BOOLEAN(missing.find(values) == missing.end());
+		}
+		for (auto &values : pending_drops) {
+			added.erase(values);
+			dropped.insert(values);
+		}
 		pending_drops.clear();
 		pending_drop_set.clear();
+		must_drop.clear();
+		pending_drop_steps.clear();
 	};
 	for (idx_t i = 0; i < bind_data.steps.size(); i++) {
 		auto &step = bind_data.steps[i];
@@ -917,10 +767,16 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		}
 		switch (step.action) {
 		case GlueAlterAction::ADD: {
-			GluePartitionInput partition;
-			partition.values = step.values;
-			partition.location = step.location;
-			pending_adds.push_back(std::move(partition));
+			// a partition named twice is registered once, at the location of the first
+			if (pending_add_set.insert(step.values).second) {
+				GluePartitionInput partition;
+				partition.values = step.values;
+				partition.location = step.location;
+				pending_adds.push_back(std::move(partition));
+			}
+			if (!step.if_not_exists) {
+				must_create.insert(step.values);
+			}
 			break;
 		}
 		case GlueAlterAction::DROP:
@@ -928,9 +784,14 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			if (pending_drop_set.insert(step.values).second) {
 				pending_drops.push_back(step.values);
 			}
+			if (!step.if_exists) {
+				must_drop.insert(step.values);
+			}
+			pending_drop_steps.push_back(i);
 			break;
 		case GlueAlterAction::RENAME:
-			GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name, *checked[i], step.new_values);
+			state.results[i] = Value(GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name,
+			                                                  *checked[i], step.new_values));
 			break;
 		case GlueAlterAction::SET_PARTITION_LOCATION: {
 			// with if_exists no check ran, so the partition is fetched here
@@ -949,6 +810,9 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			table_updated = true;
 			break;
 		}
+		if (step.action != GlueAlterAction::RENAME && step.action != GlueAlterAction::DROP) {
+			state.results[i] = Value(step.location);
+		}
 		emit(step);
 	}
 	flush_adds();
@@ -956,10 +820,19 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 }
 
 void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &bind_data = data.bind_data->Cast<GlueAlterTableBindData>();
 	auto &state = data.global_state->Cast<GlueAlterTableState>();
 	if (!state.applied) {
 		state.applied = true;
 		GlueAlterTableApply(context, data, state);
+	}
+	if (bind_data.single_action) {
+		if (state.offset == 0) {
+			state.offset++;
+			output.data[0].Append(state.results[0]);
+			output.CheckCardinality(1);
+		}
+		return;
 	}
 	// one row per action, so there can be more rows than a chunk holds: page them out
 	idx_t count = 0;
@@ -970,6 +843,92 @@ void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataCh
 		output.data[2].Append(row.location);
 		count++;
 	}
+}
+
+//===--------------------------------------------------------------------===//
+// glue_add_partition, glue_drop_partition, glue_rename_partition, glue_set_partition_location,
+// glue_set_table_location: glue_alter_table with one action
+//===--------------------------------------------------------------------===//
+unique_ptr<GlueAlterTableBindData> BindSingleAction(ClientContext &context, const string &function_name,
+                                                    const Value &table_name, GlueAlterAction action) {
+	auto result = make_uniq<GlueAlterTableBindData>();
+	result->target =
+	    ResolveGlueTable(context, function_name, table_name, action != GlueAlterAction::SET_TABLE_LOCATION);
+	GlueCatalog::ThrowIfInExplicitTransaction(context, function_name.c_str());
+	result->single_action = true;
+	GlueAlterStep step;
+	step.action = action;
+	result->steps.push_back(std::move(step));
+	return result;
+}
+
+unique_ptr<FunctionData> GlueAddPartitionBind(ClientContext &context, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = BindSingleAction(context, "glue_add_partition", input.inputs[0], GlueAlterAction::ADD);
+	auto &step = result->steps[0];
+	step.values = ParsePartitionSpec("glue_add_partition", result->target, input.inputs[1]);
+	for (auto &option : input.named_parameters) {
+		auto &name = option.first.GetIdentifierName();
+		if (StringUtil::CIEquals(name, "location") && !option.second.IsNull()) {
+			step.location = ParseLocation("glue_add_partition", option.second);
+		} else if (StringUtil::CIEquals(name, "if_not_exists")) {
+			step.if_not_exists = OptionalFlag(option.second);
+		}
+	}
+	if (step.location.empty()) {
+		step.location = DefaultPartitionLocation(result->target, step.values);
+	}
+	names = {"location"};
+	return_types = {LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+unique_ptr<FunctionData> GlueDropPartitionBind(ClientContext &context, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = BindSingleAction(context, "glue_drop_partition", input.inputs[0], GlueAlterAction::DROP);
+	auto &step = result->steps[0];
+	step.values = ParsePartitionSpec("glue_drop_partition", result->target, input.inputs[1]);
+	for (auto &option : input.named_parameters) {
+		if (StringUtil::CIEquals(option.first.GetIdentifierName(), "if_exists")) {
+			step.if_exists = OptionalFlag(option.second);
+		}
+	}
+	names = {"dropped"};
+	return_types = {LogicalType::BOOLEAN};
+	return std::move(result);
+}
+
+unique_ptr<FunctionData> GlueRenamePartitionBind(ClientContext &context, TableFunctionBindInput &input,
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = BindSingleAction(context, "glue_rename_partition", input.inputs[0], GlueAlterAction::RENAME);
+	auto &step = result->steps[0];
+	step.values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[1]);
+	step.new_values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[2]);
+	names = {"location"};
+	return_types = {LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+unique_ptr<FunctionData> GlueSetPartitionLocationBind(ClientContext &context, TableFunctionBindInput &input,
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = BindSingleAction(context, "glue_set_partition_location", input.inputs[0],
+	                               GlueAlterAction::SET_PARTITION_LOCATION);
+	auto &step = result->steps[0];
+	step.values = ParsePartitionSpec("glue_set_partition_location", result->target, input.inputs[1]);
+	step.location = ParseLocation("glue_set_partition_location", input.inputs[2]);
+	names = {"location"};
+	return_types = {LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+unique_ptr<FunctionData> GlueSetTableLocationBind(ClientContext &context, TableFunctionBindInput &input,
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result =
+	    BindSingleAction(context, "glue_set_table_location", input.inputs[0], GlueAlterAction::SET_TABLE_LOCATION);
+	result->steps[0].location = ParseLocation("glue_set_table_location", input.inputs[1]);
+	names = {"location"};
+	return_types = {LogicalType::VARCHAR};
+	return std::move(result);
 }
 
 //===--------------------------------------------------------------------===//
@@ -1053,8 +1012,8 @@ TableFunction GetGluePartitionsFunction() {
 }
 
 TableFunction GetGlueAddPartitionFunction() {
-	TableFunction function("glue_add_partition", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAddPartitionScan,
-	                       GlueAddPartitionBind, GluePartitionChangeInit);
+	TableFunction function("glue_add_partition", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAlterTableScan,
+	                       GlueAddPartitionBind, GlueAlterTableInit);
 	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
 		options.Add("location", LogicalType::VARCHAR);
 		options.Add("if_not_exists", LogicalType::BOOLEAN);
@@ -1063,8 +1022,8 @@ TableFunction GetGlueAddPartitionFunction() {
 }
 
 TableFunction GetGlueDropPartitionFunction() {
-	TableFunction function("glue_drop_partition", {LogicalType::VARCHAR, LogicalType::ANY}, GlueDropPartitionScan,
-	                       GlueDropPartitionBind, GluePartitionChangeInit);
+	TableFunction function("glue_drop_partition", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAlterTableScan,
+	                       GlueDropPartitionBind, GlueAlterTableInit);
 	function.GetSignature().WithTypedKwargs(
 	    "options", [](TypedKwargs &options) { options.Add("if_exists", LogicalType::BOOLEAN); });
 	return function;
@@ -1072,20 +1031,20 @@ TableFunction GetGlueDropPartitionFunction() {
 
 TableFunction GetGlueRenamePartitionFunction() {
 	TableFunction function("glue_rename_partition", {LogicalType::VARCHAR, LogicalType::ANY, LogicalType::ANY},
-	                       GlueRenamePartitionScan, GlueRenamePartitionBind, GluePartitionChangeInit);
+	                       GlueAlterTableScan, GlueRenamePartitionBind, GlueAlterTableInit);
 	return function;
 }
 
 TableFunction GetGlueSetPartitionLocationFunction() {
 	TableFunction function("glue_set_partition_location",
-	                       {LogicalType::VARCHAR, LogicalType::ANY, LogicalType::VARCHAR}, GlueSetPartitionLocationScan,
-	                       GlueSetPartitionLocationBind, GluePartitionChangeInit);
+	                       {LogicalType::VARCHAR, LogicalType::ANY, LogicalType::VARCHAR}, GlueAlterTableScan,
+	                       GlueSetPartitionLocationBind, GlueAlterTableInit);
 	return function;
 }
 
 TableFunction GetGlueSetTableLocationFunction() {
-	TableFunction function("glue_set_table_location", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                       GlueSetTableLocationScan, GlueSetTableLocationBind, GluePartitionChangeInit);
+	TableFunction function("glue_set_table_location", {LogicalType::VARCHAR, LogicalType::VARCHAR}, GlueAlterTableScan,
+	                       GlueSetTableLocationBind, GlueAlterTableInit);
 	return function;
 }
 

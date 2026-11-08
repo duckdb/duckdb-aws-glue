@@ -16,7 +16,6 @@
 #include <aws/glue/model/BatchDeletePartitionRequest.h>
 #include <aws/glue/model/BatchGetPartitionRequest.h>
 #include <aws/glue/model/CreatePartitionRequest.h>
-#include <aws/glue/model/DeletePartitionRequest.h>
 #include <aws/glue/model/GetPartitionRequest.h>
 #include <aws/glue/model/GetPartitionsRequest.h>
 #include <aws/glue/model/Segment.h>
@@ -49,16 +48,6 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 		ThrowGlueError(outcome, StringUtil::Format("UpdatePartition '%s.%s' [%s]", database_name, table_name,
 		                                           PartitionValuesToString(partition.values)));
 	}
-}
-
-bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                           const string &table_name, const vector<string> &values, GluePartitionInfo &result) {
-	GluePartitionDetails details;
-	if (!GetPartition(context, catalog, database_name, table_name, values, details)) {
-		return false;
-	}
-	result = std::move(static_cast<GluePartitionInfo &>(details));
-	return true;
 }
 
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -130,28 +119,6 @@ bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, cons
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreatePartition '%s.%s' [%s]", database_name, table_name,
 		                                           PartitionValuesToString(partition.values)));
-	}
-	return true;
-}
-
-bool GlueAPI::DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                              const string &table_name, const vector<string> &values) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
-	CheckWritable(catalog, "DeletePartition");
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::DeletePartitionRequest request;
-	SetCatalogId(request, catalog);
-	request.SetDatabaseName(database_name);
-	request.SetTableName(table_name);
-	request.SetPartitionValues(ToAwsValues(values));
-	auto outcome = client->DeletePartition(request);
-	if (!outcome.IsSuccess()) {
-		if (IsEntityNotFound(outcome)) {
-			return false;
-		}
-		ThrowGlueError(outcome, StringUtil::Format("DeletePartition '%s.%s' [%s]", database_name, table_name,
-		                                           PartitionValuesToString(values)));
 	}
 	return true;
 }
@@ -236,12 +203,14 @@ set<vector<string>> GlueAPI::ExistingPartitions(ClientContext &context, GlueCata
 	return existing;
 }
 
-void GlueAPI::BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                    const string &table_name, const vector<vector<string>> &partitions) {
+set<vector<string>> GlueAPI::BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog,
+                                                   const string &database_name, const string &table_name,
+                                                   const vector<vector<string>> &partitions) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "BatchDeletePartition");
+	set<vector<string>> not_found;
 	if (partitions.empty()) {
-		return;
+		return not_found;
 	}
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -272,6 +241,7 @@ void GlueAPI::BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog
 				auto values = ToStdValues(error.GetPartitionValues());
 				auto code = ToStdString(error.GetErrorDetail().GetErrorCode());
 				if (code == "EntityNotFoundException") {
+					not_found.insert(std::move(values));
 					continue;
 				}
 				if (!IsTransientPartitionError(code) || attempt + 1 == MAX_ATTEMPTS) {
@@ -283,6 +253,7 @@ void GlueAPI::BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog
 			}
 		}
 	}
+	return not_found;
 }
 
 string GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,

@@ -104,7 +104,7 @@ SELECT count(*) FROM (DESCRIBE rw_datalake.default.ro_orders);
 statement error
 CALL glue_add_partition('ro_datalake.default.ro_parts', {dt: 'injected'});
 ----
-Cannot execute Glue CreatePartition on database "ro_datalake" which is attached in read-only mode!
+Cannot execute Glue BatchCreatePartition on database "ro_datalake" which is attached in read-only mode!
 
 statement error
 CALL glue_set_table_location('ro_datalake.default.ro_parts', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hijacked');
@@ -132,7 +132,7 @@ Cannot execute Glue BatchCreatePartition on database "ro_datalake" which is atta
 statement error
 CALL glue_drop_partition('ro_datalake.default.ro_parts', {dt: 'keep'});
 ----
-Cannot execute Glue DeletePartition on database "ro_datalake" which is attached in read-only mode!
+Cannot execute Glue BatchDeletePartition on database "ro_datalake" which is attached in read-only mode!
 
 statement error
 CALL glue_repair_table('ro_datalake.default.ro_parts');
