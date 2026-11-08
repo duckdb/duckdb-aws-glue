@@ -23,8 +23,10 @@ struct HiveScanInfo : public TableFunctionInfo {
 	string database_name;
 	string table_name;
 	//! The Glue catalog table this scan reads, or null when the scan is a hive_scan over a location: reported
-	//! through the scan's get_table_entry
+	//! through the scan's get_table_entry. Only valid while the statement that bound it runs
 	optional_ptr<TableCatalogEntry> table;
+	//! Its definition as bound, for the checks of each partition while the scan runs
+	shared_ptr<const GlueTableInfo> table_definition;
 	//! The table location: the data files of an unpartitioned table live directly below it, and it is the parent of
 	//! the <key>=<value> directories of partitions without an explicit location
 	string root_location;

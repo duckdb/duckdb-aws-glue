@@ -248,6 +248,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->database_name = table_info.schema_name;
 	scan_info->table_name = table_info.name;
 	scan_info->table = this;
+	scan_info->table_definition = make_shared_ptr<const GlueTableInfo>(table_info);
 	scan_info->root_location = table_info.location;
 	scan_info->file_format = table_info.GetFileFormat();
 	if (IsTextFileFormat(scan_info->file_format)) {
