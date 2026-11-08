@@ -63,8 +63,9 @@ TEST_CASE("An idle transaction does not keep the catalog entries other connectio
 	REQUIRE(scan);
 	auto scanned = scan->GetTable();
 	REQUIRE(scanned);
+	auto retired = manager.RetiredEntryCount();
 	Run(con, "ALTER TABLE " + table + " ADD COLUMN c5 INTEGER");
-	REQUIRE(manager.RetiredEntryCount() >= 1);
+	REQUIRE(manager.RetiredEntryCount() > retired);
 	// read through the entry the ALTER retired: freed memory here is what the pin prevents
 	REQUIRE(scanned->name.GetIdentifierName() == name);
 	Run(idle, "COMMIT");

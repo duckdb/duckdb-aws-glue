@@ -633,8 +633,7 @@ void GlueReplaceColumnsScan(ClientContext &context, TableFunctionInput &data, Da
 	auto &bind_data = data.bind_data->Cast<GlueReplaceColumnsBindData>();
 	auto &catalog = *bind_data.target.catalog;
 	auto &table = bind_data.target.table;
-	// keeps the refreshed entry alive while its columns are read below
-	Transaction::Get(context, catalog);
+	GlueTransaction::PinForLookup(context, catalog);
 	GlueAPI::UpdateTableColumns(context, catalog, table, bind_data.columns);
 	auto schema = catalog.GetSchemas().GetEntry(context, table.schema_name);
 	if (!schema) {

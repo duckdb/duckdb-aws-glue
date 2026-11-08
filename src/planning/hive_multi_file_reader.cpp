@@ -150,10 +150,10 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 }
 
 ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
-	if (!table_definition) {
+	if (!this->table) {
 		return ErrorData();
 	}
-	auto &table = *table_definition;
+	auto &table = this->table->Cast<GlueTable>().table_info;
 	auto &input_format = partition.input_format.empty() ? table.input_format : partition.input_format;
 	auto &serde_library = partition.serde_library.empty() ? table.serde_library : partition.serde_library;
 	if (StringUtil::CIEquals(input_format, table.input_format) &&
@@ -215,10 +215,10 @@ void HiveScanInfo::VerifyConsistentPartitionSerDe(const GluePartitionInfo &parti
 
 void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
                                          const vector<idx_t> &column_indexes) const {
-	if (partition.partition_columns.empty() || !table_definition) {
+	if (partition.partition_columns.empty() || !this->table) {
 		return;
 	}
-	auto &table_columns = table_definition->columns;
+	auto &table_columns = this->table->Cast<GlueTable>().table_info.columns;
 	for (auto column_index : column_indexes) {
 		auto &name = names[column_index].GetIdentifierName();
 		optional_ptr<const GlueColumn> partition_column;
@@ -946,7 +946,6 @@ static void RestoreScanTable(ClientContext &context, HiveScanInfo &info, const s
 	info.database_name = database_name;
 	info.table_name = table_name;
 	info.table = &table;
-	info.table_definition = make_shared_ptr<const GlueTableInfo>(table.table_info);
 }
 
 //! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those

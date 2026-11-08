@@ -2,11 +2,24 @@
 
 #include "duckdb/transaction/transaction_manager.hpp"
 #include "duckdb/common/reference_map.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "catalog/glue_transaction.hpp"
 
 namespace duckdb {
 class GlueCatalog;
+
+//! Counts the queries of a connection that ended: QueryEnd runs once a query's tasks are cancelled and its transaction
+//! committed, also when the connection is closed during the query
+class GlueQueryEnds : public ClientContextState {
+public:
+	void QueryEnd(ClientContext &context) override {
+		ended++;
+	}
+
+	atomic<idx_t> ended {0};
+};
 
 class GlueTransactionManager : public TransactionManager {
 public:
@@ -18,30 +31,27 @@ public:
 
 	void Checkpoint(ClientContext &context, bool force = false) override;
 
-	//! Keep a catalog entry that was replaced or removed alive until every statement that may still use it has ended:
-	//! a running statement refers to the entries it bound. A later statement of the same transaction looks the entry up
-	//! again, and finds its replacement
+	//! Keep a replaced or removed entry alive until no query that may use it is running
 	void RetireEntry(unique_ptr<CatalogEntry> entry);
-	//! The transaction is about to hand out catalog entries: keep alive those retired from now on until the statement
-	//! that asks has ended, or, when no statement is running (a client API call that binds), until the transaction ends
-	void PinEntries(Transaction &transaction);
-	//! The entries retired and not freed yet, for the tests
+	//! Keep the entries retired from now on alive until the connection's query ends (or the transaction, outside one)
+	void PinEntries(ClientContext &context, Transaction &transaction);
+	//! For the tests
 	idx_t RetiredEntryCount();
 
 private:
 	struct Pin {
-		//! The entries retired after the pin was taken have a higher sequence number
+		//! Entries retired after the pin have a higher sequence number
 		idx_t sequence;
-		//! The statement that took it, MAXIMUM_QUERY_ID when none was running
-		transaction_t query;
+		//! The queries of the connection that ended, counted when the pin was taken; null outside a query
+		shared_ptr<GlueQueryEnds> query_ends;
+		idx_t ended;
 	};
 	struct RetiredEntry {
 		idx_t retired_at;
 		unique_ptr<CatalogEntry> entry;
 	};
 
-	//! Whether the statement that took the pin has ended, so the transaction no longer uses what it was handed
-	static bool IsReleased(Transaction &transaction, const Pin &pin);
+	static bool IsReleased(const Pin &pin);
 	//! Free the retired entries no pin still holds. Called with transaction_lock held.
 	void FreeRetiredEntries();
 
@@ -49,7 +59,7 @@ private:
 	GlueCatalog &glue_catalog;
 	mutex transaction_lock;
 	reference_map_t<Transaction, unique_ptr<GlueTransaction>> transactions;
-	//! The latest pin of each transaction that looked up an entry
+	//! The latest pin of each transaction
 	reference_map_t<Transaction, Pin> pins;
 	idx_t next_sequence = 0;
 	vector<RetiredEntry> retired_entries;

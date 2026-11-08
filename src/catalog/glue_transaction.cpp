@@ -67,10 +67,9 @@ GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) 
 	return Transaction::Get(context, catalog).Cast<GlueTransaction>();
 }
 
-GlueTransaction &GlueTransaction::GetForLookup(ClientContext &context, Catalog &catalog) {
+void GlueTransaction::PinForLookup(ClientContext &context, Catalog &catalog) {
 	auto &transaction = Get(context, catalog);
-	transaction.manager.Cast<GlueTransactionManager>().PinEntries(transaction);
-	return transaction;
+	transaction.manager.Cast<GlueTransactionManager>().PinEntries(context, transaction);
 }
 
 idx_t GlueTransactionCache::NextId() {

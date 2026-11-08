@@ -2,6 +2,7 @@
 #include "catalog/glue_catalog.hpp"
 
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/client_context.hpp"
 
 #include <algorithm>
 
@@ -44,13 +45,19 @@ void GlueTransactionManager::RetireEntry(unique_ptr<CatalogEntry> entry) {
 	retired_entries.push_back(RetiredEntry {next_sequence, std::move(entry)});
 }
 
-void GlueTransactionManager::PinEntries(Transaction &transaction) {
+void GlueTransactionManager::PinEntries(ClientContext &context, Transaction &transaction) {
+	shared_ptr<GlueQueryEnds> query_ends;
+	// a client API call that binds (ExtractPlan) runs outside a query, and its plan outlives the call
+	if (transaction.active_query.load() != MAXIMUM_QUERY_ID) {
+		query_ends = context.registered_state->GetOrCreate<GlueQueryEnds>("glue_query_ends");
+	}
 	lock_guard<mutex> l(transaction_lock);
 	auto entry = pins.find(transaction);
-	if (entry != pins.end() && !IsReleased(transaction, entry->second)) {
+	if (entry != pins.end() && !IsReleased(entry->second)) {
 		return;
 	}
-	pins[transaction] = Pin {next_sequence++, transaction.active_query.load()};
+	auto ended = query_ends ? query_ends->ended.load() : 0;
+	pins[transaction] = Pin {next_sequence++, std::move(query_ends), ended};
 }
 
 idx_t GlueTransactionManager::RetiredEntryCount() {
@@ -58,16 +65,14 @@ idx_t GlueTransactionManager::RetiredEntryCount() {
 	return retired_entries.size();
 }
 
-bool GlueTransactionManager::IsReleased(Transaction &transaction, const Pin &pin) {
-	// the core sets active_query while a statement of the transaction runs, and resets it between statements; an API
-	// call that binds outside a statement does not, so its pin is kept until the transaction ends
-	return pin.query != MAXIMUM_QUERY_ID && transaction.active_query.load() != pin.query;
+bool GlueTransactionManager::IsReleased(const Pin &pin) {
+	return pin.query_ends && pin.query_ends->ended.load() != pin.ended;
 }
 
 void GlueTransactionManager::FreeRetiredEntries() {
 	auto oldest_pin = NumericLimits<idx_t>::Maximum();
 	for (auto &entry : pins) {
-		if (!IsReleased(entry.first, entry.second)) {
+		if (!IsReleased(entry.second)) {
 			oldest_pin = MinValue(oldest_pin, entry.second.sequence);
 		}
 	}
