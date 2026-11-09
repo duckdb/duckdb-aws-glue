@@ -58,6 +58,8 @@ void GlueTransactionManager::PinEntries(ClientContext &context, Transaction &tra
 	}
 	auto ended = query_ends ? query_ends->ended.load() : 0;
 	pins[transaction] = Pin {next_sequence++, query_ends != nullptr, query_ends, ended};
+	// what the replaced pin held may be freed now, also when no transaction ends for a while
+	FreeRetiredEntries();
 }
 
 void GlueTransactionManager::EndPin(Transaction &transaction) {

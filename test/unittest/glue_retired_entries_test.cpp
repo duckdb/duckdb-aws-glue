@@ -80,4 +80,20 @@ TEST_CASE("An idle transaction does not keep the catalog entries other connectio
 	stream.reset();
 	Run(idle, "SELECT count(*) FROM " + table);
 	REQUIRE(manager.RetiredEntryCount() == 0);
+
+	// two open transactions that cached different versions of the table retire the shared entry on every lookup;
+	// nothing commits, so the frees happen as the queries end
+	Connection other(db);
+	Run(idle, "BEGIN");
+	Run(idle, "SELECT count(*) FROM " + table);
+	Run(con, "ALTER TABLE " + table + " ADD COLUMN c7 INTEGER");
+	Run(other, "BEGIN");
+	for (idx_t i = 0; i < 20; i++) {
+		Run(idle, "SELECT count(*) FROM " + table);
+		Run(other, "SELECT count(*) FROM " + table);
+	}
+	REQUIRE(manager.RetiredEntryCount() <= 2);
+	Run(idle, "COMMIT");
+	Run(other, "COMMIT");
+	REQUIRE(manager.RetiredEntryCount() == 0);
 }
