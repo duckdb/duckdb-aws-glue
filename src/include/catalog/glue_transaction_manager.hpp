@@ -41,8 +41,9 @@ private:
 	struct Pin {
 		//! Entries retired after the pin have a higher sequence number
 		idx_t sequence;
-		//! The query ends of the connection, null outside a query
-		shared_ptr<GlueQueryEnds> query_ends;
+		//! Taken inside a query: released when it ends, or when the connection is gone
+		bool in_query;
+		weak_ptr<GlueQueryEnds> query_ends;
 		//! Their count when the pin was taken
 		idx_t ended;
 	};
@@ -63,7 +64,7 @@ private:
 	reference_map_t<Transaction, unique_ptr<GlueTransaction>> transactions;
 	//! The latest pin of each transaction
 	reference_map_t<Transaction, Pin> pins;
-	//! Pins of transactions rolled back while their connection was destroyed, whose query's tasks may still run
+	//! Pins of transactions that ended while their connection was destroyed, until its query ends
 	vector<Pin> closing_pins;
 	idx_t next_sequence = 0;
 	vector<RetiredEntry> retired_entries;

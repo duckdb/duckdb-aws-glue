@@ -51,14 +51,13 @@ void GlueTransactionManager::PinEntries(ClientContext &context, Transaction &tra
 	if (entry != pins.end() && !IsReleased(entry->second)) {
 		return;
 	}
-	// A client API call that binds outside a query (ExtractPlan) keeps its pin until the transaction ends, as its plan
-	// outlives the call. One made while a streaming result is open shares that query's pin.
+	// an API call that binds outside a query (ExtractPlan) keeps its pin until the transaction ends
 	shared_ptr<GlueQueryEnds> query_ends;
 	if (transaction.active_query.load() != MAXIMUM_QUERY_ID) {
 		query_ends = context.registered_state->GetOrCreate<GlueQueryEnds>("glue_query_ends");
 	}
 	auto ended = query_ends ? query_ends->ended.load() : 0;
-	pins[transaction] = Pin {next_sequence++, std::move(query_ends), ended};
+	pins[transaction] = Pin {next_sequence++, query_ends != nullptr, query_ends, ended};
 }
 
 void GlueTransactionManager::EndPin(Transaction &transaction) {
@@ -66,8 +65,8 @@ void GlueTransactionManager::EndPin(Transaction &transaction) {
 	if (entry == pins.end()) {
 		return;
 	}
-	// a connection being destroyed rolls back before it cancels its query's tasks
-	if (transaction.context.expired() && entry->second.query_ends && !IsReleased(entry->second)) {
+	// an explicit transaction of a connection being destroyed is rolled back before its query's tasks are cancelled
+	if (transaction.context.expired() && entry->second.in_query && !IsReleased(entry->second)) {
 		closing_pins.push_back(std::move(entry->second));
 	}
 	pins.erase(entry);
@@ -79,7 +78,11 @@ idx_t GlueTransactionManager::RetiredEntryCount() {
 }
 
 bool GlueTransactionManager::IsReleased(const Pin &pin) {
-	return pin.query_ends && pin.query_ends->ended.load() != pin.ended;
+	if (!pin.in_query) {
+		return false;
+	}
+	auto query_ends = pin.query_ends.lock();
+	return !query_ends || query_ends->ended.load() != pin.ended;
 }
 
 void GlueTransactionManager::FreeRetiredEntries() {
