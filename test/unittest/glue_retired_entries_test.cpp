@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/query_result_stream.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "glue_test_util.hpp"
@@ -69,5 +70,14 @@ TEST_CASE("An idle transaction does not keep the catalog entries other connectio
 	// read through the entry the ALTER retired: freed memory here is what the pin prevents
 	REQUIRE(scanned->name.GetIdentifierName() == name);
 	Run(idle, "COMMIT");
+	REQUIRE(manager.RetiredEntryCount() == 0);
+
+	// a query keeps them while it runs, here until its streaming result is closed
+	auto stream = make_uniq<QueryResultStream<>>(idle.Submit("SELECT id FROM " + table));
+	REQUIRE(!stream->HasError());
+	Run(con, "ALTER TABLE " + table + " ADD COLUMN c6 INTEGER");
+	REQUIRE(manager.RetiredEntryCount() >= 1);
+	stream.reset();
+	Run(idle, "SELECT count(*) FROM " + table);
 	REQUIRE(manager.RetiredEntryCount() == 0);
 }

@@ -136,7 +136,7 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
 	auto &name = lookup.GetEntryName();
-	// before entry_lock: RetireEntry takes transaction_lock inside it
+	// before the entry is found, so its retirement comes after the pin
 	GlueTransaction::PinForLookup(context, catalog);
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	bool cached;

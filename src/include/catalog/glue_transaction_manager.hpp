@@ -10,8 +10,7 @@
 namespace duckdb {
 class GlueCatalog;
 
-//! Counts the queries of a connection that ended: QueryEnd runs once a query's tasks are cancelled and its transaction
-//! committed, also when the connection is closed during the query
+//! Counts the connection's ended queries: QueryEnd runs once a query's tasks are cancelled
 class GlueQueryEnds : public ClientContextState {
 public:
 	void QueryEnd(ClientContext &context) override {
@@ -42,8 +41,9 @@ private:
 	struct Pin {
 		//! Entries retired after the pin have a higher sequence number
 		idx_t sequence;
-		//! The queries of the connection that ended, counted when the pin was taken; null outside a query
+		//! The query ends of the connection, null outside a query
 		shared_ptr<GlueQueryEnds> query_ends;
+		//! Their count when the pin was taken
 		idx_t ended;
 	};
 	struct RetiredEntry {
@@ -52,6 +52,8 @@ private:
 	};
 
 	static bool IsReleased(const Pin &pin);
+	//! The transaction ended: drop its pin, unless its query still runs. Called with transaction_lock held.
+	void EndPin(Transaction &transaction);
 	//! Free the retired entries no pin still holds. Called with transaction_lock held.
 	void FreeRetiredEntries();
 
@@ -61,6 +63,8 @@ private:
 	reference_map_t<Transaction, unique_ptr<GlueTransaction>> transactions;
 	//! The latest pin of each transaction
 	reference_map_t<Transaction, Pin> pins;
+	//! Pins of transactions rolled back while their connection was destroyed, whose query's tasks may still run
+	vector<Pin> closing_pins;
 	idx_t next_sequence = 0;
 	vector<RetiredEntry> retired_entries;
 };
