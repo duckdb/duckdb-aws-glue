@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/scan_partitioned/test_partition_projection_refused.test
-# description: A partitioned table with Athena partition projection (projection.enabled) is read through its derived partitions and refused on write
+# description: A partitioned table with Athena partition projection (projection.enabled) is read through its derived partitions; CREATE TABLE ... AS with projection parameters is refused
 # group: [scan_partitioned]
 
 require httpfs
@@ -53,27 +53,14 @@ SELECT count(*) FROM my_datalake.default.pp_events WHERE region = 'us';
 ----
 1
 
-# a write is refused: the partitions it would register are ignored by Athena
-statement error
-INSERT INTO my_datalake.default.pp_events VALUES (2, 'eu', 3);
-----
-INSERT into Glue table 'pp_events' is not supported: the table uses Athena partition projection (projection.enabled), so the partitions it would register are ignored by Athena. Set projection.enabled to false and register the partitions to write it
-
-statement ok
-COPY (SELECT 2 AS id, 'eu' AS region, 3 AS hour) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_src.parquet';
-
-statement error
-COPY my_datalake.default.pp_events FROM '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_src.parquet';
-----
-INSERT into Glue table 'pp_events' is not supported: the table uses Athena partition projection
-
-# and so is CREATE TABLE ... AS, which would otherwise create and fill a table this extension then refuses to read
+# INSERT writes the projected layout (test/sql/hive/dml/insert/insert_partition_projection.test); CREATE TABLE ... AS
+# with projection parameters is refused before anything is created, as Athena's CTAS takes no projection property
 statement error
 CREATE TABLE my_datalake.default.pp_ctas PARTITIONED BY (region)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_ctas', 'projection.enabled' = 'true', 'projection.region.type' = 'enum', 'projection.region.values' = 'us,eu')
 AS SELECT 1 AS id, 'us' AS region;
 ----
-CREATE TABLE ... AS for Glue table 'pp_ctas' is not supported: with 'projection.enabled' on a partitioned table it would use Athena partition projection, which ignores the partitions the statement registers. Set projection.enabled to false; the partitions the statement writes are then registered in Glue and readable
+Not implemented Error: CREATE TABLE ... AS for Glue table 'pp_ctas' is not supported: Athena partition projection cannot be configured by CTAS. CREATE TABLE with the projection.* parameters, then INSERT
 
 query I
 SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'pp_ctas';
@@ -102,14 +89,9 @@ SELECT parameters['projection.enabled'] FROM glue_get_table_response('my_datalak
 ----
 true
 
-# the value is matched trimmed and case-insensitively, as Athena does
+# the value is matched trimmed and case-insensitively, as Athena does: still read through the projection
 statement ok
 ALTER TABLE my_datalake.default.pp_events SET ('projection.enabled' = ' TRUE ');
-
-statement error
-INSERT INTO my_datalake.default.pp_events VALUES (2, 'eu', 3);
-----
-uses Athena partition projection
 
 query I
 SELECT count(*) FROM my_datalake.default.pp_events;

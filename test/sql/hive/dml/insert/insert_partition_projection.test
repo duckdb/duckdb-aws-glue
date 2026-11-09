@@ -1,0 +1,966 @@
+# name: test/sql/hive/dml/insert/insert_partition_projection.test
+# description: INSERT into a Glue table with Athena partition projection writes its files where the projection reads
+# group: [insert]
+
+#              them, spelled as the scan derives the directory, and registers no partition, as Athena's INSERT does.
+#              A partition value the projection does not derive is refused.
+
+require httpfs
+
+require parquet
+
+require glue
+
+require json
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_external_file_cache=false;
+
+# The Glue API calls since the last truncate_duckdb_logs(), by operation
+statement ok
+CREATE MACRO glue_calls() AS TABLE
+    SELECT regexp_extract(request.headers['x-amz-target'], 'AWSGlue\.(\w+)', 1) AS api, count(*) AS n
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.headers['x-amz-target'] IS NOT NULL
+    GROUP BY 1 ORDER BY 1;
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging(['HTTP'], storage := 'memory');
+
+foreach t pw_plain pw_refused pw_inj pw_tpl pw_tpl_inj pw_date pw_ts pw_sdate pw_month pw_now pw_inj_int pw_inj_bool pw_inj_ts pw_inj_date pw_enum_int pw_int_dbl pw_registered pw_copy pw_cache
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{t};
+
+endloop
+
+# ---------------------------------------------------------------------------------------------------------------------
+# An enum key times an integer key with digits: the file goes to <key>=<value> directories spelled as the scan derives
+# them (hour 7 is 07), nothing is registered, and the row reads back
+# source: Athena probe athena-writes-2.txt §6 (INSERT writes region=us/hour=10/ and registers no partition: glue
+# get-partitions 0); the digits spelling is RB-4 adapt (Athena refuses [us, 7] on a digits table, athena-writes-1.txt §1)
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_plain (id INTEGER, region VARCHAR, hour INTEGER) PARTITIONED BY (region, hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_plain',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us,eu',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23',
+    'projection.hour.digits' = '2'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+INSERT INTO my_datalake.default.pw_plain VALUES (1, 'us', 7);
+----
+1
+
+# the INSERT looked up no partition and registered none (glue_partitions() below makes its own GetPartitions call);
+# the log did record the INSERT's own Glue calls
+query II
+SELECT api, n FROM glue_calls() WHERE api IN ('BatchCreatePartition', 'GetPartitions', 'CreatePartition');
+----
+
+query I
+SELECT count(*) > 0 FROM glue_calls();
+----
+true
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_plain/region=us/hour=07/*.parquet');
+----
+1
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.pw_plain');
+----
+0
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_plain;
+----
+1	us	7
+
+# the flag is read trimmed and case-insensitively on write as on read (test_partition_projection_refused.test)
+statement ok
+ALTER TABLE my_datalake.default.pw_plain SET ('projection.enabled' = ' TRUE ');
+
+query I
+INSERT INTO my_datalake.default.pw_plain VALUES (2, 'eu', 3);
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_plain/region=eu/hour=03/*.parquet');
+----
+1
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.pw_plain');
+----
+0
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_plain ORDER BY id;
+----
+1	us	7
+2	eu	3
+
+statement ok
+DROP TABLE my_datalake.default.pw_plain;
+
+# ---------------------------------------------------------------------------------------------------------------------
+# A value no derived partition has fails the statement, naming the table, the column, the value and the parameter;
+# nothing is written
+# source: Athena refuses the same values with "No partition found with values [..]" (athena-writes-1.txt §1: 'ap', 99,
+# NULL; -2.txt §6: 7 off the 0,20,5 grid; §7: a date outside the range; §9: 'eu' when ' eu' is listed); the wording is
+# ours (RB-3 adapt, AC-15), values spelled as Value::ToSQLString prints them
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_refused (id INTEGER, region VARCHAR, hour INTEGER, dt DATE) PARTITIONED BY (region, hour, dt)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_refused',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us, eu',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,20',
+    'projection.hour.interval' = '5',
+    'projection.hour.digits' = '2',
+    'projection.dt.type' = 'date',
+    'projection.dt.range' = '20240101,20241231',
+    'projection.dt.format' = 'yyyyMMdd',
+    'projection.dt.interval' = '7',
+    'projection.dt.interval.unit' = 'DAYS'
+);
+
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'ap', 10, DATE '2024-01-08');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value 'ap' of 'region' is not one its projection derives (projection.region.values = us, eu)
+
+# the listed text is ' eu', with its space; 'eu' is another value
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'eu', 10, DATE '2024-01-08');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value 'eu' of 'region' is not one its projection derives (projection.region.values = us, eu)
+
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'US', 10, DATE '2024-01-08');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value 'US' of 'region' is not one its projection derives (projection.region.values = us, eu)
+
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, NULL, 10, DATE '2024-01-08');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value NULL of 'region' is not one its projection derives (projection.region.type = enum)
+
+# off the interval grid, outside the range, NULL
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'us', 7, DATE '2024-01-08');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value 7 of 'hour' is not one its projection derives (projection.hour.interval = 5)
+
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'us', 25, DATE '2024-01-08');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value 25 of 'hour' is not one its projection derives (projection.hour.range = 0,20)
+
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'us', NULL, DATE '2024-01-08');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value NULL of 'hour' is not one its projection derives (projection.hour.type = integer)
+
+# a date outside the range, one off the seven-day step, NULL
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'us', 10, DATE '2023-12-31');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value '2023-12-31'::DATE of 'dt' is not one its projection derives (projection.dt.range = 20240101,20241231)
+
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'us', 10, DATE '2024-01-02');
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value '2024-01-02'::DATE of 'dt' is not one its projection derives (projection.dt.interval = 7)
+
+statement error
+INSERT INTO my_datalake.default.pw_refused VALUES (1, 'us', 10, NULL);
+----
+Invalid Input Error: Glue table 'default.pw_refused': partition value NULL of 'dt' is not one its projection derives (projection.dt.type = date)
+
+# nothing was written by the refused statements; a derived value writes
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_refused/**');
+----
+0
+
+query I
+INSERT INTO my_datalake.default.pw_refused VALUES (2, ' eu', 10, DATE '2024-01-08');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_refused/region= eu/hour=10/dt=20240108/*.parquet');
+----
+1
+
+query IIII
+SELECT id, region, hour, dt FROM my_datalake.default.pw_refused;
+----
+2	 eu	10	2024-01-08
+
+statement ok
+DROP TABLE my_datalake.default.pw_refused;
+
+# ---------------------------------------------------------------------------------------------------------------------
+# An injected key: NULL and the empty string name no partition the scan reads (#191: `k IS NULL` and `k = ''` derive
+# none), so they are refused where Athena writes k=__HIVE_DEFAULT_PARTITION__/ and fails half way on k=/
+# (athena-writes-2.txt §8); RB-5 adapt
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_inj (id INTEGER, k VARCHAR) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected'
+);
+
+statement error
+INSERT INTO my_datalake.default.pw_inj VALUES (1, NULL);
+----
+Invalid Input Error: Glue table 'default.pw_inj': partition value NULL of 'k' is not one its projection derives (projection.k.type = injected)
+
+statement error
+INSERT INTO my_datalake.default.pw_inj VALUES (1, '');
+----
+Invalid Input Error: Glue table 'default.pw_inj': partition value '' of 'k' is not one its projection derives (projection.k.type = injected)
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj/**');
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.pw_inj;
+
+# ---------------------------------------------------------------------------------------------------------------------
+# storage.location.template: the file goes under the template with the values substituted, outside the table location
+# included; nothing lands under the table location
+# source: athena-writes-1.txt §2 (INSERT (1, 'us', 7) wrote tpl_data/us/h7/, tpl_root/ stayed empty, SELECT read 1,us,7)
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_tpl (id INTEGER, region VARCHAR, hour INTEGER) PARTITIONED BY (region, hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_root',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us,eu',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23',
+    'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_data/${region}/h${hour}/'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_tpl VALUES (1, 'us', 7);
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_data/us/h7/*.parquet');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_root/**');
+----
+0
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_tpl;
+----
+1	us	7
+
+# a placeholder in the middle of a path component: the copy target ends at the last '/' before it
+statement ok
+ALTER TABLE my_datalake.default.pw_tpl SET ('storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_data/r_${region}_${hour}');
+
+query I
+INSERT INTO my_datalake.default.pw_tpl VALUES (2, 'eu', 3);
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_data/r_eu_3/*.parquet');
+----
+1
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_tpl ORDER BY id;
+----
+2	eu	3
+
+# a template literal with an empty segment, or a prefix ending in '//' (the copy trims every trailing '/'), can not be
+# written as the scan would read it
+statement ok
+ALTER TABLE my_datalake.default.pw_tpl SET ('storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_data/${region}//h${hour}');
+
+statement error
+INSERT INTO my_datalake.default.pw_tpl VALUES (3, 'us', 1);
+----
+pw_tpl_data/us//h1' has an empty, '.' or '..' segment, which can not be written
+
+statement ok
+ALTER TABLE my_datalake.default.pw_tpl SET ('storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_data//${region}/h${hour}');
+
+statement error
+INSERT INTO my_datalake.default.pw_tpl VALUES (3, 'us', 1);
+----
+Invalid Input Error: Glue table 'default.pw_tpl': storage.location.template has an empty segment before its first placeholder, which can not be written
+
+# a template with no directory before its first placeholder has nothing to write under: one starting with a
+# placeholder, one whose bucket is a placeholder, or one with only '/' before it
+statement ok
+ALTER TABLE my_datalake.default.pw_tpl SET ('storage.location.template' = 's3://${region}/x/${hour}');
+
+statement error
+INSERT INTO my_datalake.default.pw_tpl VALUES (3, 'us', 1);
+----
+Invalid Input Error: Glue table 'default.pw_tpl': storage.location.template has no directory before its first placeholder to write under
+
+statement ok
+ALTER TABLE my_datalake.default.pw_tpl SET ('storage.location.template' = '/${region}/${hour}');
+
+statement error
+INSERT INTO my_datalake.default.pw_tpl VALUES (3, 'us', 1);
+----
+Invalid Input Error: Glue table 'default.pw_tpl': storage.location.template has no directory before its first placeholder to write under
+
+statement ok
+ALTER TABLE my_datalake.default.pw_tpl SET ('storage.location.template' = '${region}/${hour}');
+
+statement error
+INSERT INTO my_datalake.default.pw_tpl VALUES (3, 'us', 1);
+----
+Invalid Input Error: Glue table 'default.pw_tpl': storage.location.template has no directory before its first placeholder to write under
+
+statement ok
+DROP TABLE my_datalake.default.pw_tpl;
+
+# in a template a value's leading '/' follows the literal's '/': an absolute path the copy would refuse, named here
+statement ok
+CREATE TABLE my_datalake.default.pw_tpl_inj (id INTEGER, k VARCHAR) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_inj_root',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected',
+    'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_tpl_inj_data/${k}/'
+);
+
+statement error
+INSERT INTO my_datalake.default.pw_tpl_inj VALUES (1, '/y');
+----
+pw_tpl_inj_data//y/' has an empty, '.' or '..' segment, which can not be written
+
+query I
+INSERT INTO my_datalake.default.pw_tpl_inj VALUES (2, 'y');
+----
+1
+
+query II
+SELECT id, k FROM my_datalake.default.pw_tpl_inj WHERE k = 'y';
+----
+2	y
+
+statement ok
+DROP TABLE my_datalake.default.pw_tpl_inj;
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Date keys: a DATE or TIMESTAMP column is spelled with projection.<key>.format (Athena refuses these: a DATE's own text
+# is not in yyyyMMdd, athena-writes-1.txt §4; RB-4 adapt), a STRING key holds the formatted text as Athena writes it
+# (athena-writes-2.txt §7: '20240115' written to dt=20240115/, '2024-01-16' and '20231231' refused)
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_date (id INTEGER, dt DATE) PARTITIONED BY (dt)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_date',
+    'projection.enabled' = 'true',
+    'projection.dt.type' = 'date',
+    'projection.dt.range' = '20240101,20241231',
+    'projection.dt.format' = 'yyyyMMdd'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_date VALUES (1, DATE '2024-01-15');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_date/dt=20240115/*.parquet');
+----
+1
+
+query II
+SELECT id, dt FROM my_datalake.default.pw_date WHERE dt = DATE '2024-01-15';
+----
+1	2024-01-15
+
+# an infinite date is outside every range
+statement error
+INSERT INTO my_datalake.default.pw_date VALUES (2, DATE 'infinity');
+----
+Invalid Input Error: Glue table 'default.pw_date': partition value 'infinity'::DATE of 'dt' is not one its projection derives (projection.dt.range = 20240101,20241231)
+
+statement ok
+DROP TABLE my_datalake.default.pw_date;
+
+# a TIMESTAMP column with an hourly format: the value must be whole in the format, as the scan would read it back
+statement ok
+CREATE TABLE my_datalake.default.pw_ts (id INTEGER, ts TIMESTAMP) PARTITIONED BY (ts)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_ts',
+    'projection.enabled' = 'true',
+    'projection.ts.type' = 'date',
+    'projection.ts.range' = '2024-01-01-00,2024-12-31-23',
+    'projection.ts.format' = 'yyyy-MM-dd-HH',
+    'projection.ts.interval' = '1',
+    'projection.ts.interval.unit' = 'HOURS'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_ts VALUES (1, TIMESTAMP '2024-01-15 10:00:00');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_ts/ts=2024-01-15-10/*.parquet');
+----
+1
+
+query II
+SELECT id, ts FROM my_datalake.default.pw_ts WHERE ts = TIMESTAMP '2024-01-15 10:00:00';
+----
+1	2024-01-15 10:00:00
+
+statement error
+INSERT INTO my_datalake.default.pw_ts VALUES (2, TIMESTAMP '2024-01-15 10:30:00');
+----
+Invalid Input Error: Glue table 'default.pw_ts': partition value '2024-01-15 10:30:00'::TIMESTAMP of 'ts' is not one its projection derives (projection.ts.format = yyyy-MM-dd-HH)
+
+statement error
+INSERT INTO my_datalake.default.pw_ts VALUES (3, TIMESTAMP 'infinity');
+----
+Invalid Input Error: Glue table 'default.pw_ts': partition value 'infinity'::TIMESTAMP of 'ts' is not one its projection derives (projection.ts.range = 2024-01-01-00,2024-12-31-23)
+
+statement ok
+DROP TABLE my_datalake.default.pw_ts;
+
+# a STRING date key holds the formatted text
+statement ok
+CREATE TABLE my_datalake.default.pw_sdate (id INTEGER, dt VARCHAR) PARTITIONED BY (dt)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_sdate',
+    'projection.enabled' = 'true',
+    'projection.dt.type' = 'date',
+    'projection.dt.range' = '20240101,20241231',
+    'projection.dt.format' = 'yyyyMMdd'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_sdate VALUES (1, '20240115');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_sdate/dt=20240115/*.parquet');
+----
+1
+
+query II
+SELECT id, dt FROM my_datalake.default.pw_sdate WHERE dt = '20240115';
+----
+1	20240115
+
+statement error
+INSERT INTO my_datalake.default.pw_sdate VALUES (2, '2024-01-16');
+----
+Invalid Input Error: Glue table 'default.pw_sdate': partition value '2024-01-16' of 'dt' is not one its projection derives (projection.dt.format = yyyyMMdd)
+
+statement error
+INSERT INTO my_datalake.default.pw_sdate VALUES (3, '20231231');
+----
+Invalid Input Error: Glue table 'default.pw_sdate': partition value '20231231' of 'dt' is not one its projection derives (projection.dt.range = 20240101,20241231)
+
+statement ok
+DROP TABLE my_datalake.default.pw_sdate;
+
+# a month step: the value must sit on the step from the range start (Athena: isWithinRange counts whole intervals from
+# the minimum) and be whole in the format
+statement ok
+CREATE TABLE my_datalake.default.pw_month (id INTEGER, dt DATE) PARTITIONED BY (dt)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_month',
+    'projection.enabled' = 'true',
+    'projection.dt.type' = 'date',
+    'projection.dt.range' = '2024-01,2024-12',
+    'projection.dt.format' = 'yyyy-MM',
+    'projection.dt.interval' = '2',
+    'projection.dt.interval.unit' = 'MONTHS'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_month VALUES (1, DATE '2024-03-01'), (2, DATE '2024-05-01');
+----
+2
+
+query I
+SELECT (SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_month/dt=2024-03/*.parquet')) + (SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_month/dt=2024-05/*.parquet'));
+----
+2
+
+statement error
+INSERT INTO my_datalake.default.pw_month VALUES (3, DATE '2024-04-01');
+----
+Invalid Input Error: Glue table 'default.pw_month': partition value '2024-04-01'::DATE of 'dt' is not one its projection derives (projection.dt.interval = 2)
+
+statement error
+INSERT INTO my_datalake.default.pw_month VALUES (4, DATE '2024-03-15');
+----
+Invalid Input Error: Glue table 'default.pw_month': partition value '2024-03-15'::DATE of 'dt' is not one its projection derives (projection.dt.format = yyyy-MM)
+
+query II
+SELECT id, dt FROM my_datalake.default.pw_month ORDER BY id;
+----
+1	2024-03-01
+2	2024-05-01
+
+statement ok
+DROP TABLE my_datalake.default.pw_month;
+
+# a relative range is resolved at the transaction start in UTC, as the scan resolves it (now() is UTC without icu)
+statement ok
+CREATE TABLE my_datalake.default.pw_now (id INTEGER, dt DATE) PARTITIONED BY (dt)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_now',
+    'projection.enabled' = 'true',
+    'projection.dt.type' = 'date',
+    'projection.dt.range' = 'NOW - 2 days, NOW',
+    'projection.dt.format' = 'yyyy-MM-dd'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_now SELECT 1, now()::TIMESTAMP::DATE;
+----
+1
+
+query I
+SELECT id FROM my_datalake.default.pw_now WHERE dt = now()::TIMESTAMP::DATE;
+----
+1
+
+statement error
+INSERT INTO my_datalake.default.pw_now SELECT 2, now()::TIMESTAMP::DATE - 5;
+----
+of 'dt' is not one its projection derives (projection.dt.range = NOW - 2 days, NOW)
+
+statement ok
+DROP TABLE my_datalake.default.pw_now;
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Injected keys take any value, spelled as the column type's text; a '/' makes directories, as in Athena
+# source: athena-writes-1.txt §3 (k=acme/), -2.txt §8 (k=x/y/, a second file in k=acme/); the typed spelling is the
+# one the scan of #191 reads (k=7/, k=true/)
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_inj (id INTEGER, k VARCHAR) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_inj VALUES (1, 'acme'), (2, 'x/y'), (3, 'acme');
+----
+3
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj/k=acme/*.parquet');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj/k=x/y/*.parquet');
+----
+1
+
+query II
+SELECT id, k FROM my_datalake.default.pw_inj WHERE k = 'acme' ORDER BY id;
+----
+1	acme
+3	acme
+
+query II
+SELECT id, k FROM my_datalake.default.pw_inj WHERE k = 'x/y';
+----
+2	x/y
+
+# a value spelling an empty path segment would be written to another value's directory (the copy drops empty and '.'
+# segments, the scan derives the spelling as given): refused, where Athena writes it (RB-2 adapt)
+statement error
+INSERT INTO my_datalake.default.pw_inj VALUES (4, 'x//y');
+----
+Invalid Input Error: Glue table 'default.pw_inj': partition value 'x//y' of 'k' spells a directory with an empty, '.' or '..' segment, which can not be written
+
+statement error
+INSERT INTO my_datalake.default.pw_inj VALUES (5, 'x/');
+----
+Invalid Input Error: Glue table 'default.pw_inj': partition value 'x/' of 'k' spells a directory with an empty, '.' or '..' segment, which can not be written
+
+statement error
+INSERT INTO my_datalake.default.pw_inj VALUES (6, 'a/./b');
+----
+Invalid Input Error: Glue table 'default.pw_inj': partition value 'a/./b' of 'k' spells a directory with an empty, '.' or '..' segment, which can not be written
+
+statement error
+INSERT INTO my_datalake.default.pw_inj VALUES (7, 'a/../b');
+----
+Invalid Input Error: Glue table 'default.pw_inj': partition value 'a/../b' of 'k' spells a directory with an empty, '.' or '..' segment, which can not be written
+
+# a leading '/' follows the key's name in the <key>=<value> layout: one component to the copy and to the scan alike
+query I
+INSERT INTO my_datalake.default.pw_inj VALUES (8, '/y');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj/k=/y/*.parquet');
+----
+1
+
+query II
+SELECT id, k FROM my_datalake.default.pw_inj WHERE k = '/y';
+----
+8	/y
+
+query I
+SELECT count(*) FROM my_datalake.default.pw_inj WHERE k IN ('acme', 'x/y', '/y');
+----
+4
+
+statement ok
+DROP TABLE my_datalake.default.pw_inj;
+
+statement ok
+CREATE TABLE my_datalake.default.pw_inj_int (id INTEGER, k INTEGER) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj_int',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_inj_int VALUES (1, 7);
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj_int/k=7/*.parquet');
+----
+1
+
+query II
+SELECT id, k FROM my_datalake.default.pw_inj_int WHERE k = 7;
+----
+1	7
+
+statement ok
+DROP TABLE my_datalake.default.pw_inj_int;
+
+statement ok
+CREATE TABLE my_datalake.default.pw_inj_bool (id INTEGER, k BOOLEAN) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj_bool',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_inj_bool VALUES (1, true);
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj_bool/k=true/*.parquet');
+----
+1
+
+query II
+SELECT id, k FROM my_datalake.default.pw_inj_bool WHERE k;
+----
+1	true
+
+statement ok
+DROP TABLE my_datalake.default.pw_inj_bool;
+
+# a TIMESTAMP injected column is never read (the scan refuses it, as Athena does), so nothing is written to it
+statement ok
+CREATE TABLE my_datalake.default.pw_inj_ts (id INTEGER, k TIMESTAMP) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj_ts',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected'
+);
+
+statement error
+INSERT INTO my_datalake.default.pw_inj_ts VALUES (1, TIMESTAMP '2024-01-15 10:00:00');
+----
+Invalid Input Error: Glue table 'default.pw_inj_ts': partition value '2024-01-15 10:00:00'::TIMESTAMP of 'k' is not one its projection derives (projection.k.type = injected)
+
+statement ok
+DROP TABLE my_datalake.default.pw_inj_ts;
+
+# a DATE injected column is read (test_partition_projection.test pp_inj_date) and so written as the date's text
+statement ok
+CREATE TABLE my_datalake.default.pw_inj_date (id INTEGER, k DATE) PARTITIONED BY (k)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj_date',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_inj_date VALUES (1, DATE '2024-01-15');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_inj_date/k=2024-01-15/*.parquet');
+----
+1
+
+query II
+SELECT id, k FROM my_datalake.default.pw_inj_date WHERE k = DATE '2024-01-15';
+----
+1	2024-01-15
+
+statement ok
+DROP TABLE my_datalake.default.pw_inj_date;
+
+# an enum key on an INTEGER column: the listed text whose value is the row's, spelled as listed (white space kept)
+statement ok
+CREATE TABLE my_datalake.default.pw_enum_int (id INTEGER, hour INTEGER) PARTITIONED BY (hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_enum_int',
+    'projection.enabled' = 'true',
+    'projection.hour.type' = 'enum',
+    'projection.hour.values' = '1, 2'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_enum_int VALUES (1, 2);
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_enum_int/hour= 2/*.parquet');
+----
+1
+
+query II
+SELECT id, hour FROM my_datalake.default.pw_enum_int WHERE hour = 2;
+----
+1	2
+
+statement error
+INSERT INTO my_datalake.default.pw_enum_int VALUES (2, 3);
+----
+Invalid Input Error: Glue table 'default.pw_enum_int': partition value 3 of 'hour' is not one its projection derives (projection.hour.values = 1, 2)
+
+statement ok
+DROP TABLE my_datalake.default.pw_enum_int;
+
+# an integer key on a DOUBLE column: the value must be the integer itself
+statement ok
+CREATE TABLE my_datalake.default.pw_int_dbl (id INTEGER, hour DOUBLE) PARTITIONED BY (hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_int_dbl',
+    'projection.enabled' = 'true',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23',
+    'projection.hour.digits' = '2'
+);
+
+query I
+INSERT INTO my_datalake.default.pw_int_dbl VALUES (1, 7.0);
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_int_dbl/hour=07/*.parquet');
+----
+1
+
+query II
+SELECT id, hour FROM my_datalake.default.pw_int_dbl WHERE hour = 7;
+----
+1	7.0
+
+statement error
+INSERT INTO my_datalake.default.pw_int_dbl VALUES (2, 7.5);
+----
+Invalid Input Error: Glue table 'default.pw_int_dbl': partition value 7.5 of 'hour' is not one its projection derives (projection.hour.type = integer)
+
+statement ok
+DROP TABLE my_datalake.default.pw_int_dbl;
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Registered partitions are ignored on write as on read: the file goes to the projected location, not the registered
+# one, and no GetPartitions call is made
+# source: AWSHiveMetastore.getPartition returns the projected partition for a projected table (Athena's shim);
+# partition-projection.html "Athena ignores any partition metadata registered to the table"
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_registered (id INTEGER, region VARCHAR, hour INTEGER) PARTITIONED BY (region, hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_registered',
+    'projection.enabled' = 'false',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us,eu',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23',
+    'projection.hour.digits' = '2'
+);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.pw_registered', {region: 'us', hour: 7},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_registered_elsewhere/us7');
+
+statement ok
+ALTER TABLE my_datalake.default.pw_registered SET ('projection.enabled' = 'true');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+INSERT INTO my_datalake.default.pw_registered VALUES (1, 'us', 7);
+----
+1
+
+query II
+SELECT api, n FROM glue_calls() WHERE api IN ('BatchCreatePartition', 'GetPartitions', 'GetPartition', 'CreatePartition');
+----
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_registered/region=us/hour=07/*.parquet');
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_registered_elsewhere/**');
+----
+0
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_registered;
+----
+1	us	7
+
+statement ok
+DROP TABLE my_datalake.default.pw_registered;
+
+# ---------------------------------------------------------------------------------------------------------------------
+# COPY ... FROM a file follows the same rules as INSERT: written where the projection reads, refused the same way
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_copy (id INTEGER, region VARCHAR, hour INTEGER) PARTITIONED BY (region, hour)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_copy',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us,eu',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23',
+    'projection.hour.digits' = '2'
+);
+
+statement ok
+COPY (SELECT 1 AS id, 'eu' AS region, 3 AS hour) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_copy_src_ok.parquet';
+
+statement ok
+COPY (SELECT 2 AS id, 'ap' AS region, 3 AS hour) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_copy_src_bad.parquet';
+
+query I
+COPY my_datalake.default.pw_copy FROM '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_copy_src_ok.parquet';
+----
+1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_copy/region=eu/hour=03/*.parquet');
+----
+1
+
+statement error
+COPY my_datalake.default.pw_copy FROM '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_copy_src_bad.parquet';
+----
+Invalid Input Error: Glue table 'default.pw_copy': partition value 'ap' of 'region' is not one its projection derives (projection.region.values = us,eu)
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_copy;
+----
+1	eu	3
+
+statement ok
+DROP TABLE my_datalake.default.pw_copy;
+
+# ---------------------------------------------------------------------------------------------------------------------
+# glue_cache_listings: the INSERT invalidates the connection's listing, so the next SELECT sees its rows
+# ---------------------------------------------------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_cache (id INTEGER, region VARCHAR) PARTITIONED BY (region)
+WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_cache',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us,eu'
+);
+
+statement ok
+SET glue_cache_listings = true;
+
+query I
+SELECT count(*) FROM my_datalake.default.pw_cache;
+----
+0
+
+query I
+INSERT INTO my_datalake.default.pw_cache VALUES (1, 'us');
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.pw_cache;
+----
+1
+
+statement ok
+RESET glue_cache_listings;
+
+statement ok
+DROP TABLE my_datalake.default.pw_cache;

@@ -382,6 +382,20 @@ void PartitionProjection::ParseTemplate(const string &location_template) {
 //===--------------------------------------------------------------------===//
 // Deriving the partitions
 //===--------------------------------------------------------------------===//
+//! Athena spells no timestamp into a partition path: an injected column of a timestamp type is never read or written
+static bool IsTimestampColumn(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_SEC:
+	case LogicalTypeId::TIMESTAMP_MS:
+	case LogicalTypeId::TIMESTAMP_NS:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		return true;
+	default:
+		return false;
+	}
+}
+
 //! Java's %0<digits>d: zero padding after the sign, the sign counted in the width
 static string FormatInteger(int64_t value, idx_t digits) {
 	auto negative = value < 0;
@@ -483,16 +497,8 @@ PartitionProjection::KeyValues PartitionProjection::InjectedValues(const Partiti
 	if (!filter->EqualityConstants(constants)) {
 		ThrowInjectedNeedsEquality(key, filter->ConstrainsRange());
 	}
-	switch (key.column_type.id()) {
-	case LogicalTypeId::TIMESTAMP:
-	case LogicalTypeId::TIMESTAMP_SEC:
-	case LogicalTypeId::TIMESTAMP_MS:
-	case LogicalTypeId::TIMESTAMP_NS:
-	case LogicalTypeId::TIMESTAMP_TZ:
-		// Athena spells no timestamp into a partition path
+	if (IsTimestampColumn(key.column_type)) {
 		ThrowInjectedNeedsEquality(key, true);
-	default:
-		break;
 	}
 	// the constants as the column type's text, which is what the partition column reads back from the directory; a
 	// NULL or a constant the type can not hold names no value
@@ -723,21 +729,25 @@ timestamp_t PartitionProjection::ReadBack(const PartitionProjectionKey &key, con
 
 string PartitionProjection::Location(const vector<vector<ProjectedValue>> &key_values,
                                      const vector<idx_t> &indexes) const {
+	vector<string> directories;
+	for (idx_t i = 0; i < keys.size(); i++) {
+		directories.push_back(key_values[i][indexes[i]].directory);
+	}
+	return Location(directories);
+}
+
+string PartitionProjection::Location(const vector<string> &directories) const {
 	if (template_parts.empty()) {
 		auto location = root_location;
 		StringUtil::RTrim(location, "/");
 		for (idx_t i = 0; i < keys.size(); i++) {
-			location += "/" + keys[i].name + "=" + key_values[i][indexes[i]].directory;
+			location += "/" + keys[i].name + "=" + directories[i];
 		}
 		return location;
 	}
 	string location;
 	for (auto &part : template_parts) {
-		if (part.key_index == DConstants::INVALID_INDEX) {
-			location += part.literal;
-			continue;
-		}
-		location += key_values[part.key_index][indexes[part.key_index]].directory;
+		location += part.key_index == DConstants::INVALID_INDEX ? part.literal : directories[part.key_index];
 	}
 	return location;
 }
@@ -806,6 +816,218 @@ PartitionProjection::Derivation PartitionProjection::Derive(ClientContext &conte
 			}
 		}
 	}
+}
+
+//! A component the copy drops or refuses: an empty one after the first, '.', '..', or a trailing '/' when it counts
+static bool HasUnwritableSegment(const string &path, bool trailing_slash_counts) {
+	if (path.empty() || (trailing_slash_counts && path.back() == '/')) {
+		return true;
+	}
+	auto components = StringUtil::Split(path, '/');
+	for (idx_t i = 0; i < components.size(); i++) {
+		if ((components[i].empty() && i > 0) || components[i] == "." || components[i] == "..") {
+			return true;
+		}
+	}
+	return false;
+}
+
+//===--------------------------------------------------------------------===//
+// Writing
+//===--------------------------------------------------------------------===//
+PartitionProjectionWriter::PartitionProjectionWriter(unique_ptr<PartitionProjection> projection_p)
+    : projection(std::move(projection_p)) {
+	auto &parts = projection->template_parts;
+	if (parts.empty()) {
+		copy_target = projection->root_location;
+		StringUtil::RTrim(copy_target, "/");
+		return;
+	}
+	// the literal up to its last '/': a directory below the bucket, which a placeholder bucket does not give
+	auto &literal = parts[0].literal;
+	auto slash = parts[0].key_index == DConstants::INVALID_INDEX ? literal.rfind('/') : string::npos;
+	auto scheme = literal.find("://");
+	if (slash == string::npos || slash == 0 || (scheme != string::npos && slash < scheme + 3)) {
+		throw InvalidInputException("Glue table '%s': storage.location.template has no directory before its first "
+		                            "placeholder to write under",
+		                            projection->table_description);
+	}
+	// the copy trims every trailing '/' of its target, so a prefix ending in "//" would write above the location
+	if (literal[slash - 1] == '/') {
+		throw InvalidInputException("Glue table '%s': storage.location.template has an empty segment before its first "
+		                            "placeholder, which can not be written",
+		                            projection->table_description);
+	}
+	copy_target = literal.substr(0, slash + 1);
+}
+
+string PartitionProjectionWriter::RelativePath(ClientContext &context, const vector<Value> &values) const {
+	auto &keys = projection->keys;
+	D_ASSERT(values.size() == keys.size());
+	vector<string> directories;
+	for (idx_t i = 0; i < keys.size(); i++) {
+		directories.push_back(Directory(context, keys[i], values[i]));
+	}
+	// the copy drops an empty or '.' component and refuses '..': the file would land in another value's directory
+	for (idx_t i = 0; i < keys.size(); i++) {
+		if (HasUnwritableSegment(directories[i], true)) {
+			throw InvalidInputException("Glue table '%s': partition value %s of '%s' spells a directory with an empty, "
+			                            "'.' or '..' segment, which can not be written",
+			                            projection->table_description, values[i].ToSQLString(), keys[i].name);
+		}
+	}
+	auto location = projection->Location(directories);
+	D_ASSERT(StringUtil::StartsWith(location, copy_target));
+	auto relative = location.substr(copy_target.size());
+	// the Hive layout's Location adds the '/' before the first <key>=; in a template a leading '/' is a value's own
+	if (projection->template_parts.empty()) {
+		relative.erase(0, 1);
+	}
+	// a template literal's segments; a value's leading '/' after the literal's '/' is an absolute path the copy refuses
+	if (StringUtil::StartsWith(relative, "/") || HasUnwritableSegment(relative, false)) {
+		throw InvalidInputException("Glue table '%s': the partition directory '%s' has an empty, '.' or '..' segment, "
+		                            "which can not be written",
+		                            projection->table_description, location);
+	}
+	return relative;
+}
+
+void PartitionProjectionWriter::Refuse(const PartitionProjectionKey &key, const Value &value,
+                                       const char *parameter) const {
+	auto name = ProjectionParameter(key.name, parameter);
+	auto setting = projection->source.parameters.find(name);
+	throw InvalidInputException(
+	    "Glue table '%s': partition value %s of '%s' is not one its projection derives (%s = %s)",
+	    projection->table_description, value.IsNull() ? string("NULL") : value.ToSQLString(), key.name, name,
+	    setting == projection->source.parameters.end() ? string() : setting->second);
+}
+
+string PartitionProjectionWriter::Directory(ClientContext &context, const PartitionProjectionKey &key,
+                                            const Value &value) const {
+	// no key derives a NULL: the type names what it does derive
+	if (value.IsNull()) {
+		Refuse(key, value, "type");
+	}
+	switch (key.type) {
+	case PartitionProjectionType::ENUM: {
+		// the listed text whose value, read as the column type, is the row's; a VARCHAR column compares the text
+		for (auto &text : key.enum_values) {
+			if (key.column_type.id() == LogicalTypeId::VARCHAR) {
+				if (StringValue::Get(value) == text) {
+					return text;
+				}
+				continue;
+			}
+			auto typed = Value(text).DefaultTryCastAs(key.column_type, nullptr, true);
+			if (typed && !typed->IsNull() && Value::NotDistinctFrom(*typed, value)) {
+				return text;
+			}
+		}
+		Refuse(key, value, "values");
+	}
+	case PartitionProjectionType::INTEGER: {
+		// read leniently as the scan reads a directory, then checked against the range and the interval grid
+		auto integer = value.DefaultTryCastAs(LogicalType::BIGINT, nullptr, false);
+		if (!integer || integer->IsNull()) {
+			Refuse(key, value, "type");
+		}
+		auto number = integer->GetValue<int64_t>();
+		if (number < key.range_start || number > key.range_end) {
+			Refuse(key, value, "range");
+		}
+		auto offset = static_cast<uint64_t>(number) - static_cast<uint64_t>(key.range_start);
+		if (offset % static_cast<uint64_t>(key.interval) != 0) {
+			Refuse(key, value, "interval");
+		}
+		auto directory = FormatInteger(number, key.digits);
+		// the scan reads the directory as the column's value: a text column must hold the spelling, a numeric one the
+		// integer itself (a FLOAT may not)
+		if (key.column_type.id() == LogicalTypeId::VARCHAR) {
+			if (StringValue::Get(value) != directory) {
+				Refuse(key, value, key.digits > 0 ? "digits" : "type");
+			}
+		} else if (!key.column_type.IsIntegral()) {
+			auto back = Value::BIGINT(number).DefaultTryCastAs(key.column_type, nullptr, true);
+			if (!back || !Value::NotDistinctFrom(*back, value)) {
+				Refuse(key, value, "type");
+			}
+		}
+		return directory;
+	}
+	case PartitionProjectionType::DATE:
+		return DateDirectory(context, key, value);
+	case PartitionProjectionType::INJECTED: {
+		// what the scan reads from the query: an empty text names no partition there, and a TIMESTAMP column is never
+		// read (InjectedValues refuses it, as Athena does)
+		if (IsTimestampColumn(key.column_type) || value.ToString().empty()) {
+			Refuse(key, value, "type");
+		}
+		return value.ToString();
+	}
+	}
+	throw InternalException("Unknown partition projection type");
+}
+
+string PartitionProjectionWriter::DateDirectory(ClientContext &context, const PartitionProjectionKey &key,
+                                                const Value &value) const {
+	timestamp_t instant;
+	switch (key.column_type.id()) {
+	case LogicalTypeId::DATE:
+		// an infinite date, or one beyond the timestamp range, is outside every range
+		if (!Timestamp::TryFromDatetime(value.GetValue<date_t>(), dtime_t(0), instant)) {
+			Refuse(key, value, "range");
+		}
+		break;
+	case LogicalTypeId::TIMESTAMP:
+	case LogicalTypeId::TIMESTAMP_TZ:
+		instant = value.GetValue<timestamp_t>();
+		if (!Value::IsFinite(instant)) {
+			Refuse(key, value, "range");
+		}
+		break;
+	default:
+		// a text (or other) column holds the directory's own spelling
+		if (!key.format->TryParse(value.ToString(), instant)) {
+			Refuse(key, value, "format");
+		}
+		break;
+	}
+	auto directory = key.format->Format(instant);
+	// the scan values the partition as its directory reads: a value finer than the format, or a text spelled another
+	// way, is not what it would read back
+	if (projection->ReadBack(key, directory) != instant ||
+	    (!key.column_type.IsTemporal() && value.ToString() != directory)) {
+		Refuse(key, value, "format");
+	}
+	// NOW is the start of this transaction, as on read
+	auto start = projection->ResolveBound(context, key, key.date_start);
+	auto end = projection->ResolveBound(context, key, key.date_end);
+	if (instant < start || instant > end) {
+		Refuse(key, value, "range");
+	}
+	// the first step at or after the value must land in its directory (a step finer than the format fills every one)
+	timestamp_t at = start;
+	if (key.step.months != 0) {
+		while (at < instant) {
+			timestamp_t next;
+			if (!Interval::TryAdd(at, key.step, next) || next <= at) {
+				Refuse(key, value, "interval");
+			}
+			at = next;
+		}
+	} else {
+		auto step = hugeint_t(IntervalMicros(key.step, true));
+		auto steps = (hugeint_t(instant.value) - hugeint_t(start.value) + step - hugeint_t(1)) / step;
+		auto landing = hugeint_t(start.value) + steps * step;
+		if (landing > hugeint_t(NumericLimits<int64_t>::Maximum())) {
+			Refuse(key, value, "interval");
+		}
+		at = timestamp_t(Hugeint::Cast<int64_t>(landing));
+	}
+	if (at > end || key.format->Format(at) != directory) {
+		Refuse(key, value, "interval");
+	}
+	return directory;
 }
 
 } // namespace duckdb

@@ -505,14 +505,6 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
 		                              statement, table.name.GetIdentifierName(), table_info.input_format,
 		                              HiveFileFormatToString(file_format));
 	}
-	// the partitions an INSERT registers are ignored by Athena, and the files may belong under a location template
-	if (table_info.IsPartitionProjected()) {
-		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses Athena partition "
-		                              "projection (projection.enabled), so the partitions it would register are "
-		                              "ignored by Athena. Set projection.enabled to false and register the partitions "
-		                              "to write it",
-		                              statement, table.name.GetIdentifierName());
-	}
 	// Hive and Spark bucket with different hash functions and file names; neither is implemented
 	if (table_info.IsBucketed()) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table is %s, and DuckDB does not "

@@ -9,6 +9,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
+#include "planning/hive_projection_write.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/function/scalar/generic_functions.hpp"
 #include "duckdb/function/scalar/string_functions.hpp"
@@ -468,13 +469,26 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	copy.filename_pattern.SetFilenamePattern("{uuid}");
 	unordered_map<string, vector<string>> partition_directories;
 	if (!partition_columns.empty()) {
-		copy.file_path = location;
 		copy.partition_output = true;
 		copy.partition_columns = partition_columns;
 		copy.write_partition_columns = false;
 		copy.hive_file_pattern = true;
-		copy.partition_path_expression = CreatePartitionPath(context, existing_table, table_info, location, copy_names,
-		                                                     copy_types, partition_columns, partition_directories);
+		if (table_info.IsPartitionProjected()) {
+			// Athena reads the partitions its projection derives, registered or not: the file goes where the scan
+			// derives it, and no Glue partition is looked up or registered
+			vector<LogicalType> key_types;
+			for (auto column : partition_columns) {
+				key_types.push_back(copy_types[column]);
+			}
+			auto writer = make_shared_ptr<PartitionProjectionWriter>(PartitionProjection::Parse(table_info, key_types));
+			copy.file_path = writer->CopyTarget();
+			copy.partition_path_expression = ProjectedPartitionPath(std::move(writer), copy_types, partition_columns);
+		} else {
+			copy.file_path = location;
+			copy.partition_path_expression =
+			    CreatePartitionPath(context, existing_table, table_info, location, copy_names, copy_types,
+			                        partition_columns, partition_directories);
+		}
 		// with partitioned output the copy must not initialize a single (partition-less) output file
 		copy.write_empty_file = true;
 		copy.per_thread_output = false;
@@ -548,14 +562,12 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 		supported.Throw();
 	}
 	auto table_info = schema.BuildTableInfo(context, op.info->Base());
-	// the same gate as GetHiveTableForDML: Athena ignores the partitions the statement would register
+	// Athena's CTAS takes no projection.* property either; INSERT into the created table writes the projected layout
 	if (table_info.IsPartitionProjected()) {
-		throw NotImplementedException(
-		    "CREATE TABLE ... AS for Glue table '%s' is not supported: with 'projection.enabled' "
-		    "on a partitioned table it would use Athena partition projection, which ignores the "
-		    "partitions the statement registers. Set projection.enabled to false; the partitions the "
-		    "statement writes are then registered in Glue and readable",
-		    table_info.name);
+		throw NotImplementedException("CREATE TABLE ... AS for Glue table '%s' is not supported: Athena partition "
+		                              "projection cannot be configured by CTAS. CREATE TABLE with the projection.* "
+		                              "parameters, then INSERT",
+		                              table_info.name);
 	}
 	vector<Identifier> names;
 	vector<LogicalType> types;
@@ -608,7 +620,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
 		GlueTransactionCache::Invalidate(context, catalog);
 	}
-	if (table_info.partition_keys.empty() || state.written_files.empty()) {
+	// a projected table's partitions are derived, never registered (Athena registers none either)
+	if (table_info.partition_keys.empty() || state.written_files.empty() || table_info.IsPartitionProjected()) {
 		return SinkFinalizeType::READY;
 	}
 

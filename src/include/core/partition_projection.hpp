@@ -91,6 +91,8 @@ public:
 	void Serialize(Serializer &serializer) const;
 	static unique_ptr<PartitionProjection> Deserialize(Deserializer &deserializer);
 
+	friend class PartitionProjectionWriter;
+
 private:
 	struct TemplatePart {
 		//! Literal text, or empty when the part is a placeholder
@@ -140,6 +142,8 @@ private:
 	timestamp_t ResolveBound(ClientContext &context, const PartitionProjectionKey &key, const DateBound &bound) const;
 	timestamp_t ReadBack(const PartitionProjectionKey &key, const string &text) const;
 	string Location(const vector<vector<ProjectedValue>> &key_values, const vector<idx_t> &indexes) const;
+	//! The location of the partition whose keys spell 'directories' (one per key, in key order)
+	string Location(const vector<string> &directories) const;
 
 private:
 	//! <database>.<table>, for messages
@@ -148,6 +152,32 @@ private:
 	vector<PartitionProjectionKey> keys;
 	//! storage.location.template, split into literals and placeholders; empty for the <key>=<value> layout
 	vector<TemplatePart> template_parts;
+};
+
+//! A write into a projected table: where a row's partition values go, spelled as the scan derives the directory, and
+//! nothing registered
+class PartitionProjectionWriter {
+public:
+	explicit PartitionProjectionWriter(unique_ptr<PartitionProjection> projection);
+
+	//! The COPY target: the table location, or storage.location.template's literal prefix up to the last '/' before
+	//! its first placeholder
+	const string &CopyTarget() const {
+		return copy_target;
+	}
+	//! The partition directory of 'values' (one per key, in key order), relative to CopyTarget(); a relative date
+	//! bound's NOW is the start of 'context's transaction, as on read. Throws InvalidInputException for a value no
+	//! partition the projection derives has
+	string RelativePath(ClientContext &context, const vector<Value> &values) const;
+
+private:
+	string Directory(ClientContext &context, const PartitionProjectionKey &key, const Value &value) const;
+	string DateDirectory(ClientContext &context, const PartitionProjectionKey &key, const Value &value) const;
+	[[noreturn]] void Refuse(const PartitionProjectionKey &key, const Value &value, const char *parameter) const;
+
+private:
+	unique_ptr<PartitionProjection> projection;
+	string copy_target;
 };
 
 } // namespace duckdb

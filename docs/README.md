@@ -150,9 +150,17 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
     costs neither time nor memory nor S3 listings. Athena counts its limit (Trino's `hive.max-partitions-per-scan`) the
     same way, after the static predicates and before join filters. EXPLAIN's `Scanning Files` counts the partitions
     kept out of every partition the parameters describe, and names no total when their product does not fit 64 bits.
-  - Writes (`INSERT`, `COPY ... FROM`, `CREATE TABLE ... AS`) into such a table stay refused: the partitions they
-    would register are ignored by Athena. `glue_partitions()` keeps listing the registered partitions only, as
-    Athena's `SHOW PARTITIONS` does.
+  - `INSERT` and `COPY ... FROM` write their files where the projection reads them, under `storage.location.template` or
+    in `<key>=<value>` directories, the value spelled as the projection does (padded to `digits`, a date in its
+    `format`, an injected value as the column type's text), and register no partition, as Athena's `INSERT` does. A
+    partition value the projection does not derive (an enum value not listed, an integer outside the range or off the
+    interval, a date outside the range or off the step, NULL, an empty injected value, a value spelling an empty, `.` or
+    `..` path segment) fails the statement, naming the column and the value (and the parameter that excludes it), or the
+    directory that can not be written; Athena refuses the same values but the last. `CREATE TABLE ... AS` with
+    projection parameters stays refused, as Athena's CTAS cannot configure projection: create the table, then `INSERT`.
+    `glue_partitions()` keeps listing the registered partitions only, as Athena's `SHOW PARTITIONS` does. A
+    `storage.location.template` with no directory before its first placeholder (`${k}/...`, `/${k}/...`, a placeholder
+    bucket), or an empty segment before it (`.../a//${k}`), fails the statement naming the parameter.
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
