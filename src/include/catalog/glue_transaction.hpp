@@ -3,12 +3,14 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_view_names.hpp"
 #include "execution/glue_hive_write.hpp"
 
 #include <functional>
@@ -16,6 +18,7 @@
 namespace duckdb {
 class GlueCatalog;
 class GlueSchemaEntry;
+class GlueView;
 
 enum class GlueTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -180,16 +183,23 @@ public:
 	//! The write's files are written and its partitions registered, nothing to undo
 	void CompleteHiveWrite(const string &write_id);
 
+	//! The view's WithIcebergTargets copy, one per transaction for DuckDB's cycle check, or the view itself
+	CatalogEntry &ViewForBinding(ClientContext &context, GlueView &view);
+
 public:
 	GlueCatalog &glue_catalog;
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
 	//! (so a prepared statement's two binds share it).
 	shared_ptr<GlueTransactionCache> cache;
+	//! experimental_glue_view_iceberg_catalogs when the transaction first used this catalog
+	const ViewIcebergCatalogs view_iceberg_catalogs;
 
 private:
 	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone
 	void UndoHiveWrite();
 
+	annotated_mutex views_lock;
+	reference_map_t<GlueView, unique_ptr<GlueView>> views_with_iceberg_targets DUCKDB_GUARDED_BY(views_lock);
 	GlueTransactionState transaction_state;
 	annotated_mutex hive_write_lock;
 	unique_ptr<GlueHiveWrite> hive_write DUCKDB_GUARDED_BY(hive_write_lock);

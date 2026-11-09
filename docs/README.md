@@ -304,6 +304,10 @@ this connection's cache: a write through it, a rollback, or DETACH.
   it applies to every connection and `SET SESSION` is refused), views can also read tables of catalogs of those types, stored as `"external:<type>:<alias>".<schema>.<table>` and read wherever a
   catalog of that type is attached under that alias, never from one in memory, temporary, system or attached hidden. A
   bare table name in a body written to Glue by other means is read from the view's own Glue database.
+- `experimental_glue_view_iceberg_catalogs` (global only, empty by default) maps a Glue catalog id to the alias of an
+  attached `TYPE ICEBERG` catalog: views store tables named through that catalog by their Glue name instead of the
+  alias, and read them through the mapped catalog after checking it serves that Glue catalog id. Without the setting,
+  views are stored and read as before.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.

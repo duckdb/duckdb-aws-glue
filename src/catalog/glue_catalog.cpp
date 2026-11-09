@@ -426,6 +426,11 @@ string GlueCatalog::FetchCatalogId(ClientContext &context) {
 	return reported_catalog_id;
 }
 
+string GlueCatalog::CatalogId(ClientContext &context) {
+	auto id = FetchCatalogId(context);
+	return id.empty() ? KnownCatalogId() : id;
+}
+
 void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 	if (!context.transaction.IsAutoCommit()) {
 		throw TransactionException("This connection is currently in a transaction. Transaction support is not "

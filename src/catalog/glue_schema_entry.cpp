@@ -586,17 +586,25 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	GlueViewInfo view;
 	view.database_name = database_info.name;
 	view.name = view_name;
-	// a DuckDB view's ViewOriginalText: the user's SQL; ViewExpandedText: tables of this catalog as db.t, of other
-	// catalogs by their Glue catalog id or "external:<type>:<alias>"
-	view.sql = GlueView::RenderViewSql(info);
+	// a DuckDB view's ViewOriginalText: the user's SQL, a table read through a mapped Iceberg catalog by its Glue
+	// name; ViewExpandedText: tables of this catalog as db.t, of other catalogs by their Glue catalog id or
+	// "external:<type>:<alias>"
+	// copied only under a mapping, the only way a table is stored by its Glue name
+	unique_ptr<SelectStatement> shown;
+	if (!GlueTransaction::Get(context, catalog).view_iceberg_catalogs.empty()) {
+		shown = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());
+	}
 	auto expanded = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());
-	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node);
+	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node, shown ? shown->node.get() : nullptr);
+	view.sql = shown ? shown->ToString() : info.query->ToString();
 	view.expanded_sql = expanded->ToString();
 	// names were resolved by lookups, not the binder: check they bind to the same column types (not names: an
 	// unaliased expression is named after its text, which the rewrite changes)
 	auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
 	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
-	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
+	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases,
+	                                 GlueViewNames::FindIcebergTargets(context, glue_catalog, *check->node),
+	                                 *check->node);
 	GlueViewNames::PinToCatalog(*check->node, catalog.GetName(), name);
 	vector<LogicalType> types;
 	vector<Identifier> names;
@@ -1104,7 +1112,15 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction trans
 		return nullptr;
 	}
 	auto &context = transaction.GetContext();
-	return tables.GetEntry(context, lookup_info);
+	auto entry = tables.GetEntry(context, lookup_info);
+	if (entry && entry->type == CatalogType::VIEW_ENTRY && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		// only a stored view body is redirected, and only to a catalog that serves the same Glue catalog id
+		auto &transaction = GlueTransaction::Get(context, catalog);
+		if (!transaction.view_iceberg_catalogs.empty()) {
+			return transaction.ViewForBinding(context, entry->Cast<GlueView>());
+		}
+	}
+	return entry;
 }
 
 } // namespace duckdb

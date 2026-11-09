@@ -5,6 +5,7 @@
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
 
@@ -18,30 +19,36 @@ GlueView::GlueView(Catalog &catalog, SchemaCatalogEntry &schema, CreateViewInfo 
 	this->internal = false;
 }
 
+unique_ptr<SelectStatement> GlueView::ParseStoredSql() const {
+	try {
+		auto parser = Parser::GetBuiltinParser();
+		return CreateViewInfo::ParseSelect(parser, select_sql);
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		throw BinderException("Glue view \"%s.%s\" could not be parsed: %s", table_info.schema_name, table_info.name,
+		                      error.RawMessage());
+	}
+}
+
 const SelectStatement &GlueView::GetQuery() {
+	lock_guard<mutex> guard(parse_lock);
 	if (!IsSupported()) {
 		throw BinderException("Glue view \"%s.%s\" can not be queried: %s", table_info.schema_name, table_info.name,
 		                      unsupported_reason);
 	}
-	lock_guard<mutex> guard(parse_lock);
+	auto own_catalog_only = [&]() {
+		return referenced_ids.empty() && iceberg_targets.empty();
+	};
 	if (!parsed) {
-		unique_ptr<SelectStatement> statement;
-		try {
-			auto parser = Parser::GetBuiltinParser();
-			statement = CreateViewInfo::ParseSelect(parser, select_sql);
-		} catch (std::exception &ex) {
-			ErrorData error(ex);
-			throw BinderException("Glue view \"%s.%s\" could not be parsed: %s", table_info.schema_name,
-			                      table_info.name, error.RawMessage());
-		}
+		auto statement = ParseStoredSql();
 		// set together: a failure here must not leave a parse without its ids
 		referenced_ids = GlueViewNames::ReferencedCatalogIds(*statement->node);
-		if (referenced_ids.empty()) {
+		if (own_catalog_only()) {
 			GlueViewNames::PinToCatalog(*statement->node, catalog.GetName(), schema.name);
 		}
 		parsed = std::move(statement);
 	}
-	if (referenced_ids.empty()) {
+	if (own_catalog_only()) {
 		// only the view's own catalog, which DuckDB binds the view in
 		return *parsed;
 	}
@@ -72,12 +79,60 @@ const SelectStatement &GlueView::GetQuery() {
 		return *existing->second;
 	}
 	auto copy = unique_ptr_cast<SQLStatement, SelectStatement>(parsed->Copy());
+	if (!iceberg_targets.empty()) {
+		// as in WithIcebergTargets
+		GlueViewNames::PinToCatalog(*copy->node, Identifier(), schema.name);
+	}
 	GlueViewNames::ResolveForReading(glue_catalog, table_info.schema_name + "." + table_info.name, aliases,
-	                                 *copy->node);
+	                                 iceberg_targets, *copy->node);
 	GlueViewNames::PinToCatalog(*copy->node, catalog.GetName(), schema.name);
 	auto &result = *copy;
 	resolved.emplace(std::move(signature), std::move(copy));
 	return result;
+}
+
+unique_ptr<GlueView> GlueView::WithIcebergTargets(ClientContext &context) {
+	if (!IsSupported()) {
+		return nullptr;
+	}
+	unique_ptr<SelectStatement> stored;
+	try {
+		stored = ParseStoredSql();
+		GlueViewNames::ReferencedCatalogIds(*stored->node);
+	} catch (std::exception &) {
+		// GetQuery reports it
+		return nullptr;
+	}
+	// a bare name in a body written by other means is a table of the view's database
+	GlueViewNames::PinToCatalog(*stored->node, Identifier(), schema.name);
+	auto copy = FromTableInfo(catalog, schema, table_info);
+	try {
+		copy->iceberg_targets = GlueViewNames::FindIcebergTargets(context, catalog.Cast<GlueCatalog>(), *stored->node);
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (error.Type() != ExceptionType::BINDER) {
+			// a Glue error, an interrupt, an internal error: thrown, and not kept for the transaction
+			throw;
+		}
+		copy->unsupported_reason = error.RawMessage();
+	}
+	if (copy->IsSupported() && copy->iceberg_targets.empty()) {
+		return nullptr;
+	}
+	return copy;
+}
+
+void GlueView::CheckIcebergCatalogs(ClientContext &context) {
+	for (auto &target : iceberg_targets) {
+		auto iceberg = Catalog::GetCatalogEntry(context, target.second.catalog);
+		if (!iceberg || iceberg->GetAttached().oid != target.second.catalog_oid) {
+			lock_guard<mutex> guard(parse_lock);
+			unsupported_reason = StringUtil::Format("catalog \"%s\" was detached or attached again after this "
+			                                        "transaction checked it; read the view in a new transaction",
+			                                        target.second.catalog.GetIdentifierName());
+			return;
+		}
+	}
 }
 
 string GlueView::ToSQL() const {
@@ -86,10 +141,6 @@ string GlueView::ToSQL() const {
 
 unique_ptr<CatalogEntry> GlueView::Copy(ClientContext &context) const {
 	return FromTableInfo(catalog, schema, table_info);
-}
-
-string GlueView::RenderViewSql(const CreateViewInfo &info) {
-	return info.query->ToString();
 }
 
 unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntry &schema, const GlueTableInfo &table) {

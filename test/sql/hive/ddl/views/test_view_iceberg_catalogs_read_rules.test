@@ -1,0 +1,265 @@
+# name: test/sql/hive/ddl/views/test_view_iceberg_catalogs_read_rules.test
+# description: experimental_glue_view_iceberg_catalogs on views over an Iceberg table (fixture_iceberg_view, fixture_iceberg_bare_view, fixture_iceberg_case_view) and a nested catalog's table (fixture_nested_view): a mapping is checked when the view is read and a table of it needs the mapping, only Iceberg tables of a mapped id use it, and a transaction reads one mapping. No mapping passes its check here: that needs the Glue Iceberg endpoint, which ATTACH of an Iceberg catalog contacts
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+RESET experimental_glue_view_iceberg_catalogs;
+
+statement ok
+ATTACH ':memory:' AS ic_mem;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.ic_cte;
+
+statement ok
+CREATE VIEW my_datalake.default.ic_cte AS WITH fixture_iceberg AS (SELECT 1 AS id) SELECT id FROM fixture_iceberg;
+
+# not set (NULL is the empty mapping): as before
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = NULL;
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_bare_view;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_case_view;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+# another id mapped: as before
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}:s3tablescatalog/ic-bucket': 'ic_missing'};
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+statement error
+INSERT INTO my_datalake.default.fixture_tf_query_view VALUES (1);
+----
+Catalog Error: fixture_tf_query_view is not an table
+
+statement error
+SELECT * FROM my_datalake.default.fixture_tf_query_view;
+----
+Binder Error: Glue views can not read from table functions ("query(NULL)")
+
+# the view's own id mapped: the mapping is checked when the view is read, and the error names the view. A bare name
+# in a body written by other means is a table of the view's database
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'ic_missing'};
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+Binder Error: Glue view "default.fixture_iceberg_view" can not be queried: experimental_glue_view_iceberg_catalogs maps Glue catalog id '{GLUE_CATALOG_ID}' to catalog "ic_missing", which is not attached
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_bare_view;
+----
+Binder Error: Glue view "default.fixture_iceberg_bare_view" can not be queried: experimental_glue_view_iceberg_catalogs maps Glue catalog id '{GLUE_CATALOG_ID}' to catalog "ic_missing", which is not attached
+
+# stored names are compared without case, also in a subquery
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_case_view;
+----
+Binder Error: Glue view "default.fixture_iceberg_case_view" can not be queried: experimental_glue_view_iceberg_catalogs maps Glue catalog id '{GLUE_CATALOG_ID}' to catalog "ic_missing", which is not attached
+
+# a CTE of a table's name is not that table
+query I
+SELECT * FROM my_datalake.default.ic_cte;
+----
+1
+
+statement error
+DESCRIBE my_datalake.default.fixture_iceberg_view;
+----
+to catalog "ic_missing", which is not attached
+
+# INSERT and DROP TABLE do not read the view: main's errors, whatever the mapping
+statement error
+INSERT INTO my_datalake.default.fixture_iceberg_view VALUES (1);
+----
+Catalog Error: fixture_iceberg_view is not an table
+
+statement error
+DROP TABLE my_datalake.default.fixture_iceberg_view;
+----
+Catalog Error: Existing object fixture_iceberg_view is of type View, trying to drop type Table
+
+statement error
+DROP TABLE IF EXISTS my_datalake.default.fixture_iceberg_view;
+----
+Catalog Error: Existing object fixture_iceberg_view is of type View, trying to drop type Table
+
+# UPDATE and DELETE bind the view's query first, as a read does
+statement error
+UPDATE my_datalake.default.fixture_iceberg_view SET id = 1;
+----
+to catalog "ic_missing", which is not attached
+
+statement error
+DELETE FROM my_datalake.default.fixture_iceberg_view;
+----
+to catalog "ic_missing", which is not attached
+
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'my_datalake'};
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+experimental_glue_view_iceberg_catalogs maps Glue catalog id '{GLUE_CATALOG_ID}' to catalog "my_datalake", which does not serve it: it is a catalog of type glue, not iceberg
+
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'ic_mem'};
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+experimental_glue_view_iceberg_catalogs maps Glue catalog id '{GLUE_CATALOG_ID}' to catalog "ic_mem", which does not serve it: it is a catalog of type duckdb, not iceberg
+
+# the table itself is never read through the mapping, even with a table of its name in the mapped catalog
+statement ok
+CREATE SCHEMA ic_mem."default";
+
+statement ok
+CREATE TABLE ic_mem."default".fixture_iceberg AS SELECT 42 AS id;
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+statement error
+INSERT INTO my_datalake.default.fixture_iceberg VALUES (1);
+----
+ICEBERG
+
+statement ok
+USE my_datalake.default;
+
+statement error
+SELECT * FROM fixture_iceberg;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+statement ok
+USE memory.main;
+
+# a transaction reads the mapping once, when it first uses the Glue catalog: a change applies from the next one
+statement ok
+RESET experimental_glue_view_iceberg_catalogs;
+
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) > 0 FROM duckdb_tables() WHERE database_name = 'my_datalake';
+----
+true
+
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'ic_missing'};
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+statement ok
+ROLLBACK;
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+to catalog "ic_missing", which is not attached
+
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) > 0 FROM duckdb_tables() WHERE database_name = 'my_datalake';
+----
+true
+
+statement ok
+RESET experimental_glue_view_iceberg_catalogs;
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+to catalog "ic_missing", which is not attached
+
+statement ok
+ROLLBACK;
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_view;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+# a nested catalog's id: without a Glue catalog of that id attached, every table of it is read through the mapping
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.nested_view_base;
+
+statement ok
+CREATE TABLE my_datalake.default.nested_view_base (id BIGINT);
+
+statement ok
+INSERT INTO my_datalake.default.nested_view_base VALUES (1), (2), (3);
+
+# ids are compared case-insensitively
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}:S3TablesCatalog/Fixture-Bucket': 'ic_missing'};
+
+statement error
+SELECT * FROM my_datalake.default.fixture_nested_view;
+----
+experimental_glue_view_iceberg_catalogs maps Glue catalog id '{GLUE_CATALOG_ID}:S3TablesCatalog/Fixture-Bucket' to catalog "ic_missing", which is not attached
+
+# with one attached, its Hive table is read from Glue (the local Glue ignores catalog ids)
+statement ok
+attach '{GLUE_CATALOG_ID}:s3tablescatalog/fixture-bucket' as ic_nested (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', VERIFY_CONNECTION false);
+
+query I
+SELECT sum(id) FROM my_datalake.default.fixture_nested_view;
+----
+6
+
+statement ok
+RESET experimental_glue_view_iceberg_catalogs;
+
+query I
+SELECT sum(id) FROM my_datalake.default.fixture_nested_view;
+----
+6
+
+statement ok
+DROP TABLE my_datalake.default.nested_view_base;
+
+statement ok
+DROP VIEW my_datalake.default.ic_cte;

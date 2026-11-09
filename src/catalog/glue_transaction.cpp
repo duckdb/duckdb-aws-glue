@@ -1,5 +1,6 @@
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_view.hpp"
 #include "planning/hive_query_cache.hpp"
 
 #include "duckdb/common/atomic.hpp"
@@ -7,12 +8,23 @@
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 
 namespace duckdb {
 
+static ViewIcebergCatalogs CurrentViewIcebergCatalogs(ClientContext &context) {
+	Value setting;
+	if (!DatabaseInstance::GetDatabase(context).TryGetCurrentSetting("experimental_glue_view_iceberg_catalogs",
+	                                                                 setting)) {
+		return ViewIcebergCatalogs();
+	}
+	return GlueViewNames::ReadViewIcebergCatalogs(setting);
+}
+
 GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &manager, ClientContext &context)
     : Transaction(manager, context), glue_catalog(glue_catalog),
+      view_iceberg_catalogs(CurrentViewIcebergCatalogs(context)),
       transaction_state(GlueTransactionState::TRANSACTION_NOT_YET_STARTED) {
 	if (GlueTransactionCache::ConnectionScoped(context)) {
 		auto state = context.registered_state->GetOrCreate<GlueMetadataCacheState>("glue_metadata_cache");
@@ -157,6 +169,30 @@ GlueTransactionCache::InvalidateOnExit::~InvalidateOnExit() {
 		DUCKDB_LOG_WARNING(context, "Could not invalidate the Glue metadata cache of catalog '%s': unknown exception",
 		                   catalog.GetName().GetIdentifierName());
 	}
+}
+
+CatalogEntry &GlueTransaction::ViewForBinding(ClientContext &context, GlueView &view) {
+	optional_ptr<GlueView> copy;
+	bool made = false;
+	{
+		annotated_lock_guard<annotated_mutex> guard(views_lock);
+		auto existing = views_with_iceberg_targets.find(view);
+		if (existing != views_with_iceberg_targets.end()) {
+			copy = existing->second.get();
+			made = true;
+		}
+	}
+	if (!made) {
+		// Glue lookups outside the lock
+		auto with_targets = view.WithIcebergTargets(context);
+		annotated_lock_guard<annotated_mutex> guard(views_lock);
+		copy = views_with_iceberg_targets.emplace(view, std::move(with_targets)).first->second.get();
+	}
+	if (!copy) {
+		return view;
+	}
+	copy->CheckIcebergCatalogs(context);
+	return *copy;
 }
 
 } // namespace duckdb

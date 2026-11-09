@@ -21,6 +21,7 @@
 #include <mutex>
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction_manager.hpp"
+#include "catalog/glue_view_names.hpp"
 
 namespace duckdb {
 
@@ -37,6 +38,10 @@ public:
 		create_transaction_manager = CreateTransactionManager;
 	}
 };
+
+static void SetViewIcebergCatalogs(ClientContext &context, SetScope scope, Value &parameter) {
+	GlueViewNames::ReadViewIcebergCatalogs(parameter);
+}
 
 static void InitAWSAPI() {
 	// Should only be called once, and databases can load the extension concurrently
@@ -84,6 +89,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    SetScope::GLOBAL, false, false);
 	external_catalog_types.supports_session = false;
 	config.AddExtensionOption("experimental_glue_view_external_catalog_types", std::move(external_catalog_types));
+	// global only too: the views of a database read one mapping
+	ExtensionOption view_iceberg_catalogs(
+	    "Map of Glue catalog id ('<account id>' or '<account id>:<catalog>') to the alias of an attached TYPE ICEBERG "
+	    "catalog serving it through the Glue Iceberg endpoint of the same region. Glue views read their Iceberg "
+	    "tables of that id from it, and CREATE VIEW stores a table named through it by its Glue name. Other queries "
+	    "are not affected. Read once per transaction. Global only. Default empty.",
+	    LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR), SetViewIcebergCatalogs,
+	    Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, vector<Value>(), vector<Value>()), SetScope::GLOBAL,
+	    false, false);
+	view_iceberg_catalogs.supports_session = false;
+	config.AddExtensionOption("experimental_glue_view_iceberg_catalogs", std::move(view_iceberg_catalogs));
 	config.AddExtensionOption("glue_metadata_cache_scope",
 	                          "How long resolved Glue metadata (tables, partitions) is reused: 'transaction' (default) "
 	                          "re-resolves per transaction, so writes from other sessions become visible between "
