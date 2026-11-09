@@ -170,6 +170,8 @@ public:
 	                     string table_name);
 
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
+	//! Before a lookup: keeps the entries it hands out alive (GlueTransactionManager::PinEntries)
+	static void PinForLookup(ClientContext &context, Catalog &catalog);
 
 public:
 	GlueCatalog &glue_catalog;

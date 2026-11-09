@@ -5,6 +5,7 @@
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
@@ -42,8 +43,7 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 	if (name.empty()) {
 		return nullptr;
 	}
-	// as in GlueTableSet::GetEntry, the reader's Glue transaction keeps a retired entry alive while it is used
-	Transaction::Get(context, catalog);
+	GlueTransaction::PinForLookup(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	auto entry = entries.find(name);
 	if (entry != entries.end()) {
@@ -79,7 +79,7 @@ optional_ptr<CatalogEntry> GlueSchemaSet::AddEntryIfAbsent(unique_ptr<GlueSchema
 }
 
 void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
-	Transaction::Get(context, catalog);
+	GlueTransaction::PinForLookup(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	LoadEntries(context);
 	for (auto &entry : entries) {

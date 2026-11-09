@@ -1,5 +1,6 @@
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction_manager.hpp"
 #include "planning/hive_query_cache.hpp"
 
 #include "duckdb/common/atomic.hpp"
@@ -64,6 +65,11 @@ void GlueTransaction::AddCreatedTable(std::shared_ptr<Aws::Glue::GlueClient> cli
 
 GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog).Cast<GlueTransaction>();
+}
+
+void GlueTransaction::PinForLookup(ClientContext &context, Catalog &catalog) {
+	auto &transaction = Get(context, catalog);
+	transaction.manager.Cast<GlueTransactionManager>().PinEntries(context, transaction);
 }
 
 idx_t GlueTransactionCache::NextId() {

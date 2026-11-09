@@ -2,6 +2,7 @@
 #include "catalog/glue_catalog.hpp"
 
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/client_context.hpp"
 
 #include <algorithm>
 
@@ -17,7 +18,6 @@ Transaction &GlueTransactionManager::StartTransaction(ClientContext &context) {
 	auto &result = *transaction;
 	lock_guard<mutex> l(transaction_lock);
 	transactions[result] = std::move(transaction);
-	transaction_sequence[result] = next_sequence++;
 	return result;
 }
 
@@ -25,7 +25,7 @@ ErrorData GlueTransactionManager::CommitTransaction(ClientContext &context, Tran
 	auto &glue_transaction = transaction.Cast<GlueTransaction>();
 	glue_transaction.Commit();
 	lock_guard<mutex> l(transaction_lock);
-	transaction_sequence.erase(transaction);
+	EndPin(transaction);
 	transactions.erase(transaction);
 	FreeRetiredEntries();
 	return ErrorData();
@@ -35,7 +35,7 @@ void GlueTransactionManager::RollbackTransaction(Transaction &transaction) {
 	auto &glue_transaction = transaction.Cast<GlueTransaction>();
 	glue_transaction.Rollback();
 	lock_guard<mutex> l(transaction_lock);
-	transaction_sequence.erase(transaction);
+	EndPin(transaction);
 	transactions.erase(transaction);
 	FreeRetiredEntries();
 }
@@ -45,15 +45,62 @@ void GlueTransactionManager::RetireEntry(unique_ptr<CatalogEntry> entry) {
 	retired_entries.push_back(RetiredEntry {next_sequence, std::move(entry)});
 }
 
-void GlueTransactionManager::FreeRetiredEntries() {
-	auto oldest_running = NumericLimits<idx_t>::Maximum();
-	for (auto &entry : transaction_sequence) {
-		oldest_running = MinValue(oldest_running, entry.second);
+void GlueTransactionManager::PinEntries(ClientContext &context, Transaction &transaction) {
+	lock_guard<mutex> l(transaction_lock);
+	auto entry = pins.find(transaction);
+	if (entry != pins.end() && !IsReleased(entry->second)) {
+		return;
 	}
-	retired_entries.erase(
-	    std::remove_if(retired_entries.begin(), retired_entries.end(),
-	                   [&](const RetiredEntry &retired) { return retired.retired_at <= oldest_running; }),
-	    retired_entries.end());
+	// an API call that binds outside a query (ExtractPlan) keeps its pin until the transaction ends
+	shared_ptr<GlueQueryEnds> query_ends;
+	if (transaction.active_query.load() != MAXIMUM_QUERY_ID) {
+		query_ends = context.registered_state->GetOrCreate<GlueQueryEnds>("glue_query_ends");
+	}
+	auto ended = query_ends ? query_ends->ended.load() : 0;
+	pins[transaction] = Pin {next_sequence++, query_ends != nullptr, query_ends, ended};
+	// what the replaced pin held may be freed now, also when no transaction ends for a while
+	FreeRetiredEntries();
+}
+
+void GlueTransactionManager::EndPin(Transaction &transaction) {
+	auto entry = pins.find(transaction);
+	if (entry == pins.end()) {
+		return;
+	}
+	// an explicit transaction of a connection being destroyed is rolled back before its query's tasks are cancelled
+	if (transaction.context.expired() && entry->second.in_query && !IsReleased(entry->second)) {
+		closing_pins.push_back(std::move(entry->second));
+	}
+	pins.erase(entry);
+}
+
+idx_t GlueTransactionManager::RetiredEntryCount() {
+	lock_guard<mutex> l(transaction_lock);
+	return retired_entries.size();
+}
+
+bool GlueTransactionManager::IsReleased(const Pin &pin) {
+	if (!pin.in_query) {
+		return false;
+	}
+	auto query_ends = pin.query_ends.lock();
+	return !query_ends || query_ends->ended.load() != pin.ended;
+}
+
+void GlueTransactionManager::FreeRetiredEntries() {
+	closing_pins.erase(std::remove_if(closing_pins.begin(), closing_pins.end(), IsReleased), closing_pins.end());
+	auto oldest_pin = NumericLimits<idx_t>::Maximum();
+	for (auto &pin : closing_pins) {
+		oldest_pin = MinValue(oldest_pin, pin.sequence);
+	}
+	for (auto &entry : pins) {
+		if (!IsReleased(entry.second)) {
+			oldest_pin = MinValue(oldest_pin, entry.second.sequence);
+		}
+	}
+	retired_entries.erase(std::remove_if(retired_entries.begin(), retired_entries.end(),
+	                                     [&](const RetiredEntry &retired) { return retired.retired_at <= oldest_pin; }),
+	                      retired_entries.end());
 }
 
 void GlueTransactionManager::Checkpoint(ClientContext &context, bool force) {

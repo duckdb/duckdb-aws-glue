@@ -1,10 +1,11 @@
 # Catch tests of functions/hive_reader_call.hpp, which no SQL reaches, of Glue
 # states only the API reaches, and of what a copied plan's scans report, which
-# no SQL shows; built only on request (make test-cpp)
+# no SQL shows, and of the catalog entries Glue transactions keep; built only on
+# request (make test-cpp)
 add_executable(
   unittest_glue EXCLUDE_FROM_ALL
   main.cpp glue_partitions_test.cpp hive_reader_call_test.cpp
-  hive_scan_copy_test.cpp)
+  hive_scan_copy_test.cpp glue_retired_entries_test.cpp)
 target_include_directories(unittest_glue
                            PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
 set_target_properties(unittest_glue PROPERTIES RUNTIME_OUTPUT_DIRECTORY

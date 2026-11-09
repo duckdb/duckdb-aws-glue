@@ -136,9 +136,8 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
 	auto &name = lookup.GetEntryName();
-	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
-	// is started before entry_lock is taken, the order RetireEntry takes the locks in
-	Transaction::Get(context, catalog);
+	// before the entry is found, so its retirement comes after the pin
+	GlueTransaction::PinForLookup(context, catalog);
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	bool cached;
 	string glue_name;
@@ -200,7 +199,7 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 	// tables and views share the set and a scan of either type yields both, as in DuckDB's own schema: the catalog
 	// functions filter by entry type themselves, and duckdb_columns() collects the columns of views through a
 	// TABLE_ENTRY scan
-	Transaction::Get(context, catalog);
+	GlueTransaction::PinForLookup(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	LoadEntries(context);
 	for (auto &entry : entries) {
