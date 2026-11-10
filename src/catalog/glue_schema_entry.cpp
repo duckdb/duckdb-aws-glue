@@ -1,11 +1,13 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_view.hpp"
 #include "catalog/glue_view_names.hpp"
+#include "catalog/scan_filter_equality.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/catalog/entry_scan_filters.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -35,8 +37,10 @@
 
 namespace duckdb {
 
-GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p)
-    : SchemaCatalogEntry(catalog, info), database_info(std::move(database_info_p)), tables(*this) {
+GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p,
+                                 bool schema_info_loaded)
+    : SchemaCatalogEntry(catalog, info), tables(*this), database_info(std::move(database_info_p)),
+      schema_info_loaded(schema_info_loaded) {
 }
 
 GlueSchemaEntry::~GlueSchemaEntry() {
@@ -118,19 +122,30 @@ GlueFormat GlueSchemaEntry::GetCreateTableFormat(ClientContext &context, const C
 	return ParseTableType(EvaluateOptions(context, option, "CREATE TABLE")[0].second.ToString(), "option 'table_type'");
 }
 
+static string LookupSpelling(const case_insensitive_map_t<string> &spellings, const string &key) {
+	auto entry = spellings.find(key);
+	return entry == spellings.end() ? string() : entry->second;
+}
+
 //! The Glue option another spelling of a bucketing option stands for, empty if the key is none of them
 static string BucketingOptionFor(const string &key) {
-	static const pair<const char *, const char *> SPELLINGS[] = {
+	static const case_insensitive_map_t<string> SPELLINGS = {
 	    {"bucket_columns", "BucketColumns"}, {"bucketed_by", "BucketColumns"},
 	    {"clustered_by", "BucketColumns"},   {"number_of_buckets", "NumberOfBuckets"},
 	    {"bucket_count", "NumberOfBuckets"}, {"sort_columns", "SortColumns"},
 	    {"sorted_by", "SortColumns"}};
-	for (auto &spelling : SPELLINGS) {
-		if (StringUtil::CIEquals(key, spelling.first)) {
-			return spelling.second;
-		}
-	}
-	return string();
+	return LookupSpelling(SPELLINGS, key);
+}
+
+//! The spelling to use for another engine's CREATE TABLE option, empty if the key is none of them
+static string OtherEngineOptionFor(const string &key) {
+	static constexpr const char *PARTITIONED_BY_CLAUSE = "a PARTITIONED BY (...) clause";
+	static const case_insensitive_map_t<string> SPELLINGS = {
+	    {"partitioned_by", PARTITIONED_BY_CLAUSE},  {"partitioning", PARTITIONED_BY_CLAUSE},
+	    {"partition_by", PARTITIONED_BY_CLAUSE},    {"partition_columns", PARTITIONED_BY_CLAUSE},
+	    {"partition_keys", PARTITIONED_BY_CLAUSE},  {"PartitionKeys", PARTITIONED_BY_CLAUSE},
+	    {"external_location", "option 'location'"}, {"field_delimiter", "option 'delimiter'"}};
+	return LookupSpelling(SPELLINGS, key);
 }
 
 static void CheckBucketedTablesEnabled(ClientContext &context, const string &key) {
@@ -320,6 +335,8 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			} else {
 				result.csv_escape = string_value;
 			}
+		} else if (StringUtil::CIEquals(key, "overwrite")) {
+			result.overwrite = value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else if (StringUtil::CIEquals(key, "header")) {
 			// csv files with a header line: Hive's "TBLPROPERTIES ('skip.header.line.count' = '1')"
 			if (value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>()) {
@@ -338,6 +355,8 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			// stored as a table parameter this would silently leave the table unbucketed
 			throw BinderException("Unknown CREATE TABLE option '%s', a bucketed Glue table is created with option '%s'",
 			                      key, BucketingOptionFor(key));
+		} else if (!OtherEngineOptionFor(key).empty()) {
+			throw BinderException("Unknown CREATE TABLE option '%s', use %s instead", key, OtherEngineOptionFor(key));
 		} else {
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;
@@ -541,8 +560,13 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	if (!options.description.empty()) {
 		table.description = options.description;
 	}
-	table.location =
-	    options.location.empty() ? glue_catalog.GetTableLocation(database_info, table_name) : options.location;
+	if (options.location.empty()) {
+		// the database's LocationUri only matters without DEFAULT_LOCATION, which wins over it
+		auto &database = glue_catalog.options.default_location.empty() ? GetSchemaInfo(context) : database_info;
+		table.location = glue_catalog.GetTableLocation(database, table_name);
+	} else {
+		table.location = options.location;
+	}
 	table.parameters = options.parameters;
 	table.file_format = options.format;
 	if (table.file_format == HiveFileFormat::CSV) {
@@ -624,6 +648,11 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	if (CheckCreateTableConflict(context, base)) {
 		return nullptr;
 	}
+	// CREATE TABLE AS creates its table through CreateTableFromInfo
+	if (!resolved_table_info && base.options.find("overwrite") != base.options.end()) {
+		throw BinderException("CREATE TABLE option 'overwrite' is only for CREATE TABLE ... AS: a table created "
+		                      "without a query writes no files");
+	}
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
 	D_ASSERT(table.schema_name == database_info.name);
@@ -687,13 +716,13 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
 	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
 	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
-	GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
+	GlueViewNames::PinToCatalog(*check->node, catalog.GetName(), name);
 	vector<LogicalType> types;
 	vector<Identifier> names;
 	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
 	// if its new query would read itself under this alias (not when a path reaches it under another alias)
 	LogicalDependencyList reads;
-	Binder::BindView(context, *check, catalog.GetName(), name, &reads, info.aliases, types, names);
+	Binder::BindView(context, *check, catalog.GetName(), GetSchemaPath(), &reads, info.aliases, types, names);
 	if (existing && reads.Contains(*existing)) {
 		throw BinderException("Glue view \"%s.%s\" can not be created: its query reads the view itself",
 		                      database_info.name, view_name);
@@ -1151,6 +1180,48 @@ void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEnt
 //! returned instead
 static bool CanUseGlueEntryOfIcebergTable(ExceptionType type) {
 	return type == ExceptionType::HTTP || type == ExceptionType::IO || type == ExceptionType::CATALOG;
+}
+
+void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
+	string name;
+	if (!CatalogTypeIsSupported(info.type) || !info.filter || info.filter->GetOid() ||
+	    !TryGetNameEquality(info.filter->GetName(), "GlueSchemaEntry::Scan", name)) {
+		SchemaCatalogEntry::Scan(context, info);
+		return;
+	}
+	// tables and views share the set, so the lookup returns whichever Glue holds under the name; the caller keeps
+	// the entries of the type it asked for
+	EntryLookupInfo lookup(info.type, QualifiedName(Identifier(name)));
+	auto entry = tables.GetEntry(context, lookup);
+	if (entry) {
+		info.callback(*entry);
+	}
+}
+
+const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
+	lock_guard<mutex> guard(schema_info_lock);
+	if (!schema_info_loaded) {
+		GlueDatabaseInfo database;
+		if (!GlueAPI::GetDatabase(context, catalog.Cast<GlueCatalog>(), database_info.name, database)) {
+			throw CatalogException("Glue database \"%s\" no longer exists", database_info.name);
+		}
+		database_info.description = std::move(database.description);
+		database_info.location_uri = std::move(database.location_uri);
+		database_info.parameters = std::move(database.parameters);
+		schema_info_loaded = true;
+	}
+	return database_info;
+}
+
+void GlueSchemaEntry::SetSchemaInfo(const GlueDatabaseInfo &database) {
+	lock_guard<mutex> guard(schema_info_lock);
+	if (schema_info_loaded) {
+		return;
+	}
+	database_info.description = database.description;
+	database_info.location_uri = database.location_uri;
+	database_info.parameters = database.parameters;
+	schema_info_loaded = true;
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,

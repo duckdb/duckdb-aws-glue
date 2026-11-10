@@ -1,4 +1,5 @@
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_file_credentials.hpp"
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -228,7 +229,7 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 			                              "projection.enabled to false and register the partitions to read it",
 			                              table_info.schema_name, table_info.name);
 		}
-		return GetHiveScanFunction(context, bind_data, table_info);
+		return GetHiveScanFunction(context, bind_data);
 	case GlueFormat::ICEBERG:
 		// only reached when loading it from the Iceberg catalog failed at lookup: loading it again reports the error
 		catalog.Cast<GlueCatalog>().GetIcebergTable(context, table_info.schema_name, table_info.name);
@@ -244,30 +245,31 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 //===--------------------------------------------------------------------===//
 // Hive scan
 //===--------------------------------------------------------------------===//
-TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
-                                             const GlueTableInfo &latest_info) {
+TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	// The scan produces the columns this entry was planned with: data columns first, partition keys last. The SerDe
 	// decides the file format (throws for unsupported SerDes).
 	auto scan_info = make_shared_ptr<HiveScanInfo>();
+	scan_info->scan_id = HiveQueryCache::Get(context)->NextScanId();
 	scan_info->catalog_name = catalog.GetName().GetIdentifierName();
-	scan_info->database_name = latest_info.schema_name;
-	scan_info->table_name = latest_info.name;
+	scan_info->database_name = table_info.schema_name;
+	scan_info->table_name = table_info.name;
 	scan_info->table = this;
-	scan_info->root_location = latest_info.location;
-	scan_info->file_format = latest_info.GetFileFormat();
+	scan_info->root_location = table_info.location;
+	scan_info->file_format = table_info.GetFileFormat();
 	if (IsTextFileFormat(scan_info->file_format)) {
-		latest_info.CheckTextSerdeSupported(scan_info->file_format);
+		table_info.CheckTextSerdeSupported(scan_info->file_format);
 	}
 	if (scan_info->file_format == HiveFileFormat::CSV) {
-		scan_info->csv_options = latest_info.GetCSVOptions();
+		scan_info->csv_options = table_info.GetCSVOptions();
 	}
 	if (scan_info->file_format == HiveFileFormat::JSON) {
-		scan_info->json_options = latest_info.GetJSONOptions();
+		scan_info->json_options = table_info.GetJSONOptions();
 		for (auto &property : scan_info->json_options.unsupported_properties) {
 			DUCKDB_LOG_WARNING(context, "Glue table '%s.%s': SerDe property '%s' is not applied when reading",
-			                   latest_info.schema_name, latest_info.name, property);
+			                   table_info.schema_name, table_info.name, property);
 		}
 	}
+	scan_info->file_secret = GlueFileCredentialsCallback::Get(context, *this);
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

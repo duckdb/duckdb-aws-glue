@@ -173,9 +173,10 @@ physical_plan	<REGEX>:.*Hive Scan.*~1,200 rows.*
 #   dt=d2  3 files    600 rows
 #   dt=d3  1 file   1,800 rows
 #
-# Only the first partition is listed when the cost is asked for, so d0 sets the rate for the whole table:
-# EstimateTotalFileCount extrapolates 1 file per partition x 4 = 4 files, and 10 rows x 4 = ~40 against a
-# true 2,420. The byte-scaling guard in HiveScanCardinality (largest > smallest x 2) cannot help, because
+# Only the first partition is listed when the cost is asked for, so it sets the rate for the whole table. When
+# that is d0, EstimateTotalFileCount extrapolates 1 file per partition x 4 = 4 files, and 10 rows x 4 = ~40 against
+# a true 2,420. Which partition comes first is Glue's order: moto keeps the order they were added in, AWS Glue lists
+# in segments in no set order, so d2 (~2,400) or d3 (~7,200) can set the rate too. The byte-scaling guard in HiveScanCardinality (largest > smallest x 2) cannot help, because
 # every file it can see comes from that one uniform partition.
 # ----------------------------------------------------------------------------------------------------
 
@@ -218,7 +219,7 @@ SELECT
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_skw;
 ----
-physical_plan	<REGEX>:.*Hive Scan.*~40 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~(40|2,400|7,200) rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # json -- the same five shapes. json is written one object per line, so it is line-counted like csv.
@@ -320,11 +321,11 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.json_skw')), (
 ----
 4	2420
 
-# the same 60x under-estimate as csv, which is what says it is the shared extrapolation and not the reader
+# the same extrapolation from one partition as csv, which is what says it is the shared extrapolation and not the reader
 query II
 EXPLAIN SELECT * FROM my_datalake.default.json_skw;
 ----
-physical_plan	<REGEX>:.*Hive Scan.*~40 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~(40|2,400|7,200) rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # compressed csv -- the lines of a compressed prefix are noise, and its size is not the file's. gzip

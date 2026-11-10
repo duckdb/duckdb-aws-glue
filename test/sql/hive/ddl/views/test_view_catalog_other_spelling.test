@@ -1,0 +1,59 @@
+# name: test/sql/hive/ddl/views/test_view_catalog_other_spelling.test
+# description: a catalog is the view's own when Glue reports the same id for it, whatever the ATTACH path
+# group: [views]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# the local Glue (moto) answers for the account of the credentials whatever CatalogId is sent, so a catalog attached
+# as '111111111111' with the same credentials is the view's own catalog. In AWS an account-id path and Glue's report
+# agree; for "<catalog>/<nested>" Glue reports "<account>:<catalog>/<nested>".
+require-env GLUE_TEST_CONFIG local
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as writer_cat (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.vos_view;
+
+statement ok
+DROP TABLE IF EXISTS writer_cat.default.vos_orders;
+
+statement ok
+CREATE TABLE writer_cat.default.vos_orders (id INTEGER);
+
+statement ok
+INSERT INTO writer_cat.default.vos_orders VALUES (1), (2);
+
+statement ok
+attach '111111111111' as other_spelling (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+CREATE VIEW writer_cat.default.vos_view AS SELECT id FROM other_spelling.default.vos_orders;
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.vos_view');
+----
+SELECT id FROM "default".vos_orders
+
+query I
+SELECT id FROM writer_cat.default.vos_view ORDER BY id;
+----
+1
+2
+
+statement ok
+DETACH other_spelling;
+
+statement ok
+DROP VIEW writer_cat.default.vos_view;
+
+statement ok
+DROP TABLE writer_cat.default.vos_orders;

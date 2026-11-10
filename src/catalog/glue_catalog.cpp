@@ -17,10 +17,6 @@
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/database_size.hpp"
 
@@ -30,9 +26,11 @@
 #include "duckdb/planner/operator/logical_update.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_file_credentials.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "catalog/scan_filter_equality.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -208,7 +206,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry &schema, AlterSchemaInfo &info) {
 	auto &context = transaction.GetContext();
 	ThrowIfInExplicitTransaction(context);
-	auto schema_name = schema.Cast<GlueSchemaEntry>().database_info.name;
+	auto schema_name = schema.Cast<GlueSchemaEntry>().GetDatabaseName();
 	// work on the current Glue definition, not the cached one
 	GlueDatabaseInfo database;
 	if (!GlueAPI::GetDatabase(context, *this, schema_name, database)) {
@@ -278,52 +276,11 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 	schemas.Scan(context, [&](CatalogEntry &schema) { callback(schema.Cast<GlueSchemaEntry>()); });
 }
 
-//! Whether the expression is the schema_name column itself, or lower() of it
-static bool IsSchemaNameOperand(const Expression &expr) {
-	if (ExpressionFilter::IsSimpleFilterColumnRef(expr)) {
-		return true;
-	}
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
-		return false;
-	}
-	auto &function = expr.Cast<BoundFunctionExpression>();
-	return function.Function().GetName() == "lower" && function.GetChildren().size() == 1 &&
-	       ExpressionFilter::IsSimpleFilterColumnRef(*function.GetChildren()[0]);
-}
-
-//! Extracts the name from a `schema_name = 'x'` or `lower(schema_name) = 'x'` filter. Glue stores database names
-//! lowercased, so a single lookup of 'x' finds every database either shape can accept.
-static bool TryGetSchemaNameEquality(optional_ptr<const TableFilter> filter, string &name) {
-	if (!filter) {
-		return false;
-	}
-	auto &expr = *ExpressionFilter::GetExpressionFilter(*filter, "GlueCatalog::GetSchemasForScan").expr;
-	if (!BoundComparisonExpression::IsComparison(expr) || expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
-		return false;
-	}
-	auto &comparison = expr.Cast<BoundFunctionExpression>();
-	auto &left = BoundComparisonExpression::Left(comparison);
-	auto &right = BoundComparisonExpression::Right(comparison);
-	optional_ptr<const Expression> constant;
-	if (IsSchemaNameOperand(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		constant = right;
-	} else if (IsSchemaNameOperand(right) && left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		constant = left;
-	} else {
-		return false;
-	}
-	auto &value = constant->Cast<BoundConstantExpression>().GetValue();
-	if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
-		return false;
-	}
-	name = StringValue::Get(value);
-	return true;
-}
-
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
                                                                      const SchemaScanFilters &filters) {
 	string name;
-	if (filters.schema_oid || !TryGetSchemaNameEquality(filters.schema_name, name)) {
+	if (filters.GetSchemaOid() ||
+	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
 		return Catalog::GetSchemasForScan(context, filters);
 	}
 	vector<reference<SchemaCatalogEntry>> result;
@@ -366,6 +323,68 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 		                       schema_name);
 	}
 	return &entry->Cast<SchemaCatalogEntry>();
+}
+
+CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transaction,
+                                                       const EntryLookupInfo &lookup_info) {
+	if (lookup_info.GetAtClause() && !SupportsTimeTravel()) {
+		return {nullptr, nullptr, ErrorData(BinderException("Catalog type does not support time travel"))};
+	}
+	CatalogEntryLookup result {nullptr, nullptr, ErrorData()};
+	auto &catalog = lookup_info.GetCatalog();
+	auto &database_name = lookup_info.GetSchema().GetIdentifierName();
+	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db, t]
+	if (lookup_info.GetQualifiedName().Path().size() > 3 || database_name.empty() ||
+	    (!catalog.empty() && !StringUtil::CIEquals(catalog.GetIdentifierName(), GetName().GetIdentifierName()))) {
+		return result;
+	}
+	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		switch (TryLookupTableBeforeSchema(transaction, lookup_info, database_name, result)) {
+		case TableLookup::TABLE_FOUND:
+		case TableLookup::TABLE_NOT_FOUND:
+		case TableLookup::SCHEMA_NOT_FOUND:
+			// 'result' holds the table and its schema, the schema alone, or neither
+			return result;
+		case TableLookup::SKIPPED:
+			break;
+		}
+	}
+	auto schema = schemas.GetEntry(transaction.GetContext(), database_name);
+	if (schema) {
+		result.schema = &schema->Cast<SchemaCatalogEntry>();
+		result.entry = result.schema->LookupEntry(transaction, lookup_info);
+	}
+	return result;
+}
+
+TableLookup GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+                                                    const string &database_name, CatalogEntryLookup &result) {
+	// Glue keeps database names in lower case, as GetDatabase would name the schema
+	GlueDatabaseInfo database;
+	database.name = StringUtil::Lower(database_name);
+	if (schemas.GetCachedEntry(database.name)) {
+		return TableLookup::SKIPPED;
+	}
+	auto schema = schemas.CreateSchemaEntry(database, false);
+	auto entry = schema->LookupEntry(transaction, lookup_info);
+	if (!entry) {
+		// the table or its schema is missing: GetDatabase tells which, without asking for the table again
+		auto loaded = schemas.GetEntry(transaction.GetContext(), database.name);
+		if (!loaded) {
+			return TableLookup::SCHEMA_NOT_FOUND;
+		}
+		result.schema = &loaded->Cast<SchemaCatalogEntry>();
+		return TableLookup::TABLE_NOT_FOUND;
+	}
+	// The set's lock is not held across the GetTable above, so another lookup can have added the schema since the
+	// GetCachedEntry check. Then that entry is kept and the regular lookup finds the table in it, from the cache.
+	auto added = schemas.AddEntryIfAbsent(std::move(schema));
+	if (!added) {
+		return TableLookup::SKIPPED;
+	}
+	result.schema = &added->Cast<SchemaCatalogEntry>();
+	result.entry = entry;
+	return TableLookup::TABLE_FOUND;
 }
 
 //! "<12-digit account>" or "<12-digit account>:..."
@@ -413,6 +432,15 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 		throw TransactionException("This connection is currently in a transaction. Transaction support is not "
 		                           "provided for Glue catalogs. Please call COMMIT, ABORT or ROLLBACK before trying "
 		                           "the query again");
+	}
+}
+
+void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context, const char *function) {
+	if (!context.transaction.IsAutoCommit()) {
+		throw TransactionException(
+		    "%s changes Glue, which has no transactions, so it can not run inside a transaction: "
+		    "run it as a statement of its own, CALL %s(...), outside BEGIN ... COMMIT",
+		    function, function);
 	}
 }
 
@@ -468,6 +496,13 @@ PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGe
 	ThrowIfInExplicitTransaction(context);
 	GlueTableInfo table_info;
 	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
+	// an INSERT writes by path, without the credentials the table's scans read with
+	// TODO: support INSERT into a table with credentials, by writing its files with them
+	if (!GlueFileCredentialsCallback::Get(context, glue_table).empty()) {
+		throw NotImplementedException("INSERT into Glue table '%s', which is read with file credentials, is not "
+		                              "supported",
+		                              op.table.name.GetIdentifierName());
+	}
 	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, table_info, plan);
 }
 
@@ -486,14 +521,14 @@ PhysicalOperator &GlueCatalog::PlanIcebergCreateTableAs(ClientContext &context, 
 	// CREATE TABLE ... AS on an existing table is planned as a plain CREATE TABLE: this only sees OR REPLACE
 	if (glue_schema.CheckCreateTableConflict(context, op.info->Base())) {
 		throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"",
-		                       op.info->Base().GetTableName().GetIdentifierName(), glue_schema.database_info.name);
+		                       op.info->Base().GetTableName().GetIdentifierName(), glue_schema.GetDatabaseName());
 	}
-	auto &iceberg_schema = GetIcebergSchema(context, glue_schema.database_info.name);
+	auto &iceberg_schema = GetIcebergSchema(context, glue_schema.GetDatabaseName());
 	auto iceberg_info = glue_schema.BindIcebergCreateTable(context, *op.info, iceberg_schema);
 	LogicalCreateTable iceberg_op(iceberg_schema, std::move(iceberg_info));
 	iceberg_op.types = op.types;
 	GlueTransaction::Get(context, *this)
-	    .AddIcebergTable(glue_schema.database_info.name, op.info->Base().GetTableName().GetIdentifierName());
+	    .AddIcebergTable(glue_schema.GetDatabaseName(), op.info->Base().GetTableName().GetIdentifierName());
 	return iceberg_schema.catalog.PlanCreateTableAs(context, planner, iceberg_op, plan);
 }
 

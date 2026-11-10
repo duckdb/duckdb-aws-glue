@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/views/test_view_external_catalogs.test
-# description: with experimental_glue_view_enable_external_catalogs, a Glue view over a table of another kind of catalog stores it by the catalog's type and the alias it is attached under
+# description: with the catalog's type in experimental_glue_view_external_catalog_types, a Glue view over a table of another kind of catalog stores it by the catalog's type and the alias it is attached under
 # group: [views]
 
 require httpfs
@@ -37,14 +37,17 @@ CREATE TABLE my_datalake.default.ex_orders (id INTEGER, qty INTEGER);
 statement ok
 INSERT INTO my_datalake.default.ex_orders VALUES (1, 10), (2, 20);
 
+statement ok
+RESET experimental_glue_view_external_catalog_types;
+
 # off by default
 statement error
 CREATE VIEW my_datalake.default.ex_view_join AS SELECT o.id, o.qty, ex_items.name FROM my_datalake.default.ex_orders o JOIN ext1.main.ex_items USING (id);
 ----
-a Glue view can only reference tables in Glue catalogs (SET experimental_glue_view_enable_external_catalogs = true
+in catalog "ext1" of type duckdb, which is not in experimental_glue_view_external_catalog_types
 
 statement ok
-SET experimental_glue_view_enable_external_catalogs = true;
+SET experimental_glue_view_external_catalog_types = ['duckdb'];
 
 statement ok
 CREATE VIEW my_datalake.default.ex_view_join AS SELECT o.id, o.qty, ex_items.name FROM my_datalake.default.ex_orders o JOIN ext1.main.ex_items USING (id);
@@ -69,10 +72,7 @@ SELECT response.ViewExpandedText FROM glue_get_table_response('my_datalake.defau
 ----
 SELECT o.id, o.qty, ex_items."name" FROM ("default".ex_orders AS o INNER JOIN "external:duckdb:ext1".main.ex_items USING (id))
 
-# reading needs no setting
-statement ok
-RESET experimental_glue_view_enable_external_catalogs;
-
+# reading needs the type listed too (test_view_external_read_rules.test)
 query III
 SELECT id, qty, name FROM my_datalake.default.ex_view_join ORDER BY id;
 ----
@@ -89,7 +89,7 @@ ATTACH '{TEST_DIR}/ex_catalog.duckdb' AS ext2;
 statement error
 SELECT * FROM my_datalake.default.ex_view_join;
 ----
-reads "external:duckdb:ext1".main.ex_items: no catalog of that type is attached under that alias
+reads "external:duckdb:ext1".main.ex_items: no usable catalog of that type is attached under that alias
 
 statement ok
 DETACH ext2;
@@ -109,3 +109,6 @@ DROP VIEW my_datalake.default.ex_view_join;
 
 statement ok
 DROP TABLE my_datalake.default.ex_orders;
+
+statement ok
+RESET experimental_glue_view_external_catalog_types;

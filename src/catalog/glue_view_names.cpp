@@ -9,6 +9,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
@@ -48,12 +49,14 @@ public:
 
 private:
 	void VisitNode(QueryNode &node, const case_insensitive_set_t &outer) {
-		// a CTE is visible in its query and in later CTEs; in its own body only if recursive
+		// a CTE is visible in its query, in later CTEs and, if recursive, in its own recursive term
 		case_insensitive_set_t visible = outer;
 		for (auto &entry : node.cte_map.map) {
 			if (entry.second->query_node) {
 				VisitNode(*entry.second->query_node, visible);
 			}
+			// stored from here, bound from the recursive node's copy
+			VisitKeyTargets(entry.second->key_targets);
 			visible.insert(entry.first.GetIdentifierName());
 		}
 		switch (node.type) {
@@ -80,10 +83,12 @@ private:
 			break;
 		case QueryNodeType::RECURSIVE_CTE_NODE: {
 			auto &recursive = node.Cast<RecursiveCTENode>();
+			// the anchor reads the table (or an outer CTE) of the CTE's name, the recursive term the CTE
+			VisitNode(*recursive.left, visible);
 			auto with_self = visible;
 			with_self.insert(recursive.ctename.GetIdentifierName());
-			VisitNode(*recursive.left, with_self);
 			VisitNode(*recursive.right, with_self);
+			VisitKeyTargets(recursive.key_targets);
 			break;
 		}
 		default:
@@ -103,6 +108,7 @@ private:
 			VisitRef(*join.left, visible);
 			VisitRef(*join.right, visible);
 			VisitExpression(join.condition, visible);
+			VisitExpression(join.ranking_expression, visible);
 			break;
 		}
 		case TableReferenceType::SUBQUERY:
@@ -113,6 +119,14 @@ private:
 			VisitRef(*pivot.source, visible);
 			for (auto &aggregate : pivot.aggregates) {
 				VisitExpression(aggregate, visible);
+			}
+			for (auto &column : pivot.pivots) {
+				for (auto &expr : column.pivot_expressions) {
+					VisitExpression(expr, visible);
+				}
+				for (auto &entry : column.entries) {
+					VisitExpression(entry.expr, visible);
+				}
 			}
 			break;
 		}
@@ -149,6 +163,13 @@ private:
 		}
 		ParsedExpressionIterator::EnumerateChildren(
 		    *expr, [&](unique_ptr<ParsedExpression> &child) { VisitExpression(child, visible); });
+	}
+
+	//! USING KEY is bound without a parent binder: no CTE is in scope
+	void VisitKeyTargets(vector<unique_ptr<ParsedExpression>> &targets) {
+		for (auto &target : targets) {
+			VisitExpression(target, case_insensitive_set_t());
+		}
 	}
 
 	BaseTableCallback callback;
@@ -188,14 +209,8 @@ void RefuseCatalogQualifiedColumns(QueryNode &query, const identifier_set_t &cat
 }
 
 //! The stored catalog part of a non-Glue catalog's table: "external:<type>:<alias>", the alias it was written with.
-//! No Glue catalog id has the prefix (an id is an account id, optionally followed by ":<catalog>")
+//! No Glue catalog id has the prefix in any case (an id is an account id, optionally followed by ":<catalog>")
 constexpr char EXTERNAL_PREFIX[] = "external:";
-
-bool ExternalCatalogsEnabled(ClientContext &context) {
-	Value enabled;
-	return context.TryGetCurrentSetting("experimental_glue_view_enable_external_catalogs", enabled) &&
-	       !enabled.IsNull() && BooleanValue::Get(enabled);
-}
 
 string ExternalIdentity(Catalog &catalog) {
 	return EXTERNAL_PREFIX + catalog.GetCatalogType() + ":" + catalog.GetName().GetIdentifierName();
@@ -218,7 +233,36 @@ string ServiceName(const GlueCatalog &catalog) {
 	           : StringUtil::Format("region %s at endpoint %s", catalog.options.region, catalog.options.endpoint);
 }
 
+//! not in memory (temporary is too), system or hidden (InMemory last: the system catalog throws)
+bool UsableExternalCatalog(Catalog &catalog) {
+	auto &db = catalog.GetAttached();
+	return !db.IsSystem() && db.GetVisibility() != AttachVisibility::HIDDEN && !catalog.InMemory();
+}
+
 } // namespace
+
+case_insensitive_set_t GlueViewNames::ExternalCatalogTypes(DatabaseInstance &db) {
+	case_insensitive_set_t types;
+	Value setting;
+	if (!db.TryGetCurrentSetting("experimental_glue_view_external_catalog_types", setting) || setting.IsNull()) {
+		return types;
+	}
+	for (auto &type : ListValue::GetChildren(setting)) {
+		if (!type.IsNull()) {
+			types.insert(StringValue::Get(type));
+		}
+	}
+	return types;
+}
+
+bool GlueViewNames::IsExternal(const Identifier &id) {
+	return id.StartsWith(EXTERNAL_PREFIX);
+}
+
+string GlueViewNames::ExternalType(const Identifier &id) {
+	auto rest = id.GetIdentifierName().substr(sizeof(EXTERNAL_PREFIX) - 1);
+	return rest.substr(0, rest.find(':'));
+}
 
 void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_catalog, const Identifier &view_schema,
                                       QueryNode &query) {
@@ -245,16 +289,15 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 			}
 			auto &catalog = entry->ParentCatalog();
 			if (catalog.GetCatalogType() != "glue") {
-				if (!ExternalCatalogsEnabled(context)) {
-					throw BinderException(
-					    "Glue view references \"%s\" in catalog \"%s\" of type %s: a Glue view can only "
-					    "reference tables in Glue catalogs (SET experimental_glue_view_enable_external_catalogs = "
-					    "true to store it by the catalog's type and alias)",
-					    name.ToString(), catalog.GetName().GetIdentifierName(), catalog.GetCatalogType());
+				if (!ExternalCatalogTypes(DatabaseInstance::GetDatabase(context)).count(catalog.GetCatalogType())) {
+					throw BinderException("Glue view references \"%s\" in catalog \"%s\" of type %s, which is not in "
+					                      "experimental_glue_view_external_catalog_types: add '%s' to it",
+					                      name.ToString(), catalog.GetName().GetIdentifierName(),
+					                      catalog.GetCatalogType(), catalog.GetCatalogType());
 				}
-				if (catalog.InMemory()) { // also the temp catalog
-					throw BinderException("Glue view references \"%s\" in catalog \"%s\", which is in memory: no "
-					                      "other session can read it",
+				if (!UsableExternalCatalog(catalog)) {
+					throw BinderException("Glue view references \"%s\" in catalog \"%s\", which is in memory, "
+					                      "temporary, a system catalog or hidden: no other session can read it",
 					                      name.ToString(), catalog.GetName().GetIdentifierName());
 				}
 				catalogs.insert(catalog_name);
@@ -339,7 +382,7 @@ identifier_tree_t<Identifier> GlueViewNames::AttachedAliases(GlueCatalog &view_c
 		if (catalog.GetCatalogType() != "glue") {
 			// an identity names one alias
 			auto id = Identifier(ExternalIdentity(catalog));
-			if (ids.count(id)) {
+			if (ids.count(id) && UsableExternalCatalog(catalog)) {
 				aliases[id] = catalog.GetName();
 			}
 			continue;
@@ -367,9 +410,10 @@ void GlueViewNames::ResolveForReading(GlueCatalog &view_catalog, const string &v
 		}
 		auto &id = name.Catalog();
 		auto alias = aliases.find(id);
-		if (alias == aliases.end() && StringUtil::StartsWith(id.GetIdentifierName(), EXTERNAL_PREFIX)) {
-			throw BinderException("Glue view \"%s\" reads %s: no catalog of that type is attached under that alias",
-			                      view_name, name.ToString());
+		if (alias == aliases.end() && IsExternal(id)) {
+			throw BinderException(
+			    "Glue view \"%s\" reads %s: no usable catalog of that type is attached under that alias", view_name,
+			    name.ToString());
 		}
 		if (alias == aliases.end()) {
 			auto &endpoint = view_catalog.options.endpoint;
@@ -385,11 +429,14 @@ void GlueViewNames::ResolveForReading(GlueCatalog &view_catalog, const string &v
 	walker.Walk(query);
 }
 
-void GlueViewNames::PinToCatalog(QueryNode &query, const Identifier &catalog_name) {
-	ViewBodyWalker walker([&](BaseTableRef &ref, const case_insensitive_set_t &) {
+void GlueViewNames::PinToCatalog(QueryNode &query, const Identifier &catalog_name, const Identifier &schema_name) {
+	ViewBodyWalker walker([&](BaseTableRef &ref, const case_insensitive_set_t &visible_ctes) {
 		auto name = ref.GetQualifiedName();
 		if (name.Catalog().empty() && !name.Schema().empty()) {
 			ref.SetQualifiedName(catalog_name, name.Schema(), name.Name());
+		} else if (name.Catalog().empty() && !visible_ctes.count(name.Name().GetIdentifierName())) {
+			// a bare name (not stored by DuckDB) would bind through the search path
+			ref.SetQualifiedName(catalog_name, schema_name, name.Name());
 		}
 	});
 	walker.Walk(query);

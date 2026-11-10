@@ -1,0 +1,248 @@
+# name: test/sql/hive/ddl/views/test_view_external_read_rules.test
+# description: "external:<type>:<alias>" tables are written and read only for the listed types, from usable catalogs
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require json
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+RESET experimental_glue_view_external_catalog_types;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.rr_nested;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.rr_view;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.rr_refused;
+
+statement ok
+ATTACH '{TEST_DIR}/rr_catalog.duckdb' AS fx_ext;
+
+statement ok
+CREATE OR REPLACE TABLE fx_ext.main.fx_items AS SELECT 1 AS id;
+
+# writing: the type is not listed, though another type is
+statement ok
+SET experimental_glue_view_external_catalog_types = ['iceberg'];
+
+statement error
+CREATE VIEW my_datalake.default.rr_refused AS SELECT id FROM fx_ext.main.fx_items;
+----
+Glue view references "fx_ext.main.fx_items" in catalog "fx_ext" of type duckdb, which is not in experimental_glue_view_external_catalog_types: add 'duckdb' to it
+
+# the types compare case insensitively
+statement ok
+SET experimental_glue_view_external_catalog_types = ['iceberg', 'DuckDB'];
+
+# writing: a catalog in memory, temporary or the system catalog is refused whatever the list (hidden: reading, below)
+statement ok
+ATTACH ':memory:' AS fx_mem;
+
+statement ok
+CREATE TABLE fx_mem.main.fx_items AS SELECT 2 AS id;
+
+statement error
+CREATE VIEW my_datalake.default.rr_refused AS SELECT id FROM fx_mem.main.fx_items;
+----
+Glue view references "fx_mem.main.fx_items" in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden: no other session can read it
+
+# also in a PIVOT's FOR expression, in USING KEY and in NEAREST BY
+statement error
+CREATE VIEW my_datalake.default.rr_refused AS SELECT * FROM (SELECT 1 AS k, 10 AS v) t PIVOT (max(v) FOR (k + (SELECT max(id) FROM fx_mem.main.fx_items)) IN (3));
+----
+in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden
+
+statement error
+CREATE VIEW my_datalake.default.rr_refused AS WITH RECURSIVE r(k, v) USING KEY (k, max((SELECT max(id) FROM fx_mem.main.fx_items)) AS v) AS (SELECT 1, 1 UNION SELECT k, v FROM r WHERE false) SELECT * FROM r;
+----
+in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden
+
+statement error
+CREATE VIEW my_datalake.default.rr_refused AS SELECT * FROM (SELECT 1 AS a) l JOIN (SELECT 2 AS b) r NEAREST BY DISTANCE abs(a - b + (SELECT max(id) FROM fx_mem.main.fx_items));
+----
+in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden
+
+statement ok
+CREATE TEMP TABLE fx_items AS SELECT 7 AS id;
+
+statement error
+CREATE VIEW my_datalake.default.rr_refused AS SELECT id FROM temp.main.fx_items;
+----
+in catalog "temp", which is in memory, temporary, a system catalog or hidden
+
+statement error
+CREATE VIEW my_datalake.default.rr_refused AS SELECT * FROM system.main.duckdb_databases;
+----
+in catalog "system", which is in memory, temporary, a system catalog or hidden
+
+# writing: listed, a DuckDB file
+statement ok
+CREATE VIEW my_datalake.default.rr_view AS SELECT id FROM fx_ext.main.fx_items;
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('my_datalake.default.rr_view');
+----
+SELECT id FROM "external:duckdb:fx_ext".main.fx_items
+
+# BindView: duckdb_columns() binds the view, not bound yet, through BindView only
+query I
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'rr_view';
+----
+id
+
+# reading: listed, the same alias of the same type, also through a Glue view over it
+statement ok
+CREATE VIEW my_datalake.default.rr_nested AS SELECT id FROM my_datalake.default.rr_view;
+
+query I
+SELECT id FROM my_datalake.default.rr_nested;
+----
+1
+
+# a body written to Glue directly, with the prefix and the type in mixed case
+query I
+SELECT id FROM my_datalake.default.fixture_external_view_case;
+----
+1
+
+# reading: the type is not listed; the Glue view over it names the view that is refused
+statement ok
+SET experimental_glue_view_external_catalog_types = ['iceberg'];
+
+statement error
+SELECT id FROM my_datalake.default.rr_nested;
+----
+Glue view "default.rr_view" reads catalog "external:duckdb:fx_ext" of type duckdb, which is not in experimental_glue_view_external_catalog_types: add 'duckdb' to it
+
+statement error
+SELECT name FROM pragma_table_info('my_datalake.default.rr_view');
+----
+which is not in experimental_glue_view_external_catalog_types
+
+# global only: a session can not set its own list
+statement error
+SET SESSION experimental_glue_view_external_catalog_types = ['duckdb'];
+----
+cannot be set as a session variable - it can only be set globally
+
+statement error con2
+SET SESSION experimental_glue_view_external_catalog_types = ['duckdb'];
+----
+cannot be set as a session variable - it can only be set globally
+
+# a list set by one connection applies to every connection
+statement ok con2
+SET experimental_glue_view_external_catalog_types = ['duckdb'];
+
+query I
+SELECT id FROM my_datalake.default.rr_view;
+----
+1
+
+query I con2
+SELECT id FROM my_datalake.default.rr_view;
+----
+1
+
+statement ok
+RESET experimental_glue_view_external_catalog_types;
+
+# nothing listed by default
+statement error con2
+SELECT id FROM my_datalake.default.rr_view;
+----
+of type duckdb, which is not in experimental_glue_view_external_catalog_types
+
+# NULL lists nothing, also with the prefix in mixed case
+statement ok
+SET experimental_glue_view_external_catalog_types = NULL;
+
+statement error
+SELECT id FROM my_datalake.default.fixture_external_view_case;
+----
+Glue view "default.fixture_external_view_case" reads catalog "External:DuckDB:fx_ext" of type DuckDB, which is not in experimental_glue_view_external_catalog_types
+
+statement ok
+SET experimental_glue_view_external_catalog_types = ['duckdb', 'iceberg'];
+
+# reading: a catalog of another type under the alias
+statement error
+SELECT id FROM my_datalake.default.fixture_external_view_iceberg;
+----
+Glue view "default.fixture_external_view_iceberg" reads "external:iceberg:fx_ext".main.fx_items: no usable catalog of that type is attached under that alias
+
+# reading: a body written to Glue directly naming the session's own database, in memory
+statement error
+SELECT id FROM my_datalake.default.fixture_external_view_memory;
+----
+Glue view "default.fixture_external_view_memory" reads "external:duckdb:memory".main.fx_items: no usable catalog of that type is attached under that alias
+
+# ... or by its own name, in a PIVOT's FOR expression
+statement error
+SELECT * FROM my_datalake.default.fixture_external_view_pivot;
+----
+Glue view "default.fixture_external_view_pivot" reads memory.main.fx_items from Glue catalog memory, which is not attached
+
+# reading: a bare name in a body written to Glue directly is read from the view's Glue database only, not through the
+# search path (the TEMP fx_items, a hidden catalog on search_path)
+# a recursive CTE's anchor reads the table of the CTE's name
+statement error
+SELECT id FROM my_datalake.default.fixture_external_view_recursive;
+----
+Table with name fx_items does not exist
+
+statement error
+CREATE VIEW my_datalake.default.rr_refused AS WITH RECURSIVE fx_items AS (SELECT id FROM fx_items UNION ALL SELECT id FROM fx_items WHERE false) SELECT id FROM fx_items;
+----
+Glue view references table "fx_items", which is not in the view's Glue catalog but in catalog "temp" (through the search path)
+
+statement ok
+ATTACH '{TEST_DIR}/rr_hidden.duckdb' AS fx_hidden (HIDDEN true);
+
+statement ok
+CREATE OR REPLACE TABLE fx_hidden.main.fx_items AS SELECT 9 AS id;
+
+statement ok
+SET search_path = 'fx_hidden.main';
+
+statement error
+SELECT id FROM my_datalake.default.fixture_external_view_bare;
+----
+Table with name fx_items does not exist
+
+# reading: the file attached hidden under the writer's alias
+statement ok
+DETACH fx_ext;
+
+statement ok
+ATTACH '{TEST_DIR}/rr_catalog.duckdb' AS fx_ext (HIDDEN true);
+
+statement error
+SELECT id FROM my_datalake.default.rr_view;
+----
+Glue view "default.rr_view" reads "external:duckdb:fx_ext".main.fx_items: no usable catalog of that type is attached under that alias
+
+statement ok
+DROP VIEW my_datalake.default.rr_nested;
+
+statement ok
+DROP VIEW my_datalake.default.rr_view;
+
+statement ok
+RESET experimental_glue_view_external_catalog_types;

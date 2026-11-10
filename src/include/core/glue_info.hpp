@@ -1,6 +1,8 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -150,7 +152,7 @@ public:
 	void CheckTextSerdeSupported(HiveFileFormat format) const;
 	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote
 	string GetQuoteCharacter() const;
-	//! OpenCSVSerde's escapeChar, else its quote character; empty for LazySimpleSerDe
+	//! OpenCSVSerde's escapeChar, else its quote character; LazySimpleSerDe's escape.delim (empty without)
 	string GetEscapeCharacter() const;
 	//! How the files of a csv table are read
 	HiveCSVOptions GetCSVOptions() const;
@@ -190,13 +192,24 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
-};
-
-//! A partition as GetPartition returns it: also its storage descriptor and parameters
-struct GluePartitionDetails : public GluePartitionInfo {
+	//! The partition's own StorageDescriptor.InputFormat and SerdeInfo, which Hive reads its files with and which can
+	//! differ from the table's; empty when not known (a hive_scan, a deserialized plan)
+	string input_format;
 	string serde_library;
 	unordered_map<string, string> serde_parameters;
-	vector<GlueColumn> columns;
+	//! The data columns the partition declares, which can differ from the table's; empty when not known
+	vector<GlueColumn> partition_columns;
+	//! The column this partition declares for the table's column 'index', matched as a scan reads the files: by
+	//! position in csv tables, by name (ignoring case) otherwise. Null when the partition declares none, e.g. for a
+	//! column added to the table later.
+	optional_ptr<const GlueColumn> FindPartitionColumn(const vector<GlueColumn> &table_columns, idx_t index,
+	                                                   bool by_position) const;
+	//! The first data column of the table whose type this partition declares differently (FindPartitionColumn)
+	optional_idx FindColumnTypeMismatch(const vector<GlueColumn> &table_columns, bool by_position) const;
+};
+
+//! A partition as GetPartition returns it: also its parameters
+struct GluePartitionDetails : public GluePartitionInfo {
 	unordered_map<string, string> parameters;
 	//! The Partition object this projection was made from
 	shared_ptr<const GlueFetchedPartition> fetched;

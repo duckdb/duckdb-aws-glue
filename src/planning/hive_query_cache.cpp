@@ -1,5 +1,7 @@
 #include "planning/hive_query_cache.hpp"
 
+#include "core/hive_location.hpp"
+
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -23,7 +25,7 @@ public:
 		auto &listing = listings[directory];
 		if (!listing) {
 			auto &fs = FileSystem::GetFileSystem(context);
-			listing = shared_ptr<MultiFileList>(fs.GlobFileList(directory + "/**", FileGlobOptions::ALLOW_EMPTY));
+			listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
 		}
 		return listing;
 	}
@@ -78,6 +80,12 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 	glue_tables.clear();
 	samples.clear();
 	directory_listings.clear();
+	scan_count = 0;
+}
+
+idx_t HiveQueryCache::NextScanId() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return ++scan_count;
 }
 
 shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
@@ -106,13 +114,23 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
 		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, key);
 	}
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &listing = directory_listings[key];
-	if (!listing) {
-		auto &fs = FileSystem::GetFileSystem(context);
-		listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
+	shared_ptr<HiveDirectoryListingEntry> entry;
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &slot = directory_listings[key];
+		if (!slot) {
+			slot = make_shared_ptr<HiveDirectoryListingEntry>();
+		}
+		entry = slot;
 	}
-	return listing;
+	// lock per directory: GlobFileList fetches the first page right away, and listings of other directories must not
+	// wait behind it
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->listing) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, key));
+	}
+	return entry->listing;
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {

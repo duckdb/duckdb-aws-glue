@@ -296,7 +296,8 @@ ALTER TABLE my_datalake.default.calls_orders PARTITION (dt = '2026-01-01') RENAM
 query II
 FROM glue_calls();
 ----
-GetPartition	2
+BatchGetPartition	1
+GetPartition	1
 GetTable	1
 UpdatePartition	1
 
@@ -386,7 +387,7 @@ query II
 FROM glue_calls();
 ----
 BatchCreatePartition	1
-GetPartition	1
+BatchGetPartition	1
 GetTable	1
 
 statement ok
@@ -413,8 +414,8 @@ ALTER TABLE my_datalake.default.calls_orders DROP PARTITION (dt = '2026-01-04');
 query II
 FROM glue_calls();
 ----
-DeletePartition	1
-GetPartition	1
+BatchDeletePartition	1
+BatchGetPartition	1
 GetTable	1
 
 statement ok

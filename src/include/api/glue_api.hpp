@@ -1,11 +1,14 @@
 #pragma once
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 
 #include "core/glue_info.hpp"
 
 #include "duckdb/common/pair.hpp"
+#include "duckdb/common/map.hpp"
+#include "duckdb/common/set.hpp"
 #include "duckdb/common/enums/set_scope.hpp"
 
 #include <memory>
@@ -46,9 +49,11 @@ public:
 	                        GlueDatabaseInfo &result, string *raw_json = nullptr);
 	//! List all tables of a database; none when the database no longer exists or its tables may not be listed.
 	//! With 'single_page' only Glue's first page is fetched and 'has_more' reports whether the database holds
-	//! tables beyond it; a refused permission throws instead of returning none.
+	//! tables beyond it. With 'single_page' or 'throw_if_denied', a refused permission throws instead of returning
+	//! none.
 	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                       bool single_page = false, optional_ptr<bool> has_more = nullptr);
+	                                       bool single_page = false, optional_ptr<bool> has_more = nullptr,
+	                                       bool throw_if_denied = false);
 	//! Returns false if the database holds no tables (or views), otherwise true with the name of one of them
 	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            string &table_name);
@@ -115,6 +120,18 @@ public:
 	//! Unregister a partition (the data files are left in place), returns false if it does not exist
 	static bool DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            const string &table_name, const vector<string> &values);
+	//! Unregister partitions (BatchDeletePartition, the data files are left in place). Partitions that do not exist
+	//! are skipped; throws for the first partition Glue refuses, after retrying the errors that may pass.
+	static void BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                  const string &table_name, const vector<vector<string>> &partitions);
+	//! Which of 'partitions' exist (BatchGetPartition)
+	static set<vector<string>> ExistingPartitions(ClientContext &context, GlueCatalog &catalog,
+	                                              const string &database_name, const string &table_name,
+	                                              const vector<vector<string>> &partitions);
+	//! The locations of those of 'partitions' that exist, by their values (BatchGetPartition)
+	static map<vector<string>, string> PartitionLocations(ClientContext &context, GlueCatalog &catalog,
+	                                                      const string &database_name, const string &table_name,
+	                                                      const vector<vector<string>> &partitions);
 	//! Change the values of a partition, keeping its location and everything else (UpdatePartition). 'partition'
 	//! is the partition as fetched; the caller has checked that no partition has 'new_values'. Returns the
 	//! location, which the rename keeps.
@@ -125,18 +142,26 @@ public:
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
-	//! as fetched, with each partition's location. Partitions that already exist are skipped; throws for the first
-	//! partition Glue refuses, after retrying the errors that may pass.
-	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
-	                                  const vector<GluePartitionInput> &partitions);
+	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
+	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.
+	static vector<GluePartitionInput> BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
+	                                                        const GlueTableInfo &table,
+	                                                        const vector<GluePartitionInput> &partitions);
 	//! SET callback of glue_debug_fail_partition_registration: rejects a value that is not '<error code>:<index>'
 	static void CheckDebugFailPartitionRegistration(ClientContext &context, SetScope scope, Value &parameter);
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
-
-private:
-	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret
+	//! DeleteTable with a client taken earlier, for a rollback, which runs when the transaction has ended and the
+	//! secret can no longer be looked up. Leaves the metadata cache alone (the rollback clears it).
+	static void DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glue::GlueClient> &client,
+	                        GlueCatalog &catalog, const string &database_name, const string &table_name);
+	//! The CreateTime of a table in milliseconds (whole seconds in Glue), with a client taken earlier: invalid if the
+	//! table does not exist, 0 if Glue gave none. Tells a table apart from one created again under its name.
+	static optional_idx GetTableCreateTime(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+	                                       const string &database_name, const string &table_name);
+	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret. Public
+	//! for the undo of a CREATE TABLE AS, which takes the client while the secret can still be looked up
 	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, GlueCatalog &catalog);
 };
 

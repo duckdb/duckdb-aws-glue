@@ -31,6 +31,8 @@ struct GlueCreateTableOptions {
 	vector<string> bucket_columns;
 	int32_t number_of_buckets = -1;
 	vector<GlueColumn> sort_columns;
+	//! CREATE TABLE AS only: delete the data files already at the location (overwrite = true)
+	bool overwrite = false;
 	//! Every other option is stored as a table parameter in Glue
 	unordered_map<string, string> parameters;
 };
@@ -38,7 +40,9 @@ struct GlueCreateTableOptions {
 //! A Glue database, exposed as a DuckDB schema
 class GlueSchemaEntry : public SchemaCatalogEntry {
 public:
-	GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info);
+	//! 'schema_info_loaded' false: only the name of 'database_info' is known, GetSchemaInfo asks Glue for the rest
+	GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info,
+	                bool schema_info_loaded = true);
 	~GlueSchemaEntry() override;
 
 public:
@@ -63,6 +67,8 @@ public:
 	void Alter(CatalogTransaction transaction, AlterInfo &info) override;
 	void Scan(ClientContext &context, CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
 	void Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
+	//! Serves a single-name equality on the entry name with one table lookup instead of listing every table
+	void Scan(ClientContext &context, SchemaScanInfo &info) override;
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 	optional_ptr<CatalogEntry> LookupEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
 
@@ -93,6 +99,13 @@ public:
 	//! The definition a write rewrites: the bound entry's. Under a connection-scoped metadata cache the entry may
 	//! predate a change by another connection, so it is fetched again first.
 	const GlueTableInfo &DefinitionForWrite(ClientContext &context, const CatalogEntry &entry);
+	const string &GetDatabaseName() const {
+		return database_info.name;
+	}
+	//! The database definition, asked from Glue first if the entry was created from the name alone
+	const GlueDatabaseInfo &GetSchemaInfo(ClientContext &context);
+	//! Take the definition of a database known by name alone from a listing; no-op once it is loaded
+	void SetSchemaInfo(const GlueDatabaseInfo &database);
 
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
@@ -109,9 +122,14 @@ private:
 	void SetTableComment(ClientContext &context, const GlueTableInfo &table, SetCommentInfo &info);
 
 public:
-	//! The database definition as returned by Glue
-	GlueDatabaseInfo database_info;
 	GlueTableSet tables;
+
+private:
+	//! Only the name is known until GetSchemaInfo loads the rest for an entry created from a table lookup
+	GlueDatabaseInfo database_info;
+	//! Guards the fields of 'database_info' other than the name, which never changes
+	mutex schema_info_lock;
+	bool schema_info_loaded;
 };
 
 } // namespace duckdb

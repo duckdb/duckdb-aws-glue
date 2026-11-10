@@ -1,0 +1,93 @@
+# name: test/sql/hive/dml/formats/csv/test_csv_long_lines.test
+# description: csv Hive tables with lines longer than read_csv's default max_line_size (2 MB): read up to
+# group: [csv]
+
+#              hive_csv_max_line_size (8 MB by default), larger limits make the reader's buffers larger
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.formats_csv_long_lines;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.formats_csv_long_lines_quoted;
+
+# LazySimpleSerDe (no quoting) and OpenCSVSerde (quote = '"')
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_long_lines (id INTEGER, s VARCHAR) WITH (format = 'csv');
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_long_lines_quoted (id INTEGER, s VARCHAR) WITH (format = 'csv', quote = '"');
+
+# a 3 MB line between two short ones
+statement ok
+INSERT INTO my_datalake.default.formats_csv_long_lines VALUES (1, 'a'), (2, repeat('z', 3000000)), (3, 'c');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_long_lines_quoted VALUES (1, 'a'), (2, repeat('z', 3000000)), (3, 'c');
+
+query III
+SELECT id, length(s), s[1] FROM my_datalake.default.formats_csv_long_lines ORDER BY id;
+----
+1	1	a
+2	3000000	z
+3	1	c
+
+query III
+SELECT id, length(s), s[1] FROM my_datalake.default.formats_csv_long_lines_quoted ORDER BY id;
+----
+1	1	a
+2	3000000	z
+3	1	c
+
+# a lower limit fails the scan on the long line
+statement ok
+SET hive_csv_max_line_size = 1000000;
+
+statement error
+SELECT count(*) FROM my_datalake.default.formats_csv_long_lines;
+----
+<REGEX>:.*Maximum line size of 1000000 bytes exceeded.*
+
+statement ok
+RESET hive_csv_max_line_size;
+
+# a line longer than the reader's 32 MB buffer: fails by default, read with a higher limit
+statement ok
+INSERT INTO my_datalake.default.formats_csv_long_lines VALUES (4, repeat('y', 33000000));
+
+statement error
+SELECT count(*) FROM my_datalake.default.formats_csv_long_lines;
+----
+<REGEX>:.*Maximum line size of 8000000 bytes exceeded.*
+
+statement ok
+SET hive_csv_max_line_size = 40000000;
+
+query II
+SELECT id, length(s) FROM my_datalake.default.formats_csv_long_lines ORDER BY id;
+----
+1	1
+2	3000000
+3	1
+4	33000000
+
+statement ok
+RESET hive_csv_max_line_size;
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_long_lines;
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_long_lines_quoted;

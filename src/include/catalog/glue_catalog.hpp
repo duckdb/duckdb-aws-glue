@@ -22,6 +22,18 @@ class AttachedDatabase;
 class BoundAtClause;
 class GlueTable;
 
+//! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
+enum class TableLookup : uint8_t {
+	//! the schema is already held, or was added meanwhile: the regular lookup runs
+	SKIPPED,
+	//! the table exists, so its schema does too
+	TABLE_FOUND,
+	//! the schema exists, the table does not
+	TABLE_NOT_FOUND,
+	//! the schema does not exist
+	SCHEMA_NOT_FOUND
+};
+
 class GlueCatalog : public Catalog {
 public:
 	explicit GlueCatalog(AttachedDatabase &db_p, AccessMode access_mode, GlueAttachOptions options);
@@ -32,6 +44,8 @@ public:
 	static unique_ptr<SecretEntry> GetStorageSecret(ClientContext &context, const string &secret_name);
 	//! Glue has no transactions: throw on DDL or INSERT inside an explicit (BEGIN) transaction
 	static void ThrowIfInExplicitTransaction(ClientContext &context);
+	//! The same for a glue_* function that changes Glue, naming it in the error
+	static void ThrowIfInExplicitTransaction(ClientContext &context, const char *function);
 
 	void Initialize(bool load_builtin) override;
 	string GetCatalogType() override {
@@ -126,6 +140,13 @@ private:
 	//! Apply one CREATE / ALTER SCHEMA option: 'comment' is the Description, 'location' the LocationUri and any other
 	//! key a database parameter
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);
+
+	//! Looks a table up before its database: finding the table proves the database exists, saving GetDatabase
+	CatalogEntryLookup TryLookupEntryInternal(CatalogTransaction transaction,
+	                                          const EntryLookupInfo &lookup_info) override;
+	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
+	TableLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+	                                       const string &database_name, CatalogEntryLookup &result);
 
 private:
 	//! for reading - the fetched catalog id or account id from ATTACH

@@ -1,8 +1,11 @@
 # Runs all sqllogictests of a pull request or a branch, on a release build, against a live AWS Glue Data Catalog
-# (test/configs/cloud_glue.json), for a maintainer who suspects a change breaks the cloud tests. It is never triggered
-# by a PR: a maintainer starts it from the Actions tab (`gh workflow run CloudGlueTests.yml -f pr_number=123` after
-# reading the PR, because it runs the PR's code with the AWS credentials of the 'cloud-glue' environment; without
-# pr_number it tests the branch the run is started on, e.g. `gh workflow run CloudGlueTests.yml --ref main`).
+# (test/configs/cloud_glue.json). It runs
+#   - on every push to main; a failing run lists the merges since the last passing one in its job summary
+#   - on a pull request when a maintainer adds the 'cloud-tests' label, and on later pushes to a labeled PR whose
+#     author is a member or collaborator. The PR's code runs with the AWS credentials of the 'cloud-glue' environment,
+#     so read an outside contributor's PR before labeling it, and remove and re-add the label after reading new commits
+#   - when a maintainer starts it (`gh workflow run CloudGlueTests.yml -f pr_number=123`, or without pr_number for the
+#     branch the run is started on, e.g. `gh workflow run CloudGlueTests.yml --ref main`)
 #
 # The 'cloud-glue' environment provides:
 #   variables  GLUE_CATALOG_ID       the AWS account id of the Glue Data Catalog
@@ -13,9 +16,9 @@
 # under duckdb-aws-glue-cloud-tests/ci-<run id>-<attempt>/, which it deletes at the end; a lifecycle rule expires
 # whatever a failed run leaves under duckdb-aws-glue-cloud-tests/ after 2 days.
 # The credentials need Glue access to that account, and S3 access to that bucket including s3:CreateBucket and
-# s3:PutLifecycleConfiguration. The account needs the Glue database 'default'
-# and the fixture tables and views that scripts/docker-compose.yml creates locally (see docs/README.md, Testing).
-# The tests drop and create tables in it: use an account that holds nothing else.
+# s3:PutLifecycleConfiguration, and glue:GetDatabases, DeleteDatabase and CreateDatabase: every run first deletes all
+# Glue databases of the account (with their tables) and creates an empty 'default', so that what a failed run left
+# behind does not fail the next one. Use an account that holds nothing else.
 
 name: Cloud Glue tests
 
@@ -26,38 +29,54 @@ on:
         description: Number of the pull request whose head commit is tested; empty tests the selected branch
         required: false
         type: string
-
-# the tests share the Glue database 'default' of the account: one run at a time
-concurrency:
-  group: cloud-glue-tests
-  cancel-in-progress: false
+  push:
+    branches: [main]
+  pull_request_target:
+    types: [labeled, synchronize]
 
 permissions:
   contents: read
 
 jobs:
   cloud-glue-tests:
-    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'cloud-tests') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'cloud-tests') &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
     environment: cloud-glue
+
+    # the tests share the Glue catalog of the account: one run at a time. On the job, not the workflow, so that the
+    # skipped runs of every other PR push do not replace a waiting run
+    concurrency:
+      group: cloud-glue-tests
+      cancel-in-progress: false
 
     permissions:
       contents: read
       # the commit status on the tested commit
       statuses: write
+      # the last passing run on main, for the summary of a failing one
+      actions: read
       # AWS_ROLE_ARN: OIDC token for configure-aws-credentials
       id-token: write
 
     env:
       GEN: ninja
-      PR_NUMBER: ${{ inputs.pr_number }}
-      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
       # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
       AWS_EC2_METADATA_DISABLED: "true"
       AWS_REGION: ${{ vars.GLUE_REGION }}
 
     steps:
-      # workflow_dispatch already needs write access; running a PR's code with the AWS credentials needs more
+      # workflow_dispatch and labeling already need write or triage access; running a PR's code with the AWS
+      # credentials needs more. A push to main or to a labeled PR of a member is not checked
       - name: Check that a maintainer started the run
+        if: github.event_name == 'workflow_dispatch' || github.event.action == 'labeled'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           role=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.triggering_actor }}/permission" --jq .role_name)
           echo "${{ github.triggering_actor }} has role '$role'"
@@ -83,6 +102,8 @@ jobs:
       # resolve the commit once: a push to the PR or branch during the run does not change what is tested
       - name: Resolve the commit
         id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$PR_NUMBER" ]; then
             echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
@@ -99,6 +120,8 @@ jobs:
             --jq '"Testing PR #\(.number) (\(.state)) \(.title) at \(.head.sha)"'
 
       - name: Mark the commit as pending
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh api "repos/${{ github.repository }}/statuses/${{ steps.pr.outputs.sha }}" \
             -f state=pending -f context="Cloud Glue tests" -f description="Running against the cloud Glue catalog" \
@@ -109,6 +132,8 @@ jobs:
           ref: ${{ steps.pr.outputs.sha }}
           submodules: recursive
           persist-credentials: false
+          # the merges since the last passing run on main
+          fetch-depth: 0
 
       # the build and its vcpkg dependencies otherwise fill the runner's disk
       - name: Free disk space
@@ -139,6 +164,21 @@ jobs:
           aws-secret-access-key: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
           aws-region: ${{ vars.GLUE_REGION }}
 
+      - name: Empty the Glue catalog
+        run: |
+          account=$(aws sts get-caller-identity --query Account --output text)
+          if [ "$account" != "$GLUE_CATALOG_ID" ]; then
+            echo "::error::The credentials are for account $account, not the catalog $GLUE_CATALOG_ID: refusing to empty it"
+            exit 1
+          fi
+          for database in $(aws glue get-databases --catalog-id "$GLUE_CATALOG_ID" --query 'DatabaseList[].Name' --output text); do
+            echo "Deleting Glue database $database"
+            aws glue delete-database --catalog-id "$GLUE_CATALOG_ID" --name "$database"
+          done
+          aws glue create-database --catalog-id "$GLUE_CATALOG_ID" --database-input Name=default
+        env:
+          GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+
       - name: Test bucket
         id: bucket
         run: |
@@ -163,7 +203,7 @@ jobs:
       - name: Test config
         run: |
           jq --arg catalog "$GLUE_CATALOG_ID" --arg region "$GLUE_REGION" --arg location "$DEFAULT_S3_LOCATION" '
-            .on_init = "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION '"'"'\($region)'"'"');"
+            .on_init |= sub("REGION '"'"'[^'"'"']*'"'"'"; "REGION '"'"'\($region)'"'"'")
             | .test_env |= map(
                 if .env_name == "GLUE_CATALOG_ID" then .env_value = $catalog
                 elif .env_name == "DEFAULT_S3_LOCATION" then .env_value = $location
@@ -176,7 +216,43 @@ jobs:
           DEFAULT_S3_LOCATION: ${{ steps.bucket.outputs.location }}
 
       - name: Run tests
-        run: make test-cloud TEST_BUILD=release CLOUD_TEST_CONFIG="$RUNNER_TEMP/cloud_glue_ci.json"
+        id: tests
+        run: |
+          set -o pipefail
+          make test-cloud TEST_BUILD=release CLOUD_TEST_CONFIG="$RUNNER_TEMP/cloud_glue_ci.json" 2>&1 \
+            | tee "$RUNNER_TEMP/cloud_tests.log"
+
+      - name: Summarize the failures
+        if: failure() && steps.tests.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.pr.outputs.sha }}
+        run: |
+          failed=$(grep -oE '^test/[^ ]*:[0-9]+: FAILED' "$RUNNER_TEMP/cloud_tests.log" | sed 's/: FAILED$//' | sort -u || true)
+          {
+            echo "## Failing tests"
+            echo
+            if [ -n "$failed" ]; then
+              echo "$failed" | sed 's/^/- `/; s/$/`/'
+            else
+              echo "No failing test found in the output: see the log of the Run tests step"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" != "push" ]; then
+            exit 0
+          fi
+          last=$(gh run list --repo "${{ github.repository }}" --workflow CloudGlueTests.yml --branch main --event push \
+            --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+          {
+            echo
+            if [ -z "$last" ] || ! git cat-file -e "$last^{commit}" 2>/dev/null; then
+              echo "No earlier passing run on main to compare with."
+            else
+              echo "## Merged since the last passing run on main (${last:0:10})"
+              echo
+              git log --first-parent --format='- %h %s (%an)' "$last..$SHA"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # the trailing slash keeps the prefix from matching another run's, e.g. ci-123-1 and ci-123-10
       - name: Delete the run's S3 data
@@ -185,6 +261,8 @@ jobs:
 
       - name: Report the result on the commit
         if: always() && steps.pr.outputs.sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ job.status }}" = "success" ]; then
             state=success; description="All tests passed against the cloud Glue catalog"

@@ -37,13 +37,28 @@ const SelectStatement &GlueView::GetQuery() {
 		// set together: a failure here must not leave a parse without its ids
 		referenced_ids = GlueViewNames::ReferencedCatalogIds(*statement->node);
 		if (referenced_ids.empty()) {
-			GlueViewNames::PinToCatalog(*statement->node, catalog.GetName());
+			GlueViewNames::PinToCatalog(*statement->node, catalog.GetName(), schema.name);
 		}
 		parsed = std::move(statement);
 	}
 	if (referenced_ids.empty()) {
 		// only the view's own catalog, which DuckDB binds the view in
 		return *parsed;
+	}
+	// a non-Glue catalog's table needs its type listed; the smallest refused id, for a stable error
+	auto external_types = GlueViewNames::ExternalCatalogTypes(catalog.GetDatabase());
+	optional_ptr<const Identifier> refused;
+	for (auto &id : referenced_ids) {
+		if (GlueViewNames::IsExternal(id) && !external_types.count(GlueViewNames::ExternalType(id)) &&
+		    (!refused || id < *refused)) {
+			refused = &id;
+		}
+	}
+	if (refused) {
+		auto type = GlueViewNames::ExternalType(*refused);
+		throw BinderException("Glue view \"%s.%s\" reads catalog \"%s\" of type %s, which is not in "
+		                      "experimental_glue_view_external_catalog_types: add '%s' to it",
+		                      table_info.schema_name, table_info.name, refused->GetIdentifierName(), type, type);
 	}
 	// map stored catalog ids to the aliases attached now
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -59,7 +74,7 @@ const SelectStatement &GlueView::GetQuery() {
 	auto copy = unique_ptr_cast<SQLStatement, SelectStatement>(parsed->Copy());
 	GlueViewNames::ResolveForReading(glue_catalog, table_info.schema_name + "." + table_info.name, aliases,
 	                                 *copy->node);
-	GlueViewNames::PinToCatalog(*copy->node, catalog.GetName());
+	GlueViewNames::PinToCatalog(*copy->node, catalog.GetName(), schema.name);
 	auto &result = *copy;
 	resolved.emplace(std::move(signature), std::move(copy));
 	return result;

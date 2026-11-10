@@ -1,4 +1,6 @@
 #include "core/glue_info.hpp"
+
+#include "core/glue_types.hpp"
 #include "core/helpers.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -246,8 +248,14 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		return;
 	}
 	string value;
-	if (TryGetProperty("escape.delim", value)) {
-		refuse("has 'escape.delim' set");
+	if (GetEscapeCharacter().size() > 1) {
+		refuse("has an 'escape.delim' of more than one byte");
+	}
+	if (GetEscapeCharacter() == GetFieldDelimiter()) {
+		refuse("has its field delimiter as 'escape.delim'");
+	}
+	if (TryGetProperty("serialization.escape.crlf", value) && StringUtil::CIEquals(value, "true")) {
+		refuse("has 'serialization.escape.crlf' set");
 	}
 	if (TryGetProperty("serialization.encoding", value) && !StringUtil::CIEquals(value, "UTF-8") &&
 	    !StringUtil::CIEquals(value, "UTF8")) {
@@ -322,7 +330,14 @@ string GlueTableInfo::GetQuoteCharacter() const {
 }
 
 string GlueTableInfo::GetEscapeCharacter() const {
-	return GetSerDe() == HiveSerDe::OPEN_CSV ? GetOpenCSVCharacter("escapeChar", GetQuoteCharacter()) : string();
+	if (GetSerDe() == HiveSerDe::OPEN_CSV) {
+		return GetOpenCSVCharacter("escapeChar", GetQuoteCharacter());
+	}
+	string escape;
+	if (TryGetProperty("escape.delim", escape)) {
+		return escape;
+	}
+	return string();
 }
 
 HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
@@ -339,6 +354,14 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
 	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
+	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
+	// without escapeChar OpenCSVSerde reads with a '\' escape, which read_csv, given the quote character, would keep;
+	// an explicit escapeChar '"', which this extension writes, is read as it is
+	string escape_char;
+	auto escape_set = TryGetProperty("escapeChar", escape_char) && !escape_char.empty();
+	if (GetSerDe() == HiveSerDe::OPEN_CSV && !escape_set && options.delimiter != "\\" && options.quote != "\\") {
+		options.field_escape = "\\";
+	}
 	return options;
 }
 
@@ -369,6 +392,30 @@ bool GlueTableInfo::IsSameVersion(const GlueTableInfo &other) const {
 
 string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
+}
+
+optional_ptr<const GlueColumn> GluePartitionInfo::FindPartitionColumn(const vector<GlueColumn> &table_columns,
+                                                                      idx_t index, bool by_position) const {
+	if (by_position) {
+		return index < partition_columns.size() ? &partition_columns[index] : nullptr;
+	}
+	for (auto &column : partition_columns) {
+		if (StringUtil::CIEquals(column.name, table_columns[index].name)) {
+			return &column;
+		}
+	}
+	return nullptr;
+}
+
+optional_idx GluePartitionInfo::FindColumnTypeMismatch(const vector<GlueColumn> &table_columns,
+                                                       bool by_position) const {
+	for (idx_t i = 0; i < table_columns.size(); i++) {
+		auto partition_column = FindPartitionColumn(table_columns, i, by_position);
+		if (partition_column && !GlueTypes::SameColumnType(table_columns[i].type, partition_column->type)) {
+			return i;
+		}
+	}
+	return optional_idx();
 }
 
 } // namespace duckdb

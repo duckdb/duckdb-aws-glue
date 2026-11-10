@@ -21,6 +21,12 @@ struct GlueTypes {
 	//! Whether PartitionValue reads the value Glue stores as NULL: Hive's default partition name, and for a non-string
 	//! key the spellings a NULL arrives as
 	static bool PartitionValueIsNull(const string &str_value, const LogicalType &type);
+	//! Whether values a partition declares as 'from' can be read as the table's type 'to': the changes the extension's
+	//! own DDL allows, and DuckDB's implicit casts. Nested types are left to the reader.
+	static bool CanReadPartitionTypeAs(ClientContext &context, const LogicalType &from, const LogicalType &to);
+	//! Whether two Glue column types read as the same DuckDB type, so 'int' and 'integer' agree; types that do not
+	//! parse are compared as Hive compares them, ignoring case and whitespace
+	static bool SameColumnType(const string &a, const string &b);
 };
 
 } // namespace duckdb

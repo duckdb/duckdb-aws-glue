@@ -79,7 +79,7 @@ BEGIN;
 statement error
 CALL glue_add_partition('my_datalake.default.txn_alter', {'dt': '2024-01-02'});
 ----
-<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+<REGEX>:TransactionContext Error.*glue_add_partition changes Glue, which has no transactions.*CALL glue_add_partition\(\.\.\.\), outside BEGIN.*
 
 statement ok
 ROLLBACK;
@@ -90,7 +90,7 @@ BEGIN;
 statement error
 CALL glue_drop_partition('my_datalake.default.txn_alter', {'dt': '2024-01-01'});
 ----
-<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+<REGEX>:TransactionContext Error.*glue_drop_partition changes Glue, which has no transactions.*CALL glue_drop_partition\(\.\.\.\), outside BEGIN.*
 
 statement ok
 ROLLBACK;
@@ -101,7 +101,7 @@ BEGIN;
 statement error
 CALL glue_rename_partition('my_datalake.default.txn_alter', {'dt': '2024-01-01'}, {'dt': '2024-01-03'});
 ----
-<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+<REGEX>:TransactionContext Error.*glue_rename_partition changes Glue, which has no transactions.*CALL glue_rename_partition\(\.\.\.\), outside BEGIN.*
 
 statement ok
 ROLLBACK;
@@ -112,7 +112,7 @@ BEGIN;
 statement error
 CALL glue_set_partition_location('my_datalake.default.txn_alter', {'dt': '2024-01-01'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/txn_elsewhere');
 ----
-<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+<REGEX>:TransactionContext Error.*glue_set_partition_location changes Glue, which has no transactions.*CALL glue_set_partition_location\(\.\.\.\), outside BEGIN.*
 
 statement ok
 ROLLBACK;
@@ -123,7 +123,18 @@ BEGIN;
 statement error
 CALL glue_set_table_location('my_datalake.default.txn_alter', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/txn_elsewhere');
 ----
-<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+<REGEX>:TransactionContext Error.*glue_set_table_location changes Glue, which has no transactions.*CALL glue_set_table_location\(\.\.\.\), outside BEGIN.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CALL glue_repair_table('my_datalake.default.txn_alter');
+----
+<REGEX>:TransactionContext Error.*glue_repair_table changes Glue, which has no transactions.*CALL glue_repair_table\(\.\.\.\), outside BEGIN.*
 
 statement ok
 ROLLBACK;
@@ -208,7 +219,7 @@ BEGIN;
 statement error
 CALL glue_add_partition('my_datalake.default.txn_alter', {'dt': '2024-01-02'});
 ----
-<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+<REGEX>:TransactionContext Error.*glue_add_partition changes Glue, which has no transactions.*CALL glue_add_partition\(\.\.\.\), outside BEGIN.*
 
 statement error
 SELECT count(*) FROM my_datalake.default.txn_alter;
@@ -224,7 +235,7 @@ BEGIN;
 statement error
 CALL glue_add_partition('my_datalake.default.txn_alter', {'dt': '2024-01-02'});
 ----
-<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+<REGEX>:TransactionContext Error.*glue_add_partition changes Glue, which has no transactions.*CALL glue_add_partition\(\.\.\.\), outside BEGIN.*
 
 statement ok
 ABORT;

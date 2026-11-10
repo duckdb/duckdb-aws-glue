@@ -1,0 +1,239 @@
+# name: test/sql/hive/dml/insert/insert_partition_locations.test
+# description: partitions registered at locations other than their own directory: rows that would land in another partition's location are refused, a location two partitions share is refused on read when it holds files, s3a:// locations are read and written as the same S3 prefix as s3://, and a location with '//' is read as registered and refused on write
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# partition 'b' lives in the directory a new partition '5' would get
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ploc_collide;
+
+statement ok
+CREATE TABLE my_datalake.default.ploc_collide PARTITIONED BY (p) AS SELECT 'a' AS v, 'a' AS p;
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ploc_collide', {p: 'b'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ploc_collide/p=5');
+
+statement ok
+INSERT INTO my_datalake.default.ploc_collide VALUES ('in b', 'b');
+
+statement error
+INSERT INTO my_datalake.default.ploc_collide VALUES ('new5', '5');
+----
+<REGEX>:.*rows would be written to 'p=5', the location of partition \[b\], and read back as that partition.*
+
+query II
+SELECT p, string_agg(v, ',' ORDER BY v) FROM my_datalake.default.ploc_collide GROUP BY p ORDER BY p;
+----
+a	a
+b	in b
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.ploc_collide') WHERE p = '5';
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.ploc_collide;
+
+# two partitions registered at one location that holds a file: Hive engines read the file for both, so DuckDB refuses
+# to read either of them, whichever Glue returns first
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ploc_shared;
+
+statement ok
+CREATE TABLE my_datalake.default.ploc_shared PARTITIONED BY (p) AS SELECT 'z' AS v, 'z' AS p;
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ploc_shared', {p: 'a'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ploc_shared/shared');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ploc_shared', {p: 'b'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ploc_shared/shared');
+
+statement ok
+INSERT INTO my_datalake.default.ploc_shared VALUES ('in a', 'a');
+
+foreach threshold 1 10
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+statement error
+SELECT * FROM my_datalake.default.ploc_shared;
+----
+<REGEX>:.*Partitions \[a\] and \[b\] of Hive table .* are registered at the same location .*which holds data files DuckDB can not read.*
+
+statement error
+SELECT * FROM my_datalake.default.ploc_shared WHERE p = 'a';
+----
+<REGEX>:.*Partitions \[a\] and \[b\] of Hive table .* are registered at the same location.*
+
+statement error
+SELECT * FROM my_datalake.default.ploc_shared WHERE p = 'b';
+----
+<REGEX>:.*Partitions \[a\] and \[b\] of Hive table .* are registered at the same location.*
+
+query I
+SELECT v FROM my_datalake.default.ploc_shared WHERE p = 'z';
+----
+z
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.ploc_shared;
+
+# two partitions registered at one location that holds no files read as before: no rows
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ploc_shared_empty;
+
+statement ok
+CREATE TABLE my_datalake.default.ploc_shared_empty PARTITIONED BY (p) AS SELECT 'z' AS v, 'z' AS p;
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ploc_shared_empty', {p: 'c'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ploc_shared_empty/placeholder');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ploc_shared_empty', {p: 'd'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ploc_shared_empty/placeholder');
+
+foreach threshold 1 10
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT p, count(*) FROM my_datalake.default.ploc_shared_empty GROUP BY p ORDER BY p;
+----
+z	1
+
+query I
+SELECT count(*) FROM my_datalake.default.ploc_shared_empty WHERE p IN ('c', 'd');
+----
+0
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.ploc_shared_empty;
+
+# a partition at an s3a:// location below an s3:// table, and one at a location with '//'
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ploc_spelled;
+
+statement ok
+CREATE TABLE my_datalake.default.ploc_spelled PARTITIONED BY (p) AS SELECT 'z' AS v, 'z' AS p;
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ploc_spelled', {p: 'dbl'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ploc_spelled//p=dbl');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ploc_spelled', {p: 's3a'},
+    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/ploc_spelled/p=s3a');
+
+# the copy would drop the empty segment and write the rows to another directory than the one they are read from
+statement error
+INSERT INTO my_datalake.default.ploc_spelled VALUES ('d1', 'dbl');
+----
+<REGEX>:.*partition \[dbl\] is registered at '.*ploc_spelled//p=dbl', whose path has an empty or '.' segment, and DuckDB can not write to it.*
+
+statement ok
+INSERT INTO my_datalake.default.ploc_spelled VALUES ('a1', 's3a'), ('z2', 'z');
+
+foreach threshold 1 10
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT p, string_agg(v, ',' ORDER BY v) FROM my_datalake.default.ploc_spelled GROUP BY p ORDER BY p;
+----
+s3a	a1
+z	z,z2
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+# the locations are kept as Glue has them
+query II
+SELECT p, location LIKE 's3a://%' FROM glue_partitions('my_datalake.default.ploc_spelled') ORDER BY p;
+----
+dbl	false
+s3a	true
+z	false
+
+statement ok
+DROP TABLE my_datalake.default.ploc_spelled;
+
+# a table whose own location is s3a://, with a partition at an s3a:// location and one at an s3:// location below it
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ploc_s3a_table;
+
+statement ok
+CREATE TABLE my_datalake.default.ploc_s3a_table PARTITIONED BY (p) AS SELECT 'x' AS v, 'x' AS p;
+
+statement ok
+CALL glue_set_table_location('my_datalake.default.ploc_s3a_table',
+    replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/ploc_s3a_table');
+
+statement ok
+CALL glue_set_partition_location('my_datalake.default.ploc_s3a_table', {p: 'x'},
+    replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/ploc_s3a_table/p=x');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ploc_s3a_table', {p: 'y'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ploc_s3a_table/p=y');
+
+statement ok
+INSERT INTO my_datalake.default.ploc_s3a_table VALUES ('x2', 'x'), ('y1', 'y'), ('w1', 'w');
+
+foreach threshold 1 10
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT p, string_agg(v, ',' ORDER BY v) FROM my_datalake.default.ploc_s3a_table GROUP BY p ORDER BY p;
+----
+w	w1
+x	x,x2
+y	y1
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+query II
+SELECT p, location LIKE 's3a://%' FROM glue_partitions('my_datalake.default.ploc_s3a_table') ORDER BY p;
+----
+w	true
+x	true
+y	false
+
+statement ok
+DROP TABLE my_datalake.default.ploc_s3a_table;

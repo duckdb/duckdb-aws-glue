@@ -1,0 +1,67 @@
+# name: test/sql/hive/bugs/stale_partition_key_order.test
+# description: a table replaced by another Glue client with swapped partition keys is read with the current keys
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS cached_glue (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+# a second catalog instance has its own entry cache, so it acts as another Glue client
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS other_glue (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+statement ok
+DROP TABLE IF EXISTS other_glue.default.stale_partition_key_order;
+
+statement ok
+CREATE TABLE other_glue.default.stale_partition_key_order
+(id INTEGER, p VARCHAR, q VARCHAR) PARTITIONED BY (p, q)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_partition_key_order-old');
+
+statement ok
+INSERT INTO other_glue.default.stale_partition_key_order VALUES (1, 'P1', 'Q1');
+
+query III
+SELECT id, p, q FROM cached_glue.default.stale_partition_key_order;
+----
+1	P1	Q1
+
+statement ok
+DROP TABLE other_glue.default.stale_partition_key_order;
+
+statement ok
+CREATE TABLE other_glue.default.stale_partition_key_order
+(id INTEGER, q VARCHAR, p VARCHAR) PARTITIONED BY (q, p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/stale_partition_key_order-new');
+
+statement ok
+INSERT INTO other_glue.default.stale_partition_key_order VALUES (2, 'Q2', 'P2');
+
+query III
+SELECT id, p, q FROM other_glue.default.stale_partition_key_order;
+----
+2	P2	Q2
+
+query III
+SELECT id, p, q FROM cached_glue.default.stale_partition_key_order;
+----
+2	P2	Q2
+
+query III
+SELECT id, p, q FROM cached_glue.default.stale_partition_key_order WHERE p = 'P2';
+----
+2	P2	Q2
+
+statement ok
+DROP TABLE other_glue.default.stale_partition_key_order;

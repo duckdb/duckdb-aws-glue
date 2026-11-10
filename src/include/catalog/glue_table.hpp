@@ -34,8 +34,7 @@ public:
 private:
 	//! Scan a Hive table with read_parquet over the files of the partitions Glue lists (or the table location for an
 	//! unpartitioned table), using the HiveMultiFileReader for Glue's schema and partition values
-	TableFunction GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
-	                                  const GlueTableInfo &latest_info);
+	TableFunction GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data);
 
 public:
 	//! The table definition as returned by Glue when the entry was created

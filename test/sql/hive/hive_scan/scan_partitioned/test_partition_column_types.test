@@ -1,0 +1,85 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_column_types.test
+# description: A partition that declares a column the scan reads with a type that can not be read as the table's fails
+# group: [scan_partitioned]
+
+#              naming the partition and both types; widened types still read
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# fixture_partition_types (scripts/docker-compose.yml) is a parquet table (id int, v int) whose partitions declare v
+# as smallint, bigint, double and string, with files of those types
+statement ok
+COPY (SELECT 1::INTEGER AS id, 10::SMALLINT AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_types/dt=smallint/data.parquet';
+
+statement ok
+COPY (SELECT 2::INTEGER AS id, 20::BIGINT AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_types/dt=bigint/data.parquet';
+
+statement ok
+COPY (SELECT 3::INTEGER AS id, 30.5::DOUBLE AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_types/dt=double/data.parquet';
+
+statement ok
+COPY (SELECT 4::INTEGER AS id, '40' AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_types/dt=string/data.parquet';
+
+# a widened type reads
+query TII
+SELECT dt, id, v FROM my_datalake.default.fixture_partition_types WHERE dt = 'smallint';
+----
+smallint	1	10
+
+statement error
+SELECT v FROM my_datalake.default.fixture_partition_types WHERE dt = 'string';
+----
+<REGEX>:.*Partition \[dt=string\].*declares column 'v' as 'string', which can not be read as the table's column 'v' of type 'int'.*
+
+statement error
+SELECT v FROM my_datalake.default.fixture_partition_types WHERE dt = 'bigint';
+----
+<REGEX>:.*Partition \[dt=bigint\] of Hive table 'default.fixture_partition_types' declares column 'v' as 'bigint', which can not be read as the table's column 'v' of type 'int'.*
+
+statement error
+SELECT * FROM my_datalake.default.fixture_partition_types;
+----
+<REGEX>:.*declares column 'v' as '(bigint|double|string)', which can not be read as the table's column 'v' of type 'int'.*
+
+statement error
+SELECT sum(v) FROM my_datalake.default.fixture_partition_types WHERE dt = 'double';
+----
+<REGEX>:.*Partition \[dt=double\].*declares column 'v' as 'double'.*
+
+# only the columns a query reads are checked
+query TI
+SELECT dt, id FROM my_datalake.default.fixture_partition_types ORDER BY id;
+----
+smallint	1
+bigint	2
+double	3
+string	4
+
+# fixture_partition_types_csv is a csv table (id int, s string), read by position: one partition declares the first
+# column bigint, one string
+statement error
+SELECT id, s FROM my_datalake.default.fixture_partition_types_csv WHERE dt = 'bigint';
+----
+<REGEX>:.*Partition \[dt=bigint\] of Hive table 'default.fixture_partition_types_csv' declares column 'id' as 'bigint', which can not be read as the table's column 'id' of type 'int'.*
+
+query TT
+SELECT dt, s FROM my_datalake.default.fixture_partition_types_csv ORDER BY dt;
+----
+bigint	e
+string	d
+
+statement error
+SELECT dt, id, s FROM my_datalake.default.fixture_partition_types_csv WHERE dt = 'string';
+----
+<REGEX>:.*Partition \[dt=string\].*declares column 'id' as 'string', which can not be read as the table's column 'id' of type 'int'.*

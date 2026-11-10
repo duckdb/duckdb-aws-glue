@@ -17,7 +17,8 @@
 				"rds",
 				"redshift",
 				"redshift-serverless",
-				"cloudformation"
+				"cloudformation",
+				"s3tables"
 			]
 		}
 	],
