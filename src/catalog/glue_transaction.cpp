@@ -8,18 +8,32 @@
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 
 namespace duckdb {
 
+//! experimental_glue_view_iceberg_catalogs as of the first Glue catalog a transaction used, for all it uses
+struct ViewIcebergCatalogsSnapshot : public ClientContextState {
+	transaction_t transaction_id = MAX_TRANSACTION_ID;
+	ViewIcebergCatalogs mappings;
+};
+
 static ViewIcebergCatalogs CurrentViewIcebergCatalogs(ClientContext &context) {
-	Value setting;
-	if (!DatabaseInstance::GetDatabase(context).TryGetCurrentSetting("experimental_glue_view_iceberg_catalogs",
-	                                                                 setting)) {
-		return ViewIcebergCatalogs();
+	// called under the MetaTransaction's lock
+	auto &transaction = MetaTransaction::Get(context);
+	auto snapshot = context.registered_state->GetOrCreate<ViewIcebergCatalogsSnapshot>("glue_view_iceberg_catalogs");
+	if (snapshot->transaction_id != transaction.global_transaction_id) {
+		Value setting;
+		auto &db = DatabaseInstance::GetDatabase(context);
+		snapshot->mappings = db.TryGetCurrentSetting("experimental_glue_view_iceberg_catalogs", setting)
+		                         ? GlueViewIcebergCatalogs::Read(setting)
+		                         : ViewIcebergCatalogs();
+		snapshot->transaction_id = transaction.global_transaction_id;
 	}
-	return GlueViewNames::ReadViewIcebergCatalogs(setting);
+	return snapshot->mappings;
 }
 
 GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &manager, ClientContext &context)

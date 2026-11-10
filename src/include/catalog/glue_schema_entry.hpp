@@ -99,6 +99,11 @@ private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
 	                                               const GlueTableInfo *resolved_table_info);
 	static bool CatalogTypeIsSupported(CatalogType type);
+	//! A view as a table lookup or scan returns it: under experimental_glue_view_iceberg_catalogs its
+	//! GlueTransaction::ViewForBinding, so that listing its columns binds what a query reads
+	CatalogEntry &ForBinding(ClientContext &context, CatalogEntry &entry);
+	//! ForBinding for a scan: the entry itself when its copy can not be made, so that no view fails a listing
+	CatalogEntry &ForListing(ClientContext &context, CatalogEntry &entry);
 	//! The ALTER TABLE forms below rewrite the table from 'table', the bound entry's definition
 	void AlterTableProperties(ClientContext &context, const GlueTableInfo &table, AlterTableInfo &alter_table);
 	//! COMMENT ON COLUMN: Glue keeps the comment with the column

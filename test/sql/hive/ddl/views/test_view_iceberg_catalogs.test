@@ -101,12 +101,6 @@ RESET experimental_glue_view_iceberg_catalogs;
 statement ok
 CREATE VIEW my_datalake.default.ic_hive AS SELECT id, qty FROM ic_orders WHERE qty > 10;
 
-# a refused table before a table function: the table's error, as before
-statement error
-CREATE VIEW my_datalake.default.ic_refused AS SELECT * FROM ic_ext.main.ic_items, range(3);
-----
-Glue view references "ic_ext.main.ic_items" in catalog "ic_ext" of type duckdb, which is not in experimental_glue_view_external_catalog_types: add 'duckdb' to it
-
 # set, with mappings no table of the view uses (one to a catalog that is not attached): the same
 statement ok
 SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'ic_missing', '{GLUE_CATALOG_ID}:s3tablescatalog/ic-bucket': 'ic_ext'};
@@ -139,10 +133,16 @@ SELECT * FROM my_datalake.default.ic_hive_mapped;
 
 # a catalog no id is mapped to is an external catalog, stored by its type and alias as before
 statement ok
-SET GLOBAL experimental_glue_view_external_catalog_types = ['duckdb'];
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'ic_missing'};
+
+# a refused table before a table function: the table's error, as without the setting
+statement error
+CREATE VIEW my_datalake.default.ic_refused AS SELECT * FROM ic_ext.main.ic_items, range(3);
+----
+Glue view references "ic_ext.main.ic_items" in catalog "ic_ext" of type duckdb, which is not in experimental_glue_view_external_catalog_types: add 'duckdb' to it
 
 statement ok
-SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'ic_missing'};
+SET GLOBAL experimental_glue_view_external_catalog_types = ['duckdb'];
 
 statement ok
 CREATE VIEW my_datalake.default.ic_external AS SELECT o.id, i.name FROM ic_orders o JOIN ic_ext.main.ic_items i USING (id);
@@ -185,6 +185,16 @@ statement error
 CREATE VIEW my_datalake.default.ic_refused AS SELECT id, name FROM ic_items;
 ----
 to catalog "ic_ext", which does not serve it: it is a catalog of type duckdb, not iceberg
+
+# a bare name binds in the view's database before the search path, so a column can not be qualified with the catalog
+# of USE for a table the view's database has too
+statement ok
+CREATE OR REPLACE TABLE ic_ext.main.ic_orders AS SELECT 1 AS id;
+
+statement error
+CREATE VIEW my_datalake.default.ic_refused AS SELECT ic_ext.main.ic_orders.id FROM ic_orders;
+----
+Binder Error: Referenced table "ic_ext.main.ic_orders" not found!
 
 statement ok
 USE memory.main;

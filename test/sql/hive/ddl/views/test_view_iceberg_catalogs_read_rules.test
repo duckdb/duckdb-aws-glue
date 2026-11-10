@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/views/test_view_iceberg_catalogs_read_rules.test
-# description: experimental_glue_view_iceberg_catalogs on views over an Iceberg table (fixture_iceberg_view, fixture_iceberg_bare_view, fixture_iceberg_case_view) and a nested catalog's table (fixture_nested_view): a mapping is checked when the view is read and a table of it needs the mapping, only Iceberg tables of a mapped id use it, and a transaction reads one mapping. No mapping passes its check here: that needs the Glue Iceberg endpoint, which ATTACH of an Iceberg catalog contacts
+# description: experimental_glue_view_iceberg_catalogs on views over an Iceberg table (fixture_iceberg_view, fixture_iceberg_bare_view, fixture_iceberg_case_view, fixture_iceberg_tf_view) and a nested catalog's table (fixture_nested_view): a mapping is checked when the view is read and a table of it needs the mapping, only Iceberg tables of a mapped id use it, and a transaction reads one mapping. No mapping passes its check here: that needs the Glue Iceberg endpoint, which ATTACH of an Iceberg catalog contacts
 # group: [views]
 
 require httpfs
@@ -58,12 +58,12 @@ SELECT * FROM my_datalake.default.fixture_iceberg_view;
 Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
 
 statement error
-INSERT INTO my_datalake.default.fixture_tf_query_view VALUES (1);
+INSERT INTO my_datalake.default.fixture_iceberg_tf_view VALUES (1);
 ----
-Catalog Error: fixture_tf_query_view is not an table
+Catalog Error: fixture_iceberg_tf_view is not an table
 
 statement error
-SELECT * FROM my_datalake.default.fixture_tf_query_view;
+SELECT * FROM my_datalake.default.fixture_iceberg_tf_view;
 ----
 Binder Error: Glue views can not read from table functions ("query(NULL)")
 
@@ -82,6 +82,12 @@ SELECT * FROM my_datalake.default.fixture_iceberg_bare_view;
 ----
 Binder Error: Glue view "default.fixture_iceberg_bare_view" can not be queried: experimental_glue_view_iceberg_catalogs maps Glue catalog id '{GLUE_CATALOG_ID}' to catalog "ic_missing", which is not attached
 
+# a body the view can not store reports that, not the mapping its Iceberg table needs
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg_tf_view;
+----
+Binder Error: Glue views can not read from table functions ("query(NULL)")
+
 # stored names are compared without case, also in a subquery
 statement error
 SELECT * FROM my_datalake.default.fixture_iceberg_case_view;
@@ -98,6 +104,17 @@ statement error
 DESCRIBE my_datalake.default.fixture_iceberg_view;
 ----
 to catalog "ic_missing", which is not attached
+
+# listings keep the view: its columns join to it on its oid, also when the mapping it needs fails
+query I
+SELECT count(*) FROM duckdb_views() v JOIN duckdb_columns() c ON v.view_oid = c.table_oid WHERE v.database_name = 'my_datalake' AND v.view_name = 'fixture_iceberg_view';
+----
+1
+
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND name = 'fixture_iceberg_view';
+----
+1
 
 # INSERT and DROP TABLE do not read the view: main's errors, whatever the mapping
 statement error
@@ -170,7 +187,7 @@ Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be 
 statement ok
 USE memory.main;
 
-# a transaction reads the mapping once, when it first uses the Glue catalog: a change applies from the next one
+# a transaction reads the mapping once, when it first uses a Glue catalog: a change applies from the next one
 statement ok
 RESET experimental_glue_view_iceberg_catalogs;
 
@@ -221,6 +238,35 @@ statement error
 SELECT * FROM my_datalake.default.fixture_iceberg_view;
 ----
 Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+# also for a Glue catalog the transaction uses after the change
+statement ok
+attach '{GLUE_CATALOG_ID}' as ic_second (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) > 0 FROM duckdb_tables() WHERE database_name = 'my_datalake';
+----
+true
+
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'ic_missing'};
+
+statement error
+SELECT * FROM ic_second.default.fixture_iceberg_view;
+----
+Glue table 'default.fixture_iceberg' has table format ICEBERG, which can not be read yet
+
+statement ok
+ROLLBACK;
+
+statement ok
+DETACH ic_second;
+
+statement ok
+RESET experimental_glue_view_iceberg_catalogs;
 
 # a nested catalog's id: without a Glue catalog of that id attached, every table of it is read through the mapping
 statement ok

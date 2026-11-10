@@ -21,7 +21,7 @@
 #include <mutex>
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction_manager.hpp"
-#include "catalog/glue_view_names.hpp"
+#include "catalog/glue_view_iceberg_catalogs.hpp"
 
 namespace duckdb {
 
@@ -40,7 +40,7 @@ public:
 };
 
 static void SetViewIcebergCatalogs(ClientContext &context, SetScope scope, Value &parameter) {
-	GlueViewNames::ReadViewIcebergCatalogs(parameter);
+	GlueViewIcebergCatalogs::Read(parameter);
 }
 
 static void InitAWSAPI() {

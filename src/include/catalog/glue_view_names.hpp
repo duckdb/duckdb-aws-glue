@@ -2,30 +2,17 @@
 
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/identifier.hpp"
-#include "duckdb/common/unordered_map.hpp"
-#include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/parser/query_node.hpp"
+
+#include "catalog/glue_view_iceberg_catalogs.hpp"
+
+#include <functional>
 
 namespace duckdb {
 class ClientContext;
 class DatabaseInstance;
+class BaseTableRef;
 class GlueCatalog;
-class Value;
-
-//! A stored table read from an Iceberg catalog, and that catalog's attach oid when it was checked
-struct IcebergTarget {
-	Identifier catalog;
-	idx_t catalog_oid;
-};
-struct QualifiedNameHash {
-	hash_t operator()(const QualifiedName &name) const {
-		return name.Hash();
-	}
-};
-//! stored table name (case-insensitive) -> where it is read from
-using IcebergTargets = unordered_map<QualifiedName, IcebergTarget, QualifiedNameHash>;
-//! experimental_glue_view_iceberg_catalogs: (Glue catalog id, Iceberg catalog alias)
-using ViewIcebergCatalogs = vector<pair<string, string>>;
 
 //! ViewExpandedText names tables of the view's own catalog <db>.<table>, of other Glue catalogs
 //! "<catalog id>".<db>.<table>, of other kinds of catalogs (experimental_glue_view_external_catalog_types)
@@ -55,11 +42,8 @@ struct GlueViewNames {
 	//! reading: db.t -> catalog.db.t, as DuckDB binds x.t to a catalog x when one is attached under that name; a bare
 	//! t (not a CTE) -> catalog.schema.t
 	static void PinToCatalog(QueryNode &query, const Identifier &catalog_name, const Identifier &schema_name);
-
-	//! the setting's entries; throws for a NULL or empty id or alias, or ids differing only in case
-	static ViewIcebergCatalogs ReadViewIcebergCatalogs(const Value &setting);
-	//! reading: Iceberg tables of mapped ids (all tables of an id no attached Glue catalog has) -> their catalog
-	static IcebergTargets FindIcebergTargets(ClientContext &context, GlueCatalog &view_catalog, QueryNode &stored);
+	//! calls back per base table of the body, CTE references included; throws for what a Glue view can not store
+	static void ForEachTable(QueryNode &query, const std::function<void(BaseTableRef &ref)> &callback);
 };
 
 } // namespace duckdb

@@ -6,7 +6,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 
-#include "catalog/glue_view_names.hpp"
+#include "catalog/glue_view_iceberg_catalogs.hpp"
 #include "core/glue_info.hpp"
 
 namespace duckdb {

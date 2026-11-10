@@ -106,8 +106,11 @@ unique_ptr<GlueView> GlueView::WithIcebergTargets(ClientContext &context) {
 	// a bare name in a body written by other means is a table of the view's database
 	GlueViewNames::PinToCatalog(*stored->node, Identifier(), schema.name);
 	auto copy = FromTableInfo(catalog, schema, table_info);
+	// the same view to listings, which join columns to views on the oid
+	copy->oid = oid;
 	try {
-		copy->iceberg_targets = GlueViewNames::FindIcebergTargets(context, catalog.Cast<GlueCatalog>(), *stored->node);
+		copy->iceberg_targets =
+		    GlueViewIcebergCatalogs::FindIcebergTargets(context, catalog.Cast<GlueCatalog>(), *stored->node);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		if (error.Type() != ExceptionType::BINDER) {

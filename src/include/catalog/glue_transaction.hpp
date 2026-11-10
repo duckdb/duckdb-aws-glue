@@ -10,7 +10,7 @@
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
-#include "catalog/glue_view_names.hpp"
+#include "catalog/glue_view_iceberg_catalogs.hpp"
 #include "execution/glue_hive_write.hpp"
 
 #include <functional>
@@ -191,7 +191,7 @@ public:
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
 	//! (so a prepared statement's two binds share it).
 	shared_ptr<GlueTransactionCache> cache;
-	//! experimental_glue_view_iceberg_catalogs when the transaction first used this catalog
+	//! experimental_glue_view_iceberg_catalogs when the transaction first used a Glue catalog
 	const ViewIcebergCatalogs view_iceberg_catalogs;
 
 private:

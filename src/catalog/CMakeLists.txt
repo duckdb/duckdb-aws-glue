@@ -10,6 +10,7 @@ add_library_unity(
   glue_table_set.cpp
   glue_transaction.cpp
   glue_view.cpp
+  glue_view_iceberg_catalogs.cpp
   glue_view_names.cpp
   glue_transaction_manager.cpp
   scan_filter_equality.cpp)

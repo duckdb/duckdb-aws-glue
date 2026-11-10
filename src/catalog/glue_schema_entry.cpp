@@ -603,7 +603,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
 	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
 	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases,
-	                                 GlueViewNames::FindIcebergTargets(context, glue_catalog, *check->node),
+	                                 GlueViewIcebergCatalogs::FindIcebergTargets(context, glue_catalog, *check->node),
 	                                 *check->node);
 	GlueViewNames::PinToCatalog(*check->node, catalog.GetName(), name);
 	vector<LogicalType> types;
@@ -1057,7 +1057,16 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (!CatalogTypeIsSupported(type)) {
 		return;
 	}
-	tables.Scan(context, callback);
+	if (type != CatalogType::TABLE_ENTRY || GlueTransaction::Get(context, catalog).view_iceberg_catalogs.empty()) {
+		tables.Scan(context, callback);
+		return;
+	}
+	// ForBinding looks up a view's tables in the table set: outside the scan's lock
+	vector<reference<CatalogEntry>> entries;
+	tables.Scan(context, [&](CatalogEntry &entry) { entries.push_back(entry); });
+	for (auto &entry : entries) {
+		callback(ForListing(context, entry.get()));
+	}
 }
 
 void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
@@ -1076,7 +1085,7 @@ void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
 	EntryLookupInfo lookup(info.type, QualifiedName(Identifier(name)));
 	auto entry = tables.GetEntry(context, lookup);
 	if (entry) {
-		info.callback(*entry);
+		info.callback(info.type == CatalogType::TABLE_ENTRY ? ForListing(context, *entry) : *entry);
 	}
 }
 
@@ -1113,14 +1122,34 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction trans
 	}
 	auto &context = transaction.GetContext();
 	auto entry = tables.GetEntry(context, lookup_info);
-	if (entry && entry->type == CatalogType::VIEW_ENTRY && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
-		// only a stored view body is redirected, and only to a catalog that serves the same Glue catalog id
-		auto &transaction = GlueTransaction::Get(context, catalog);
-		if (!transaction.view_iceberg_catalogs.empty()) {
-			return transaction.ViewForBinding(context, entry->Cast<GlueView>());
-		}
+	if (entry && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		return ForBinding(context, *entry);
 	}
 	return entry;
+}
+
+CatalogEntry &GlueSchemaEntry::ForBinding(ClientContext &context, CatalogEntry &entry) {
+	if (entry.type != CatalogType::VIEW_ENTRY) {
+		return entry;
+	}
+	// only a stored view body is redirected, and only to a catalog that serves the same Glue catalog id
+	auto &transaction = GlueTransaction::Get(context, catalog);
+	if (transaction.view_iceberg_catalogs.empty()) {
+		return entry;
+	}
+	return transaction.ViewForBinding(context, entry.Cast<GlueView>());
+}
+
+CatalogEntry &GlueSchemaEntry::ForListing(ClientContext &context, CatalogEntry &entry) {
+	try {
+		return ForBinding(context, entry);
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT || Exception::InvalidatesDatabase(error.Type())) {
+			throw;
+		}
+		return entry;
+	}
 }
 
 } // namespace duckdb
