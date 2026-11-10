@@ -62,7 +62,7 @@ CREATE VIEW my_datalake.default.rr_refused AS SELECT id FROM fx_mem.main.fx_item
 ----
 Glue view references "fx_mem.main.fx_items" in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden: no other session can read it
 
-# also in a PIVOT's FOR expression, in USING KEY and in NEAREST BY
+# also in a PIVOT's FOR expression and in NEAREST BY; DuckDB refuses a subquery in USING KEY itself
 statement error
 CREATE VIEW my_datalake.default.rr_refused AS SELECT * FROM (SELECT 1 AS k, 10 AS v) t PIVOT (max(v) FOR (k + (SELECT max(id) FROM fx_mem.main.fx_items)) IN (3));
 ----
@@ -71,7 +71,7 @@ in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden
 statement error
 CREATE VIEW my_datalake.default.rr_refused AS WITH RECURSIVE r(k, v) USING KEY (k, max((SELECT max(id) FROM fx_mem.main.fx_items)) AS v) AS (SELECT 1, 1 UNION SELECT k, v FROM r WHERE false) SELECT * FROM r;
 ----
-in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden
+Subqueries are not yet supported for aggregates in USING KEY
 
 statement error
 CREATE VIEW my_datalake.default.rr_refused AS SELECT * FROM (SELECT 1 AS a) l JOIN (SELECT 2 AS b) r NEAREST BY DISTANCE abs(a - b + (SELECT max(id) FROM fx_mem.main.fx_items));
