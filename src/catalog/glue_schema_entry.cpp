@@ -1113,20 +1113,23 @@ const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
 		database_info.description = std::move(database.description);
 		database_info.location_uri = std::move(database.location_uri);
 		database_info.parameters = std::move(database.parameters);
+		database_info.create_time_ms = database.create_time_ms;
 		schema_info_loaded = true;
 	}
 	return database_info;
 }
 
-void GlueSchemaEntry::SetSchemaInfo(const GlueDatabaseInfo &database) {
+bool GlueSchemaEntry::MergeSchemaInfo(const GlueDatabaseInfo &database) {
 	lock_guard<mutex> guard(schema_info_lock);
 	if (schema_info_loaded) {
-		return;
+		return database_info.IsSameDefinition(database);
 	}
 	database_info.description = database.description;
 	database_info.location_uri = database.location_uri;
 	database_info.parameters = database.parameters;
+	database_info.create_time_ms = database.create_time_ms;
 	schema_info_loaded = true;
+	return true;
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,

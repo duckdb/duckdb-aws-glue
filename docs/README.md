@@ -334,6 +334,11 @@ With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the co
 per connection — two connections never share one — so another connection's write stays unseen until something clears
 this connection's cache: a write through it, a rollback, or DETACH.
 
+Listings follow the same rule. `SHOW TABLES`, `SHOW SCHEMAS`, `duckdb_tables()`, `duckdb_schemas()` and the other
+catalog functions list a database's tables, or the catalog's databases, from Glue once per transaction — once per
+connection under `'connection'` scope — and reuse that listing until the cache is cleared. A table or database another
+client created, replaced or dropped shows up in the next transaction's listing.
+
 ## Views
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...` and `CREATE SECURE VIEW` create a Glue

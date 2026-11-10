@@ -65,6 +65,11 @@ bool GlueTableSet::BatchTableLookups(ClientContext &context) {
 }
 
 void GlueTableSet::LoadEntries(ClientContext &context, GlueTransactionCache &cache) {
+	if (cache.HasListed(id)) {
+		return;
+	}
+	// one refresh of the set at a time: the parallel scans of one statement would otherwise each list
+	lock_guard<mutex> listing_guard(listing_lock);
 	GlueEntryListing::Snapshot snapshot;
 	{
 		lock_guard<mutex> guard(entry_lock);

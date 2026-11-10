@@ -94,8 +94,9 @@ public:
 	}
 	//! The database definition, asked from Glue first if the entry was created from the name alone
 	const GlueDatabaseInfo &GetSchemaInfo(ClientContext &context);
-	//! Take the definition of a database known by name alone from a listing; no-op once it is loaded
-	void SetSchemaInfo(const GlueDatabaseInfo &database);
+	//! Take the definition of a database known by name alone from a listing. Once loaded, tells whether the listed
+	//! definition is the loaded one: false means another client replaced or altered the database
+	bool MergeSchemaInfo(const GlueDatabaseInfo &database);
 
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,

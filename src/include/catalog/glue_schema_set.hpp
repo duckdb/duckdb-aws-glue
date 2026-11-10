@@ -37,7 +37,7 @@ public:
 
 private:
 	//! Lists the databases from Glue unless the transaction's cache has this set listed, and merges the listing into
-	//! entries. The Glue call runs without entry_lock; only the merge holds it.
+	//! entries. Holds listing_lock throughout and entry_lock only for the merge, not for the Glue call.
 	void LoadEntries(ClientContext &context, GlueTransactionCache &cache);
 	//! Move an entry out of the set; the transaction manager keeps it, and the tables it caches, alive while a
 	//! running statement may use them. Called with entry_lock held.
@@ -45,6 +45,8 @@ private:
 
 private:
 	GlueCatalog &catalog;
+	//! Serializes LoadEntries; taken before entry_lock, never by a lookup
+	mutex listing_lock;
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<GlueSchemaEntry>> entries;
 	//! Identifies this set among the sets a GlueTransactionCache has listed

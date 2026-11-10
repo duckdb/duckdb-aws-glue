@@ -24,6 +24,11 @@ unique_ptr<GlueSchemaEntry> GlueSchemaSet::CreateSchemaEntry(const GlueDatabaseI
 }
 
 void GlueSchemaSet::LoadEntries(ClientContext &context, GlueTransactionCache &cache) {
+	if (cache.HasListed(id)) {
+		return;
+	}
+	// one refresh of the set at a time: the parallel scans of one statement would otherwise each list
+	lock_guard<mutex> listing_guard(listing_lock);
 	GlueEntryListing::Snapshot snapshot;
 	{
 		lock_guard<mutex> guard(entry_lock);
@@ -44,8 +49,11 @@ void GlueSchemaSet::LoadEntries(ClientContext &context, GlueTransactionCache &ca
 		auto entry = entries.find(database.name);
 		if (entry != entries.end()) {
 			// already loaded through a direct lookup, possibly from a table lookup that only knew the name
-			entry->second->SetSchemaInfo(database);
-			continue;
+			if (entry->second->MergeSchemaInfo(database)) {
+				continue;
+			}
+			// another client dropped and recreated, or altered, the database: the entry and its tables are stale
+			RetireEntry(database.name);
 		}
 		entries.emplace(database.name, CreateSchemaEntry(database));
 	}

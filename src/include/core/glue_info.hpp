@@ -47,6 +47,15 @@ struct GlueDatabaseInfo {
 	//! Optional S3 location tables of this database default to
 	string location_uri;
 	unordered_map<string, string> parameters;
+	//! Glue's CreateTime in ms since the epoch, 0 when not returned
+	int64_t create_time_ms = 0;
+
+	//! Whether 'other' is this definition: a database dropped and recreated under its name, or altered, differs.
+	//! Glue's CreateTime has whole seconds, so a recreate within one second with the same fields is not told apart.
+	bool IsSameDefinition(const GlueDatabaseInfo &other) const {
+		return create_time_ms == other.create_time_ms && location_uri == other.location_uri &&
+		       description == other.description && parameters == other.parameters;
+	}
 };
 
 //! The file format of a Hive table's data files, decided by its SerDe

@@ -145,6 +145,30 @@ SELECT glue_calls('GetTables');
 ----
 1
 
+# also when the scans initialize in parallel
+statement ok
+SET threads = 8;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT sum(n) FROM (
+    SELECT count(*) AS n FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db'
+    UNION ALL SELECT count(*) FROM duckdb_views() WHERE database_name = 'reader' AND schema_name = 'lr_db'
+    UNION ALL SELECT count(*) FROM duckdb_columns() WHERE database_name = 'reader' AND schema_name = 'lr_db'
+);
+----
+3
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+statement ok
+RESET threads;
+
 # 6. inside an explicit transaction the listing is not retaken, whatever other connections do
 statement ok
 BEGIN;
@@ -356,7 +380,9 @@ SELECT glue_calls('GetTables');
 ----
 1
 
-# 11. a missing name is suggested from the tables already seen, without listing Glue
+# 11. a missing name is suggested from the tables already seen, without listing their database. The databases of each
+# Glue attach (writer, reader) are listed: core enumerates every catalog's schemas for the hint, through the same
+# Catalog::GetSchemas as duckdb_schemas(), which the extension cannot tell apart
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -365,10 +391,80 @@ SELECT * FROM reader.lr_db.bb;
 ----
 <REGEX>:.*Table with name bb does not exist.*Did you mean "b".*
 
-query I
-SELECT glue_calls('GetTables');
+query II
+SELECT glue_calls('GetTables'), glue_calls('GetDatabases');
 ----
-0
+0	2
+
+# a missing name of another catalog pays the same; catalog_error_max_schemas = 0 turns the hint off, and with it the calls
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT * FROM lr_missing_table;
+----
+Table with name lr_missing_table does not exist
+
+query II
+SELECT glue_calls('GetTables'), glue_calls('GetDatabases');
+----
+0	2
+
+statement ok
+SET catalog_error_max_schemas = 0;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT * FROM lr_missing_table;
+----
+Table with name lr_missing_table does not exist
+
+query II
+SELECT glue_calls('GetTables'), glue_calls('GetDatabases');
+----
+0	0
+
+statement ok
+RESET catalog_error_max_schemas;
+
+# 12. a database dropped and recreated elsewhere under its name is replaced by the next listing, with its new location
+statement ok
+attach '{GLUE_CATALOG_ID}' as location_reader (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+statement ok
+CREATE SCHEMA writer.lr_loc WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/old');
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'location_reader' AND schema_name = 'lr_loc';
+----
+1
+
+statement ok
+DROP SCHEMA writer.lr_loc;
+
+statement ok
+CREATE SCHEMA writer.lr_loc WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/new');
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'location_reader' AND schema_name = 'lr_loc';
+----
+1
+
+statement ok
+CREATE TABLE location_reader.lr_loc.t (i INTEGER);
+
+query I
+SELECT location LIKE '%/new/t' FROM glue_get_table_response('writer.lr_loc.t');
+----
+true
+
+statement ok
+DROP SCHEMA writer.lr_loc CASCADE;
 
 statement ok
 DROP SCHEMA writer.lr_db CASCADE;
