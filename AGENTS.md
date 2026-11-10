@@ -28,8 +28,8 @@ BUILD_BENCHMARK=1 ... make relassert                                            
 Each `src/` subdirectory has its own `CMakeLists.txt` (an `add_library_unity` object library appended to
 `GLUE_EXTENSION_FILES`, like DuckDB's own source tree): add new `.cpp` files there, and a new directory with
 `add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds` and `avro` (avro is
-loaded on demand for AvroSerDe tables) and `iceberg` (pinned to the hash the duckdb submodule pins, with
-`APPLY_PATCHES` when it has patches for it; needs `roaring` from vcpkg).
+loaded on demand for AvroSerDe tables) and `iceberg` (pinned to the duckdb-iceberg commit whose own duckdb
+submodule is closest to this repo's, which must also work with the avro pin; needs `roaring` from vcpkg).
 
 Run `make format-fix` (clang-format over `src` and `test`, via the duckdb submodule) before committing.
 
