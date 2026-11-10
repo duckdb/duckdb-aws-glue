@@ -1,0 +1,223 @@
+# name: test/sql/hive/dml/insert/insert_written_files.test
+# description: glue_written_files() lists the data files the connection's last INSERT or CREATE TABLE AS wrote
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files_ctas;
+
+# before any write there are none
+query I
+SELECT count(*) FROM glue_written_files();
+----
+0
+
+statement ok
+CREATE TABLE my_datalake.default.written_files (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.written_files SELECT i FROM range(10) t(i);
+
+# the files the INSERT wrote are all the table's files
+query I
+SELECT count(*) > 0 FROM glue_written_files();
+----
+true
+
+query I
+SELECT count(*) FROM (
+    (SELECT file_path FROM glue_written_files() EXCEPT SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files/**'))
+    UNION ALL
+    (SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files/**') EXCEPT SELECT file_path FROM glue_written_files())
+);
+----
+0
+
+# other statements leave them in place
+statement ok
+SELECT count(*) FROM my_datalake.default.written_files;
+
+statement ok
+CREATE TABLE local_table AS SELECT 1 AS i;
+
+query I
+SELECT count(*) = (SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files/**')) FROM glue_written_files();
+----
+true
+
+# the next write replaces them with its own: one write id, not the first INSERT's
+statement ok
+CREATE TABLE first_files AS SELECT file_path FROM glue_written_files();
+
+statement ok
+INSERT INTO my_datalake.default.written_files SELECT i FROM range(10) t(i);
+
+query II
+SELECT count(DISTINCT split_part(parse_filename(file_path), '_', 1)), count(*) FILTER (WHERE file_path IN (SELECT file_path FROM first_files)) FROM glue_written_files();
+----
+1	0
+
+# a prepared query reads the list when it runs
+statement ok
+CREATE TABLE second_files AS SELECT file_path FROM glue_written_files();
+
+statement ok
+PREPARE written AS SELECT count(*) > 0, count(*) FILTER (WHERE file_path IN (SELECT file_path FROM second_files)) > 0 FROM glue_written_files();
+
+query II
+EXECUTE written;
+----
+true	true
+
+statement ok
+INSERT INTO my_datalake.default.written_files SELECT i FROM range(10) t(i);
+
+query II
+EXECUTE written;
+----
+true	false
+
+# EXPLAIN writes nothing and leaves the list in place
+statement ok
+CREATE OR REPLACE TABLE third_files AS SELECT file_path FROM glue_written_files();
+
+statement ok
+EXPLAIN INSERT INTO my_datalake.default.written_files SELECT i FROM range(10) t(i);
+
+query I
+SELECT count(*) FROM glue_written_files() WHERE file_path NOT IN (SELECT file_path FROM third_files);
+----
+0
+
+# a failing statement that writes nothing leaves the list in place
+statement error
+SELECT error('not a write');
+----
+not a write
+
+query I
+SELECT count(*) > 0 FROM glue_written_files();
+----
+true
+
+# an unpartitioned INSERT of no rows still writes one empty file, which replaces the list
+statement ok
+CREATE OR REPLACE TABLE third_files AS SELECT file_path FROM glue_written_files();
+
+statement ok
+INSERT INTO my_datalake.default.written_files SELECT i FROM range(0) t(i);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE file_path IN (SELECT file_path FROM third_files)) FROM glue_written_files();
+----
+1	0
+
+# a partitioned INSERT lists the files of every partition it wrote
+statement ok
+CREATE TABLE my_datalake.default.written_files_partitioned (id INTEGER, p INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO my_datalake.default.written_files_partitioned SELECT i, i % 3 FROM range(9) t(i);
+
+query I
+SELECT DISTINCT regexp_extract(file_path, '/(p=[0-9]+)/', 1) AS partition FROM glue_written_files() ORDER BY partition;
+----
+p=0
+p=1
+p=2
+
+# a write whose partition registration fails is undone, and lists none
+statement ok
+SET glue_debug_fail_partition_registration = 'InvalidInputException:0';
+
+statement error
+INSERT INTO my_datalake.default.written_files_partitioned SELECT i, i % 3 + 10 FROM range(9) t(i);
+----
+was rolled back
+
+statement ok
+RESET glue_debug_fail_partition_registration;
+
+query I
+SELECT count(*) FROM glue_written_files();
+----
+0
+
+# CREATE TABLE AS
+statement ok
+CREATE TABLE my_datalake.default.written_files_ctas AS SELECT i AS id FROM range(5) t(i);
+
+query I
+SELECT count(*) FROM (
+    (SELECT file_path FROM glue_written_files() EXCEPT SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files_ctas/**'))
+    UNION ALL
+    (SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files_ctas/**') EXCEPT SELECT file_path FROM glue_written_files())
+);
+----
+0
+
+query I
+SELECT count(*) > 0 FROM glue_written_files();
+----
+true
+
+# a CREATE TABLE AS that fails when it starts writing empties the list: the dropped table's files are still there
+statement ok
+DROP TABLE my_datalake.default.written_files_ctas;
+
+statement error
+CREATE TABLE my_datalake.default.written_files_ctas AS SELECT 1 AS id;
+----
+already holds files
+
+query I
+SELECT count(*) FROM glue_written_files();
+----
+0
+
+statement ok
+INSERT INTO my_datalake.default.written_files SELECT i FROM range(10) t(i);
+
+# each connection has its own
+query I con2
+SELECT count(*) FROM glue_written_files();
+----
+0
+
+# a write that fails lists none
+statement error
+INSERT INTO my_datalake.default.written_files SELECT CASE WHEN i = 5 THEN error('boom') ELSE i END FROM range(10) t(i);
+----
+boom
+
+query I
+SELECT count(*) FROM glue_written_files();
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.written_files;
+
+statement ok
+DROP TABLE my_datalake.default.written_files_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files_ctas;

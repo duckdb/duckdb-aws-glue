@@ -34,6 +34,7 @@
 #include "core/glue_types.hpp"
 #include "core/hive_location.hpp"
 #include "execution/hive_copy.hpp"
+#include "functions/glue_written_files.hpp"
 
 namespace duckdb {
 
@@ -809,6 +810,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		transaction.CompleteHiveWrite(write_id);
+		GlueWrittenFilesState::Get(context)->AddFiles(state.written_files);
 		return SinkFinalizeType::READY;
 	}
 
@@ -893,6 +895,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		                  table_info.schema_name, table_info.name, error.RawMessage());
 	}
 	transaction.CompleteHiveWrite(write_id);
+	GlueWrittenFilesState::Get(context)->AddFiles(state.written_files);
 	return SinkFinalizeType::READY;
 }
 
