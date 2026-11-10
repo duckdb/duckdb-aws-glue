@@ -1,0 +1,210 @@
+# name: test/sql/cloud/glue_view_iceberg_catalogs.test
+# description: a Glue view over an Iceberg table, written through one Iceberg catalog alias and read through others; the test creates and drops its own Glue databases and Iceberg table
+# group: [cloud]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_TEST_CONFIG cloud
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_REGION
+
+require-env DEFAULT_S3_LOCATION
+
+require iceberg
+
+statement ok
+CREATE SECRET pr208_secret (TYPE S3, PROVIDER credential_chain, REGION '{GLUE_REGION}');
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS pr208_glue (TYPE GLUE, REGION '{GLUE_REGION}', DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}');
+
+statement ok
+RESET experimental_glue_view_iceberg_catalogs;
+
+# what a failed run left
+statement ok
+DROP SCHEMA IF EXISTS pr208_glue.pr208_ic CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS pr208_glue.pr208_ic_views CASCADE;
+
+statement ok
+CREATE SCHEMA pr208_glue.pr208_ic;
+
+statement ok
+CREATE SCHEMA pr208_glue.pr208_ic_views;
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS ice (TYPE ICEBERG, URI 'https://glue.{GLUE_REGION}.amazonaws.com/iceberg', AUTHORIZATION_TYPE 'sigv4', SECRET pr208_secret, ACCESS_DELEGATION_MODE 'none');
+
+statement ok
+CREATE TABLE ice.pr208_ic.pr208_t (id INTEGER) WITH ('location' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pr208_t');
+
+statement ok
+INSERT INTO ice.pr208_ic.pr208_t VALUES (1), (2), (3);
+
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'ice'};
+
+# stored by the table's Glue name in both texts, without the alias
+statement ok
+CREATE VIEW pr208_glue.pr208_ic.pr208_v AS SELECT id FROM ice.pr208_ic.pr208_t;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('pr208_glue.pr208_ic.pr208_v');
+----
+SELECT id FROM pr208_ic.pr208_t
+SELECT id FROM pr208_ic.pr208_t
+
+# a column qualified with the alias is refused
+statement error
+CREATE VIEW pr208_glue.pr208_ic.pr208_refused AS SELECT ice.pr208_ic.pr208_t.id FROM ice.pr208_ic.pr208_t;
+----
+Glue view references "ice.pr208_ic.pr208_t.id", whose "ice" is also the name of a catalog the view reads: use a table alias with another name
+
+statement ok
+USE ice.pr208_ic;
+
+# a bare name binds in the view's database first, where the table is a Glue table: a view in another database
+# reaches it through USE, and stores it by its Glue name in both texts
+statement ok
+CREATE VIEW pr208_glue.pr208_ic_views.pr208_bare AS SELECT id FROM pr208_t;
+
+statement error
+CREATE VIEW pr208_glue.pr208_ic_views.pr208_refused AS SELECT ice.pr208_ic.pr208_t.id FROM pr208_t;
+----
+Glue view references "ice.pr208_ic.pr208_t.id", whose "ice" is also the name of a catalog the view reads: use a table alias with another name
+
+statement error
+CREATE VIEW pr208_glue.pr208_ic.pr208_refused AS SELECT id FROM pr208_t;
+----
+Glue table 'pr208_ic.pr208_t' has table format ICEBERG, which can not be read yet
+
+statement ok
+USE memory.main;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('pr208_glue.pr208_ic_views.pr208_bare');
+----
+SELECT id FROM pr208_ic.pr208_t
+SELECT id FROM pr208_ic.pr208_t
+
+query I
+SELECT * FROM pr208_glue.pr208_ic.pr208_v ORDER BY id;
+----
+1
+2
+3
+
+query I
+SELECT * FROM pr208_glue.pr208_ic_views.pr208_bare ORDER BY id;
+----
+1
+2
+3
+
+# the columns are listed from the Iceberg table, as a query reads them, and join to the view on its oid
+query II
+SELECT c.column_name, c.data_type FROM duckdb_views() v JOIN duckdb_columns() c ON v.view_oid = c.table_oid WHERE v.database_name = 'pr208_glue' AND v.view_name = 'pr208_v';
+----
+id	INTEGER
+
+# without the setting, the view reads the Glue table, as before
+statement ok
+RESET experimental_glue_view_iceberg_catalogs;
+
+statement error
+SELECT * FROM pr208_glue.pr208_ic.pr208_v;
+----
+Glue table 'pr208_ic.pr208_t' has table format ICEBERG, which can not be read yet
+
+# another alias of the same catalog reads the views, once the first is detached
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS lake (TYPE ICEBERG, URI 'https://glue.{GLUE_REGION}.amazonaws.com/iceberg', AUTHORIZATION_TYPE 'sigv4', SECRET pr208_secret, ACCESS_DELEGATION_MODE 'none');
+
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'lake'};
+
+statement ok
+DETACH ice;
+
+query I
+SELECT * FROM pr208_glue.pr208_ic.pr208_v ORDER BY id;
+----
+1
+2
+3
+
+query I
+SELECT * FROM pr208_glue.pr208_ic_views.pr208_bare ORDER BY id;
+----
+1
+2
+3
+
+query II
+SELECT c.column_name, c.data_type FROM duckdb_views() v JOIN duckdb_columns() c ON v.view_oid = c.table_oid WHERE v.database_name = 'pr208_glue' AND v.view_name = 'pr208_bare';
+----
+id	INTEGER
+
+# and through an alias that needs quoting, attached once the other is detached
+statement ok
+DETACH lake;
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS "Reader$Iceberg" (TYPE ICEBERG, URI 'https://glue.{GLUE_REGION}.amazonaws.com/iceberg', AUTHORIZATION_TYPE 'sigv4', SECRET pr208_secret, ACCESS_DELEGATION_MODE 'none');
+
+statement ok
+SET GLOBAL experimental_glue_view_iceberg_catalogs = MAP {'{GLUE_CATALOG_ID}': 'Reader$Iceberg'};
+
+query I
+SELECT sum(id) FROM pr208_glue.pr208_ic.pr208_v;
+----
+6
+
+# a view reads the catalog that was checked: another one attached under the alias in the same transaction is refused
+statement ok
+BEGIN;
+
+query I
+SELECT sum(id) FROM pr208_glue.pr208_ic.pr208_v;
+----
+6
+
+statement ok
+DETACH "Reader$Iceberg";
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS "Reader$Iceberg" (TYPE ICEBERG, URI 'https://glue.{GLUE_REGION}.amazonaws.com/iceberg', AUTHORIZATION_TYPE 'sigv4', SECRET pr208_secret, ACCESS_DELEGATION_MODE 'none');
+
+statement error
+SELECT sum(id) FROM pr208_glue.pr208_ic.pr208_v;
+----
+catalog "Reader$Iceberg" was detached or attached again after this transaction checked it
+
+statement ok
+ROLLBACK;
+
+statement ok
+RESET experimental_glue_view_iceberg_catalogs;
+
+statement ok
+DROP VIEW pr208_glue.pr208_ic.pr208_v;
+
+statement ok
+DROP VIEW pr208_glue.pr208_ic_views.pr208_bare;
+
+statement ok
+DROP TABLE pr208_glue.pr208_ic.pr208_t;
+
+statement ok
+DROP SCHEMA pr208_glue.pr208_ic;
+
+statement ok
+DROP SCHEMA pr208_glue.pr208_ic_views;

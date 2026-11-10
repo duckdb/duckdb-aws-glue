@@ -41,7 +41,7 @@ SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CAT
   `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially in batches of 10 tests per process, retrying a
   failing batch twice: against the local servers a read right after a write occasionally comes back empty.
 - `test/configs/cloud_glue.json`: live AWS (credential chain, eu-central-1). `test/sql/cloud/` only runs here
-  (`require-env GLUE_TEST_CONFIG cloud`) and reads pre-existing tables in the account.
+  (`require-env GLUE_TEST_CONFIG cloud`), and creates and drops its own databases in the account.
 
 Single test:
 

@@ -20,6 +20,10 @@
 			"env_value": "176760123605"
 		},
 		{
+			"env_name": "GLUE_REGION",
+			"env_value": "eu-central-1"
+		},
+		{
 			"env_name": "GLUE_ENDPOINT",
 			"env_value": ""
 		},

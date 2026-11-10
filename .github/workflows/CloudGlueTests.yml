@@ -206,6 +206,7 @@ jobs:
             .on_init |= sub("REGION '"'"'[^'"'"']*'"'"'"; "REGION '"'"'\($region)'"'"'")
             | .test_env |= map(
                 if .env_name == "GLUE_CATALOG_ID" then .env_value = $catalog
+                elif .env_name == "GLUE_REGION" then .env_value = $region
                 elif .env_name == "DEFAULT_S3_LOCATION" then .env_value = $location
                 else . end)
           ' test/configs/cloud_glue.json > "$RUNNER_TEMP/cloud_glue_ci.json"
