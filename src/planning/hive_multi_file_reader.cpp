@@ -357,12 +357,12 @@ private:
 //===--------------------------------------------------------------------===//
 HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p,
                                      vector<idx_t> partition_indexes_p)
-    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)),
+    : LazyMultiFileList(&context.GetContext()), client_context(context), scan_info(std::move(scan_info_p)),
       partition_indexes(make_shared_ptr<const vector<idx_t>>(std::move(partition_indexes_p))) {
 }
 
 HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p)
-    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)) {
+    : LazyMultiFileList(&context.GetContext()), client_context(context), scan_info(std::move(scan_info_p)) {
 }
 
 shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {

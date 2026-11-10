@@ -15,14 +15,6 @@ duckdb_extension_statically_link(glue)
 duckdb_extension_load(tpch)
 duckdb_extension_load(tpcds)
 
-# httpfs with S3 requests signed with the secret a file names (duckdb/duckdb-httpfs#521). Takes precedence over the
-# duckdb submodule's .github/config/extensions/httpfs.cmake; without its patches, which this commit already contains.
-duckdb_extension_load(httpfs
-    LOAD_TESTS
-    GIT_URL https://github.com/duckdb/duckdb-httpfs
-    GIT_TAG 5b1a46218dd31e811f1eeb0cac539e755cbb79c7
-)
-
 if (NOT MINGW)
     duckdb_extension_load(avro
         GIT_URL https://github.com/duckdb/duckdb-avro

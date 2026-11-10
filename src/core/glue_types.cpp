@@ -244,8 +244,8 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	case LogicalTypeId::DOUBLE:
 		return "double";
 	case LogicalTypeId::DECIMAL: {
-		uint8_t width;
-		uint8_t scale;
+		uint32_t width;
+		uint32_t scale;
 		type.GetDecimalProperties(width, scale);
 		return StringUtil::Format("decimal(%d,%d)", width, scale);
 	}
