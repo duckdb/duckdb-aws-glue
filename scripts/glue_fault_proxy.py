@@ -16,11 +16,14 @@ forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
-amz-sdk-request header) and forwarded when the SDK retries it."""
+amz-sdk-request header) and forwarded when the SDK retries it. The first GetTable of each table in a
+fault_get_table_once* database fails with AccessDeniedException; later ones are forwarded, until the database is
+created or deleted through the proxy, which makes the next GetTable of each of its tables fail again."""
 
 import argparse
 import http.client
 import json
+import threading
 import time
 import uuid
 import urllib.parse
@@ -43,6 +46,10 @@ RECREATED_PREFIX = "fault_recreated_during_write"
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
 # CreatePartition on a database with this prefix registers each value with a leading '0'
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
+# the first GetTable of each table in a database with this prefix fails, later ones are forwarded
+GET_TABLE_ONCE_PREFIX = "fault_get_table_once"
+failed_get_tables = set()
+failed_get_tables_lock = threading.Lock()
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -89,6 +96,29 @@ def as_other_clients_object(target, request):
 def is_throttled(database, sdk_request):
     attempts = (sdk_request or "").replace(" ", "").split(";")
     return database.startswith(THROTTLED_PREFIX) and "attempt=1" in attempts
+
+
+def fails_get_table_once(target, database, request):
+    if target != "AWSGlue.GetTable" or not database.startswith(GET_TABLE_ONCE_PREFIX):
+        return False
+    key = (database, request.get("Name", "").lower())
+    with failed_get_tables_lock:
+        if key in failed_get_tables:
+            return False
+        failed_get_tables.add(key)
+        return True
+
+
+def reset_get_table_once(target, request):
+    if target == "AWSGlue.CreateDatabase":
+        database = request.get("DatabaseInput", {}).get("Name", "")
+    elif target == "AWSGlue.DeleteDatabase":
+        database = request.get("Name", "")
+    else:
+        return
+    if database.startswith(GET_TABLE_ONCE_PREFIX):
+        with failed_get_tables_lock:
+            failed_get_tables.difference_update({key for key in failed_get_tables if key[0] == database})
 
 
 def is_raced_update(target, database):
@@ -141,9 +171,12 @@ class Handler(BaseHTTPRequestHandler):
         target = self.headers.get("X-Amz-Target")
         request = parse_request(body)
         database = request_database(target, request)
+        reset_get_table_once(target, request)
         error = listing_error(target, database)
         if not error and is_throttled(database, self.headers.get("amz-sdk-request")):
             error = "ThrottlingException"
+        if not error and fails_get_table_once(target, database, request):
+            error = "AccessDeniedException"
         if error:
             self.reply_error(error)
             return

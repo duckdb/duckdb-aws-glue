@@ -28,6 +28,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.calls_ctas;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.calls_fresh;
+
+statement ok
 DROP TABLE IF EXISTS my_datalake.default.calls_orders_csv;
 
 statement ok
@@ -57,7 +60,8 @@ CALL enable_logging('HTTP', storage='memory');
 #---------------------------------------------------------------------------
 # CREATE TABLE / DROP TABLE
 #---------------------------------------------------------------------------
-# the lookup of a name that does not exist is not memoized: the binder's and the extension's probes both reach Glue
+# the lookup of a name that does not exist is memoized: of the binder's and the extension's probes only the first
+# reaches Glue
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -68,7 +72,7 @@ query II
 FROM glue_calls();
 ----
 CreateTable	1
-GetTable	3
+GetTable	2
 GetTables	1
 
 statement ok
@@ -82,6 +86,41 @@ FROM glue_calls();
 ----
 DeleteTable	1
 GetTable	1
+
+# a fresh connection's first query: the miss is kept from its first lookup on, so the second probe and the GetTables
+# page are not sent (GetDatabase and GetTable read the new database, CreateTable, then the GetTable that reads the
+# created table back). The CREATE TABLE must stay the first statement on con_fresh that touches fresh_dl.
+statement ok con_fresh
+attach '{GLUE_CATALOG_ID}' as fresh_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok con_fresh
+SET redact_http_logs = false;
+
+statement ok con_fresh
+CALL enable_logging('HTTP', storage='memory');
+
+statement ok con_fresh
+CALL truncate_duckdb_logs();
+
+statement ok con_fresh
+CREATE TABLE fresh_dl.default.calls_fresh (id INTEGER);
+
+query II con_fresh
+FROM memory.glue_calls();
+----
+CreateTable	1
+GetDatabase	1
+GetTable	2
+
+statement ok con_fresh
+DROP TABLE fresh_dl.default.calls_fresh;
+
+statement ok con_fresh
+DETACH fresh_dl;
 
 #---------------------------------------------------------------------------
 # CTAS into a partitioned table
@@ -97,7 +136,7 @@ FROM glue_calls();
 ----
 BatchCreatePartition	1
 CreateTable	1
-GetTable	4
+GetTable	3
 GetTables	1
 
 statement ok

@@ -42,7 +42,7 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 	// Of() is null in a bare statement (nothing started the catalog's transaction); Get() starts it
 	auto &cache = *GlueTransaction::Get(context, catalog).cache;
 	auto fetched = make_shared_ptr<const GlueTableInfo>(std::move(info));
-	cache.GetTable(database_name, table_name, [&fetched]() { return fetched; });
+	cache.PutTable(database_name, table_name, fetched);
 
 	auto column_type = GlueColumnsType();
 	auto map_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
