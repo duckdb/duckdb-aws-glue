@@ -31,11 +31,11 @@ if (NOT MINGW)
     )
 
     # Iceberg tables in Glue are served by Glue's Iceberg REST endpoint through an internal iceberg catalog. Pinned
-    # to the duckdb-iceberg commit whose duckdb submodule is closest to this repo's, rather than the hash the duckdb
-    # submodule pins: that one binds avro's COPY function without its function info, which the avro pinned above
-    # refuses, so every Iceberg write failed (fixed in duckdb-iceberg b5db08d53).
+    # to the newest duckdb-iceberg main commit rather than the hash the duckdb submodule pins: that one binds avro's
+    # COPY function without its function info, which the avro pinned above refuses, so every Iceberg write failed
+    # (fixed in duckdb-iceberg b5db08d53).
     duckdb_extension_load(iceberg
         GIT_URL https://github.com/duckdb/duckdb-iceberg
-        GIT_TAG c77480d71e19e2711b8e6473425627b92913c5dd
+        GIT_TAG 4c12f005062fc6ace3a79dc472e46712bf84974f
     )
 endif()
