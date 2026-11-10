@@ -23,7 +23,7 @@ public:
 	//! The entry with this name whatever its type (callers check entry->type against what they need), replaced when
 	//! Glue holds another version of it and gone when Glue no longer has it
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup);
-	//! The entries of the given type (TABLE_ENTRY or VIEW_ENTRY), listed from Glue once per metadata cache id
+	//! The entries of the given type (TABLE_ENTRY or VIEW_ENTRY), listed from Glue once per metadata cache
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
 	//! The entries already in the set, without listing Glue. Runs without a catalog transaction, so the callback
 	//! must not keep a reference to an entry past the call.
@@ -38,7 +38,9 @@ public:
 	static const GlueTableInfo &GetTableInfo(const CatalogEntry &entry);
 
 private:
-	void LoadEntries(ClientContext &context);
+	//! Lists the database from Glue unless the transaction's cache has this set listed, and merges the listing into
+	//! entries. The Glue call runs without entry_lock; only the merge holds it.
+	void LoadEntries(ClientContext &context, GlueTransactionCache &cache);
 	//! One first-page GetTables warming the metadata cache, instead of a GetTable per table. Only warms the
 	//! cache: entries stay per referenced table and Scan still lists, so neither outlives the page's truth.
 	void BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache);
@@ -53,8 +55,8 @@ private:
 	GlueCatalog &catalog;
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
-	//! The GlueTransactionCache::Id() the entries were last listed under (0 = never listed)
-	idx_t listed_cache_id = 0;
+	//! Identifies this set among the sets a GlueTransactionCache has listed
+	const idx_t id;
 	//! Direct-lookup round trips since the last bulk fetch: bulk pays off from the second one on
 	idx_t direct_lookups = 0;
 	//! The GlueTransactionCache::Id() the last successful bulk fetch warmed (0 = none yet)

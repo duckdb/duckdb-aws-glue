@@ -145,7 +145,7 @@ SELECT glue_calls('GetTables');
 ----
 1
 
-# 6. inside an explicit transaction the listing is not retaken
+# 6. inside an explicit transaction the listing is not retaken, whatever other connections do
 statement ok
 BEGIN;
 
@@ -172,6 +172,28 @@ query I
 SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
 ----
 b
+
+query I
+SELECT glue_calls('GetTables');
+----
+0
+
+# another connection listing the same attach does not make this transaction list again. The entries are shared by
+# every connection of the attach, so the table that listing added is seen, as a by-name reference of it would be
+query I con2
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
 
 query I
 SELECT glue_calls('GetTables');
@@ -284,6 +306,31 @@ SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema
 b
 c
 d
+
+query I
+SELECT glue_calls('GetTables');
+----
+0
+
+# another connection listing in between does not make this connection list again either
+query I con2
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
+d
+e
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'reader' AND schema_name = 'lr_db' ORDER BY table_name;
+----
+b
+c
+d
+e
 
 query I
 SELECT glue_calls('GetTables');

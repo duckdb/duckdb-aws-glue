@@ -10,6 +10,7 @@
 
 namespace duckdb {
 class GlueCatalog;
+class GlueTransactionCache;
 
 //! The set of databases of a Glue catalog, lazily loaded from Glue
 class GlueSchemaSet {
@@ -25,7 +26,7 @@ public:
 	optional_ptr<CatalogEntry> GetCachedEntry(const string &name);
 	//! Insert 'entry' unless a schema of that name was loaded meanwhile; returns nullptr if one was
 	optional_ptr<CatalogEntry> AddEntryIfAbsent(unique_ptr<GlueSchemaEntry> entry);
-	//! The schemas, listed from Glue once per metadata cache id
+	//! The schemas, listed from Glue once per metadata cache
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
 	//! Insert a (new) schema entry into the set, replacing any existing entry with the same name
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<GlueSchemaEntry> entry);
@@ -35,7 +36,9 @@ public:
 	unique_ptr<GlueSchemaEntry> CreateSchemaEntry(const GlueDatabaseInfo &database, bool loaded = true);
 
 private:
-	void LoadEntries(ClientContext &context);
+	//! Lists the databases from Glue unless the transaction's cache has this set listed, and merges the listing into
+	//! entries. The Glue call runs without entry_lock; only the merge holds it.
+	void LoadEntries(ClientContext &context, GlueTransactionCache &cache);
 	//! Move an entry out of the set; the transaction manager keeps it, and the tables it caches, alive while a
 	//! running statement may use them. Called with entry_lock held.
 	void RetireEntry(const string &name);
@@ -44,8 +47,8 @@ private:
 	GlueCatalog &catalog;
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<GlueSchemaEntry>> entries;
-	//! The GlueTransactionCache::Id() the entries were last listed under (0 = never listed)
-	idx_t listed_cache_id = 0;
+	//! Identifies this set among the sets a GlueTransactionCache has listed
+	const idx_t id;
 };
 
 } // namespace duckdb

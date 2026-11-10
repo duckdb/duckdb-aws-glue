@@ -1,6 +1,5 @@
 #pragma once
 
-#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -8,6 +7,7 @@
 #include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
@@ -69,18 +69,27 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
-		id = NextId();
+		listed_sets.clear();
 	}
-	//! Tells cache contents apart (monotonic, never reused): a new instance and a Clear() both bring a new id, so a
-	//! consumer keyed on it (bulk warming and listing in GlueTableSet, listing in GlueSchemaSet) redoes its work once
-	//! per id. Under the default scope a new transaction brings a new instance.
+	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
+	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
 	idx_t Id() const {
 		return id;
 	}
-
-private:
+	//! Whether the entry set with this id (GlueTableSet / GlueSchemaSet) was listed from Glue under this cache. A
+	//! listing holds until the cache is cleared, like the metadata it resolved.
+	bool HasListed(idx_t set_id) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		return listed_sets.count(set_id) > 0;
+	}
+	void MarkListed(idx_t set_id) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		listed_sets.insert(set_id);
+	}
+	//! Monotonic ids, never reused: for cache instances and for the entry sets they track
 	static idx_t NextId();
 
+private:
 	//! One cached value and the lock that guards loading it. The lock is per entry so the Glue calls for
 	//! different tables do not wait on each other (resolving N tables runs their fetches in parallel).
 	template <class T>
@@ -115,8 +124,8 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
-	//! Read without the lock (Id()), written under it (Clear())
-	atomic<idx_t> id {NextId()};
+	unordered_set<idx_t> listed_sets DUCKDB_GUARDED_BY(lock);
+	const idx_t id = NextId();
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in

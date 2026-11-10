@@ -11,6 +11,7 @@
 #include "core/glue_types.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_entry_listing.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_transaction_manager.hpp"
@@ -18,7 +19,8 @@
 
 namespace duckdb {
 
-GlueTableSet::GlueTableSet(GlueSchemaEntry &schema) : schema(schema), catalog(schema.catalog.Cast<GlueCatalog>()) {
+GlueTableSet::GlueTableSet(GlueSchemaEntry &schema)
+    : schema(schema), catalog(schema.catalog.Cast<GlueCatalog>()), id(GlueTransactionCache::NextId()) {
 }
 
 unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
@@ -62,13 +64,14 @@ bool GlueTableSet::BatchTableLookups(ClientContext &context) {
 	return true;
 }
 
-void GlueTableSet::LoadEntries(ClientContext &context) {
-	// Scan started the transaction, so the cache exists. The id is read once: a Clear() during the fetch must not
-	// mark this listing current
-	auto &cache = *GlueTransaction::Get(context, catalog).cache;
-	auto cache_id = cache.Id();
-	if (cache_id == listed_cache_id || get_tables_forbidden) {
-		return;
+void GlueTableSet::LoadEntries(ClientContext &context, GlueTransactionCache &cache) {
+	GlueEntryListing::Snapshot snapshot;
+	{
+		lock_guard<mutex> guard(entry_lock);
+		if (cache.HasListed(id) || get_tables_forbidden) {
+			return;
+		}
+		snapshot = GlueEntryListing::Take(entries);
 	}
 	vector<GlueTableInfo> tables;
 	try {
@@ -78,19 +81,28 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 			throw;
 		}
 		// a database whose tables we may not list keeps the entries its lookups built
+		lock_guard<mutex> guard(entry_lock);
 		get_tables_forbidden = true;
 		ErrorData error(ex);
 		DUCKDB_LOG_WARNING(context, "Not listing the tables of Glue database '%s': %s", schema.GetDatabaseName(),
 		                   error.RawMessage());
 		return;
 	}
+	// The definitions this transaction's lookups see: one the cache already holds wins, otherwise the listed one is
+	// cached so the per reference GetEntry does not re-fetch what this one request returned
+	vector<shared_ptr<const GlueTableInfo>> infos;
 	case_insensitive_set_t listed;
 	for (auto &table : tables) {
 		listed.insert(table.name);
-		// The definition this transaction's lookups see: one the cache already holds wins, otherwise the listed one is
-		// cached so the per reference GetEntry does not re-fetch what this one request returned
 		shared_ptr<const GlueTableInfo> listed_info = make_shared_ptr<const GlueTableInfo>(table);
-		auto info = cache.GetTable(schema.GetDatabaseName(), table.name, [&listed_info]() { return listed_info; });
+		infos.push_back(cache.GetTable(schema.GetDatabaseName(), table.name, [&listed_info]() { return listed_info; }));
+	}
+	lock_guard<mutex> guard(entry_lock);
+	for (auto &info : infos) {
+		if (!GlueEntryListing::Unchanged(entries, snapshot, info->name)) {
+			// another client changed the entry while Glue was asked: it knows a newer definition than the listing
+			continue;
+		}
 		auto existing = entries.find(info->name);
 		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(*info)) {
 			// already loaded, and still what Glue holds
@@ -112,17 +124,10 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 		RetireEntry(info->name);
 		entries.emplace(info->name, std::move(entry));
 	}
-	// what Glue no longer returns was dropped by another client
-	vector<string> gone;
-	for (auto &entry : entries) {
-		if (!listed.count(entry.first)) {
-			gone.push_back(entry.first);
-		}
-	}
-	for (auto &name : gone) {
+	for (auto &name : GlueEntryListing::NotListed(entries, snapshot, listed)) {
 		RetireEntry(name);
 	}
-	listed_cache_id = cache_id;
+	cache.MarkListed(id);
 }
 
 void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache) {
@@ -145,7 +150,7 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 		                   schema.GetDatabaseName(), error.RawMessage());
 		return;
 	}
-	// One page per cache id: misses past the page (a database larger than one page) stay direct instead
+	// One page per cache instance: misses past the page (a database larger than one page) stay direct instead
 	// of re-reading the same first page
 	bulk_loaded_cache_id = cache.Id();
 	for (auto &table : tables) {
@@ -176,8 +181,8 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		// the lookup name may differ in case from the one Glue knows
 		glue_name = cached ? existing->second->name.GetIdentifierName() : name;
 		// The attach's first round-trip miss stays direct: a lone lookup must not enumerate a large database.
-		// From the second round-trip-causing miss on (round trips count across cache ids), one GetTables
-		// page warms the cache, at most once per id - under the default scope that is once per transaction.
+		// From the second round-trip-causing miss on (round trips count across cache instances), one GetTables
+		// page warms the cache, at most once per instance - under the default scope that is once per transaction.
 		if (!cached && cache && !get_tables_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
 		    BatchTableLookups(context)) {
 			BulkLoadTableInfo(context, *cache);
@@ -227,9 +232,10 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 	// tables and views share the set and a scan of either type yields both, as in DuckDB's own schema: the catalog
 	// functions filter by entry type themselves, and duckdb_columns() collects the columns of views through a
 	// TABLE_ENTRY scan
-	Transaction::Get(context, catalog);
+	// the reader's Glue transaction keeps the entries alive while they are used (GlueTransactionManager::RetireEntry)
+	auto &transaction = GlueTransaction::Get(context, catalog);
+	LoadEntries(context, *transaction.cache);
 	lock_guard<mutex> guard(entry_lock);
-	LoadEntries(context);
 	for (auto &entry : entries) {
 		callback(*entry.second);
 	}

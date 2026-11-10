@@ -5,13 +5,14 @@
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_entry_listing.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
 
-GlueSchemaSet::GlueSchemaSet(GlueCatalog &catalog) : catalog(catalog) {
+GlueSchemaSet::GlueSchemaSet(GlueCatalog &catalog) : catalog(catalog), id(GlueTransactionCache::NextId()) {
 }
 
 unique_ptr<GlueSchemaEntry> GlueSchemaSet::CreateSchemaEntry(const GlueDatabaseInfo &database, bool loaded) {
@@ -22,18 +23,24 @@ unique_ptr<GlueSchemaEntry> GlueSchemaSet::CreateSchemaEntry(const GlueDatabaseI
 	return make_uniq<GlueSchemaEntry>(catalog, info, database, loaded);
 }
 
-void GlueSchemaSet::LoadEntries(ClientContext &context) {
-	// Scan started the transaction, so the cache exists. The id is read once: a Clear() during the fetch must not
-	// mark this listing current
-	auto &cache = *GlueTransaction::Get(context, catalog).cache;
-	auto cache_id = cache.Id();
-	if (cache_id == listed_cache_id) {
-		return;
+void GlueSchemaSet::LoadEntries(ClientContext &context, GlueTransactionCache &cache) {
+	GlueEntryListing::Snapshot snapshot;
+	{
+		lock_guard<mutex> guard(entry_lock);
+		if (cache.HasListed(id)) {
+			return;
+		}
+		snapshot = GlueEntryListing::Take(entries);
 	}
 	auto databases = GlueAPI::GetDatabases(context, catalog);
+	lock_guard<mutex> guard(entry_lock);
 	case_insensitive_set_t listed;
 	for (auto &database : databases) {
 		listed.insert(database.name);
+		if (!GlueEntryListing::Unchanged(entries, snapshot, database.name)) {
+			// another client changed the entry while Glue was asked: it knows more than the listing
+			continue;
+		}
 		auto entry = entries.find(database.name);
 		if (entry != entries.end()) {
 			// already loaded through a direct lookup, possibly from a table lookup that only knew the name
@@ -42,17 +49,10 @@ void GlueSchemaSet::LoadEntries(ClientContext &context) {
 		}
 		entries.emplace(database.name, CreateSchemaEntry(database));
 	}
-	// what Glue no longer returns was dropped by another client
-	vector<string> gone;
-	for (auto &entry : entries) {
-		if (!listed.count(entry.first)) {
-			gone.push_back(entry.first);
-		}
-	}
-	for (auto &name : gone) {
+	for (auto &name : GlueEntryListing::NotListed(entries, snapshot, listed)) {
 		RetireEntry(name);
 	}
-	listed_cache_id = cache_id;
+	cache.MarkListed(id);
 }
 
 optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const string &name) {
@@ -96,9 +96,10 @@ optional_ptr<CatalogEntry> GlueSchemaSet::AddEntryIfAbsent(unique_ptr<GlueSchema
 }
 
 void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
-	Transaction::Get(context, catalog);
+	// the reader's Glue transaction keeps the entries alive while they are used (GlueTransactionManager::RetireEntry)
+	auto &transaction = GlueTransaction::Get(context, catalog);
+	LoadEntries(context, *transaction.cache);
 	lock_guard<mutex> guard(entry_lock);
-	LoadEntries(context);
 	for (auto &entry : entries) {
 		callback(*entry.second);
 	}
