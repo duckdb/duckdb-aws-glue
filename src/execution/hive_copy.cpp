@@ -17,22 +17,41 @@
 
 namespace duckdb {
 
-//! 'overwrite' deletes files that must not belong to a table: refuse when a table of the same Glue database reads
-//! them. Tables in other databases, catalogs or accounts are not checked.
+//! 'overwrite' deletes files that must not belong to a table: refuse when a table of the same Glue database, or a
+//! partition of one, reads them. A partition can lie outside its table's location, so the partitions of partitioned
+//! tables are listed as well. Tables in other databases, catalogs or accounts are not checked.
 static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema, const GlueTableInfo &table_info,
                                  const string &location) {
 	auto &catalog = schema.catalog.Cast<GlueCatalog>();
+	auto &database_name = schema.GetDatabaseName();
 	auto target = ComparableLocation(location);
-	auto tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName(), false, nullptr, true);
+	auto overlaps = [&](const string &other) {
+		return !other.empty() && LocationsOverlap(target, ComparableLocation(other));
+	};
+	auto tables = GlueAPI::GetTables(context, catalog, database_name, false, nullptr, true);
 	for (auto &table : tables) {
-		if (table.location.empty() || !LocationsOverlap(target, ComparableLocation(table.location))) {
+		if (overlaps(table.location)) {
+			throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' WITH (overwrite = true) is not "
+			                            "supported: its location '%s' overlaps the location '%s' of table '%s.%s', "
+			                            "whose files it would delete. Give the table another location",
+			                            table_info.schema_name, table_info.name, location, table.location,
+			                            table_info.schema_name, table.name);
+		}
+	}
+	for (auto &table : tables) {
+		if (table.partition_keys.empty()) {
 			continue;
 		}
-		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' WITH (overwrite = true) is not "
-		                            "supported: its location '%s' overlaps the location '%s' of table '%s.%s', whose "
-		                            "files it would delete. Give the table another location",
-		                            table_info.schema_name, table_info.name, location, table.location,
-		                            table_info.schema_name, table.name);
+		for (auto &partition : GlueAPI::GetPartitions(context, catalog, database_name, table.name)) {
+			if (!overlaps(partition.location)) {
+				continue;
+			}
+			throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' WITH (overwrite = true) is not "
+			                            "supported: its location '%s' overlaps the location '%s' of a partition of "
+			                            "table '%s.%s', whose files it would delete. Give the table another location",
+			                            table_info.schema_name, table_info.name, location, partition.location,
+			                            table_info.schema_name, table.name);
+		}
 	}
 }
 

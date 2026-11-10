@@ -15,7 +15,10 @@ testing, benchmarks). Keep it in sync when behavior changes.
 ## Build
 
 Extension template build (`extension-ci-tools`); the `duckdb` and `extension-ci-tools` submodules must be checked out.
-vcpkg is required (AWS SDK, openssl, curl, ...):
+vcpkg is required (AWS SDK, openssl, curl, ...). `vcpkg.json` takes `aws-sdk-cpp` and `aws-checksums` from the
+`vcpkg-duckdb-ports` registry and overlays `vcpkg_ports/aws-c-io`, whose patch stubs out sockets and TLS under
+emscripten so the SDK builds for wasm (there every request goes through DuckDB's HTTP layer; `CMakeLists.txt` names
+the vcpkg archives the wasm side module links):
 
 ```sh
 VCPKG_TOOLCHAIN_PATH='<vcpkg>/scripts/buildsystems/vcpkg.cmake' GEN=ninja make relassert   # what tests use

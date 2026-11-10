@@ -47,9 +47,10 @@
 				"test/sql/hive/ddl/views/test_foreign_view.test",
 				"test/sql/hive/ddl/views/test_view_glue_record.test",
 				"test/sql/hive/ddl/views/test_view_nested_catalog_read.test",
+				"test/sql/hive/hive_scan/scan_partitioned/test_partition_column_types.test",
+				"test/sql/hive/hive_scan/scan_partitioned/test_partition_columns.test",
 				"test/sql/hive/ddl/views/test_view_external_read_rules.test",
-				"test/sql/hive/ddl/views/test_view_iceberg_catalogs_read_rules.test",
-				"test/sql/hive/hive_scan/scan_partitioned/test_partition_column_types.test"
+				"test/sql/hive/ddl/views/test_view_iceberg_catalogs_read_rules.test"
 			]
 		},
 		{
