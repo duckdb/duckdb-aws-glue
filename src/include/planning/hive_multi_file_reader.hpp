@@ -229,6 +229,9 @@ public:
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
 	                  optional_ptr<MultiFileReaderGlobalState> global_state) override;
+	void FinalizeChunk(ClientContext &context, const MultiFileBindData &bind_data, BaseFileReader &reader,
+	                   const MultiFileReaderData &reader_data, DataChunk &input_chunk, DataChunk &output_chunk,
+	                   ExpressionExecutor &executor, optional_ptr<MultiFileReaderGlobalState> global_state) override;
 	ReaderInitializeType InitializeReader(MultiFileReaderData &reader_data, const MultiFileBindData &bind_data,
 	                                      const vector<MultiFileColumnDefinition> &global_columns,
 	                                      const vector<ColumnIndex> &global_column_ids,

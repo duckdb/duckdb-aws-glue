@@ -23,6 +23,8 @@
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/vector/vector_iterator.hpp"
+#include "duckdb/common/vector/vector_writer.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -65,6 +67,7 @@
 #include "duckdb/planner/sql_export_helpers.hpp"
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
+#include "functions/hive_opencsv_field.hpp"
 #include "functions/hive_reader_call.hpp"
 
 namespace duckdb {
@@ -1754,48 +1757,84 @@ static void UnescapeField(ClientContext &context, unique_ptr<Expression> &expr, 
 	    std::move(text));
 }
 
-//! A line_fields field read_csv returns (a reference to a file column) as hive_opencsv_field splits it from the line
-static void SplitLineField(FunctionBinder &function_binder, BaseFileReader &reader, idx_t line_index,
-                           const HiveCSVOptions &options, unique_ptr<Expression> &expr) {
-	if (expr->GetExpressionClass() != ExpressionClass::BOUND_REF) {
-		ExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<Expression> &child) {
-			SplitLineField(function_binder, reader, line_index, options, child);
-		});
-		return;
-	}
-	auto &ref = expr->Cast<BoundReferenceExpression>();
-	auto file_column = reader.column_ids[MultiFileLocalIndex(ref.Index())].GetId();
-	vector<unique_ptr<Expression>> children;
-	children.push_back(make_uniq<BoundReferenceExpression>(LogicalType::VARCHAR, line_index));
-	children.push_back(make_uniq<BoundConstantExpression>(Value::BIGINT(NumericCast<int64_t>(file_column))));
-	children.push_back(make_uniq<BoundConstantExpression>(Value(options.delimiter)));
-	children.push_back(make_uniq<BoundConstantExpression>(Value(options.quote)));
-	children.push_back(make_uniq<BoundConstantExpression>(Value(options.escape)));
-	expr = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("hive_opencsv_field"),
-	                                          std::move(children));
-}
-
-//! With line_fields read_csv returns each line as the file's first column: read it, and split every field from it
-static void SplitLineFields(ClientContext &context, BaseFileReader &reader, vector<unique_ptr<Expression>> &expressions,
-                            const HiveCSVOptions &options) {
-	optional_idx line_index;
+//! With line_fields read_csv returns each line as the file's first column, which FinalizeChunk splits: read it
+static void ReadLineColumn(BaseFileReader &reader) {
 	for (idx_t i = 0; i < reader.column_ids.size(); i++) {
 		if (reader.column_ids[MultiFileLocalIndex(i)].GetId() == 0) {
-			line_index = i;
-			break;
+			return;
 		}
+	}
+	reader.column_ids.push_back(MultiFileLocalColumnId(0));
+	reader.column_indexes.push_back(ColumnIndex(0));
+}
+
+//! Replace the columns read_csv returns of a line_fields file with the fields SplitOpenCSVLine splits from each line,
+//! which read_csv returns as the first column, splitting each line once
+static void SplitLines(BaseFileReader &reader, DataChunk &chunk, const HiveCSVOptions &options) {
+	optional_idx line_index;
+	vector<pair<idx_t, idx_t>> targets;
+	idx_t field_count = 0;
+	auto file_columns = reader.GetColumns().size();
+	for (idx_t i = 0; i < reader.column_ids.size(); i++) {
+		auto file_column = reader.column_ids[MultiFileLocalIndex(i)].GetId();
+		if (file_column >= file_columns) {
+			continue;
+		}
+		if (file_column == 0 && !line_index.IsValid()) {
+			line_index = i;
+		}
+		targets.emplace_back(i, file_column);
+		field_count = MaxValue<idx_t>(field_count, file_column + 1);
 	}
 	if (!line_index.IsValid()) {
-		line_index = reader.column_ids.size();
-		reader.column_ids.push_back(MultiFileLocalColumnId(0));
-		reader.column_indexes.push_back(ColumnIndex(0));
+		throw InternalException("Hive text table: the line of a line_fields file was not read");
 	}
-	FunctionBinder function_binder(context);
-	for (auto &expr : expressions) {
-		if (expr) {
-			SplitLineField(function_binder, reader, line_index.GetIndex(), options, expr);
+	auto count = chunk.size();
+	OpenCSVDialect dialect {options.delimiter[0], options.quote[0], options.escape[0]};
+	vector<Vector> fields_read;
+	for (idx_t t = 0; t < targets.size(); t++) {
+		fields_read.emplace_back(LogicalType::VARCHAR, count);
+	}
+	{
+		vector<VectorWriter<string_t>> writers;
+		for (auto &vector : fields_read) {
+			writers.push_back(FlatVector::Writer<string_t>(vector, count));
+		}
+		vector<string> fields(field_count);
+		vector<bool> valid;
+		for (auto line : chunk.data[line_index.GetIndex()].Values<string_t>()) {
+			if (line.IsValid()) {
+				auto &text = line.GetValue();
+				SplitOpenCSVLine(text.GetData(), text.GetSize(), dialect, fields, valid);
+			} else {
+				valid.assign(field_count, false);
+			}
+			for (idx_t t = 0; t < targets.size(); t++) {
+				auto file_column = targets[t].second;
+				if (valid[file_column]) {
+					auto &field = fields[file_column];
+					writers[t].WriteValue(string_t(field.data(), UnsafeNumericCast<uint32_t>(field.size())));
+				} else {
+					writers[t].WriteNull();
+				}
+			}
 		}
 	}
+	for (idx_t t = 0; t < targets.size(); t++) {
+		chunk.data[targets[t].first].Reference(fields_read[t]);
+	}
+}
+
+void HiveMultiFileReader::FinalizeChunk(ClientContext &context, const MultiFileBindData &bind_data,
+                                        BaseFileReader &reader, const MultiFileReaderData &reader_data,
+                                        DataChunk &input_chunk, DataChunk &output_chunk, ExpressionExecutor &executor,
+                                        optional_ptr<MultiFileReaderGlobalState> global_state) {
+	auto &options = ScanInfo().csv_options;
+	if (options.serde_fields && options.line_fields) {
+		SplitLines(reader, input_chunk, options);
+	}
+	MultiFileReader::FinalizeChunk(context, bind_data, reader, reader_data, input_chunk, output_chunk, executor,
+	                               global_state);
 }
 
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
@@ -1831,7 +1870,7 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 	}
 	auto &csv_options = ScanInfo().csv_options;
 	if (csv_options.line_fields) {
-		SplitLineFields(context, *reader_data.reader, reader_data.expressions, csv_options);
+		ReadLineColumn(*reader_data.reader);
 	}
 	for (auto &expr : reader_data.expressions) {
 		if (!expr) {

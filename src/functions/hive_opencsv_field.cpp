@@ -9,22 +9,20 @@ namespace duckdb {
 namespace {
 
 struct OpenCSVFieldBindData : public FunctionData {
-	OpenCSVFieldBindData(idx_t index, char separator, char quote, char escape)
-	    : index(index), separator(separator), quote(quote), escape(escape) {
+	OpenCSVFieldBindData(idx_t index, OpenCSVDialect dialect) : index(index), dialect(dialect) {
 	}
 
 	idx_t index;
-	char separator;
-	char quote;
-	char escape;
+	OpenCSVDialect dialect;
 
 public:
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<OpenCSVFieldBindData>(index, separator, quote, escape);
+		return make_uniq<OpenCSVFieldBindData>(index, dialect);
 	}
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<OpenCSVFieldBindData>();
-		return index == other.index && separator == other.separator && quote == other.quote && escape == other.escape;
+		return index == other.index && dialect.separator == other.dialect.separator &&
+		       dialect.quote == other.dialect.quote && dialect.escape == other.dialect.escape;
 	}
 };
 
@@ -42,13 +40,17 @@ bool IsAllWhitespace(const string &text) {
 	return true;
 }
 
-//! Field 'index' of 'line', following CsvDeserializer.parseLine: false when the line has no such field, or when it is
-//! the line's last field and its quote is not closed
-bool OpenCSVField(const char *line, idx_t length, const OpenCSVFieldBindData &data, string &field) {
-	field.clear();
-	if (length == 0) {
-		return false;
+} // namespace
+
+void SplitOpenCSVLine(const char *line, idx_t length, const OpenCSVDialect &dialect, vector<string> &fields,
+                      vector<bool> &valid) {
+	// as CsvDeserializer.parseLine
+	auto field_count = fields.size();
+	valid.assign(field_count, false);
+	if (length == 0 || field_count == 0) {
+		return;
 	}
+	string field;
 	idx_t field_index = 0;
 	bool in_quotes = false;
 	bool in_field = false;
@@ -58,20 +60,20 @@ bool OpenCSVField(const char *line, idx_t length, const OpenCSVFieldBindData &da
 		auto start = position;
 		auto c = line[position];
 		auto has_next = position + 1 < length;
-		if (c == data.escape) {
+		if (c == dialect.escape) {
 			if ((in_quotes || in_field) && has_next &&
-			    (line[position + 1] == data.quote || line[position + 1] == data.escape)) {
+			    (line[position + 1] == dialect.quote || line[position + 1] == dialect.escape)) {
 				field += line[position + 1];
 				position++;
 			}
-		} else if (c == data.quote) {
-			if ((in_quotes || in_field) && has_next && line[position + 1] == data.quote) {
+		} else if (c == dialect.quote) {
+			if ((in_quotes || in_field) && has_next && line[position + 1] == dialect.quote) {
 				field += line[position + 1];
 				position++;
 			} else {
 				// a quote in the middle of a field, not next to a separator, is a literal character
-				if (char_position > 2 && line[position - 1] != data.separator && has_next &&
-				    line[position + 1] != data.separator) {
+				if (char_position > 2 && line[position - 1] != dialect.separator && has_next &&
+				    line[position + 1] != dialect.separator) {
 					if (!field.empty() && IsAllWhitespace(field)) {
 						field.clear();
 					} else {
@@ -81,11 +83,13 @@ bool OpenCSVField(const char *line, idx_t length, const OpenCSVFieldBindData &da
 				in_quotes = !in_quotes;
 			}
 			in_field = !in_field;
-		} else if (c == data.separator && !in_quotes) {
-			if (field_index == data.index) {
-				return true;
-			}
+		} else if (c == dialect.separator && !in_quotes) {
+			fields[field_index].assign(field);
+			valid[field_index] = true;
 			field_index++;
+			if (field_index == field_count) {
+				return;
+			}
 			field.clear();
 			in_field = false;
 		} else {
@@ -100,8 +104,13 @@ bool OpenCSVField(const char *line, idx_t length, const OpenCSVFieldBindData &da
 			}
 		}
 	}
-	return field_index == data.index && !in_quotes;
+	if (!in_quotes) {
+		fields[field_index].assign(field);
+		valid[field_index] = true;
+	}
 }
+
+namespace {
 
 char ConstantCharacter(BindScalarFunctionInput &input, idx_t argument, const char *name) {
 	auto value = input.GetConstant(argument);
@@ -117,21 +126,23 @@ unique_ptr<FunctionData> OpenCSVFieldBind(BindScalarFunctionInput &input) {
 	if (index.IsNull() || index.GetValue<int64_t>() < 0) {
 		throw BinderException("hive_opencsv_field: the field index must be a constant from 0");
 	}
-	return make_uniq<OpenCSVFieldBindData>(NumericCast<idx_t>(index.GetValue<int64_t>()),
-	                                       ConstantCharacter(input, 2, "separator"),
-	                                       ConstantCharacter(input, 3, "quote"), ConstantCharacter(input, 4, "escape"));
+	OpenCSVDialect dialect {ConstantCharacter(input, 2, "separator"), ConstantCharacter(input, 3, "quote"),
+	                        ConstantCharacter(input, 4, "escape")};
+	return make_uniq<OpenCSVFieldBindData>(NumericCast<idx_t>(index.GetValue<int64_t>()), dialect);
 }
 
 void OpenCSVFieldFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &data = state.expr.Cast<BoundFunctionExpression>().BindInfo()->Cast<OpenCSVFieldBindData>();
-	string field;
-	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, args.size(),
-	                                           [&](string_t line) -> optional<string_t> {
-		                                           if (!OpenCSVField(line.GetData(), line.GetSize(), data, field)) {
-			                                           return nullopt;
-		                                           }
-		                                           return StringVector::AddString(result, field);
-	                                           });
+	vector<string> fields(data.index + 1);
+	vector<bool> valid;
+	UnaryExecutor::Execute<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t line) -> optional<string_t> {
+		    SplitOpenCSVLine(line.GetData(), line.GetSize(), data.dialect, fields, valid);
+		    if (!valid[data.index]) {
+			    return nullopt;
+		    }
+		    return StringVector::AddString(result, fields[data.index]);
+	    });
 }
 
 } // namespace
