@@ -79,7 +79,7 @@ drops tables. What `BindHiveScan` passes the reader and what `InitializeReader` 
 Tests that need Iceberg tables (`test/sql/iceberg/`, `test/sql/combined_table_types/`) have
 `require-env ICEBERG_SUPPORTED`, which only the cloud config sets (moto has no Iceberg REST endpoint), and
 `set ignore_error_messages`, so REST errors (which mention `HTTP`) fail the test instead of skipping it. New tests
-that create or read Iceberg tables need both.
+that create or read Iceberg tables need both, and attach with `ATTACH_WITH_ICEBERG true`.
 
 Test format is DuckDB's sqllogictest (`statement ok|error`, `query I...`, `----`, `<REGEX>:` for error patterns,
 `require-env`). Slow tests use `.test_slow`. Do not add `PRAGMA enable_verification`. Test error paths, not just the
@@ -123,9 +123,10 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition
   SQL into `CALL glue_alter_table(...)`.
-- **Iceberg** (`GlueCatalog::GetIcebergCatalog`): ATTACH also attaches a hidden (`AttachVisibility::HIDDEN`)
-  `TYPE iceberg, ENDPOINT_TYPE glue` catalog `__glue_iceberg_<name>_<n>` (a failure is only logged; the next Iceberg
-  lookup attaches again, as after a rollback of the attaching transaction).
+- **Iceberg** (`GlueCatalog::GetIcebergCatalog`): with `ATTACH_WITH_ICEBERG true` (default false; without it
+  `ThrowIfIcebergDisabled` refuses every Iceberg use but listing and DROP) ATTACH also attaches a hidden
+  (`AttachVisibility::HIDDEN`) `TYPE iceberg, ENDPOINT_TYPE glue` catalog `__glue_iceberg_<name>_<n>` (a failure is
+  only logged; the next Iceberg lookup attaches again, as after a rollback of the attaching transaction).
   `GlueSchemaEntry::LookupEntry` returns that catalog's table entry, so duckdb-iceberg binds and plans scans, DML,
   DROP and ALTER (its planners cast `op.table` to their own entry type); listing stays on Glue. CREATE / CTAS with
   `table_type = 'iceberg'` reach the Glue schema and are rebound to the Iceberg schema. Cached Glue entries of

@@ -25,6 +25,7 @@ Attach options:
 | `DEFAULT_LOCATION` | optional S3 prefix for new databases and for tables created without an explicit location (takes precedence over the Glue database LocationUri) |
 | `DEFAULT_SCHEMA`   | Glue database to use as the default schema                                   |
 | `READ_ONLY`        | refuse everything that changes the catalog: DML, DDL and the mutating `glue_*` partition functions |
+| `ATTACH_WITH_ICEBERG` | also attach a hidden Iceberg catalog that reads, writes and creates the catalog's Iceberg tables (default `false`, see [Iceberg tables](#iceberg-tables)) |
 
 ## Reading
 
@@ -289,14 +290,20 @@ client that runs each query inside a transaction of its own.
 
 Glue also serves its catalog through the [Iceberg REST
 API](https://docs.aws.amazon.com/glue/latest/dg/connect-glu-iceberg-rest.html). Iceberg tables are read and written
-through it by the iceberg extension: ATTACH also attaches a hidden Iceberg catalog (`TYPE iceberg, ENDPOINT_TYPE
+through it by the iceberg extension, when the catalog is attached with `ATTACH_WITH_ICEBERG true`. ATTACH then also
+attaches a hidden Iceberg catalog (`TYPE iceberg, ENDPOINT_TYPE
 glue`, with the same catalog id, secret and region, at `<ENDPOINT>/iceberg` when `ENDPOINT` is given; one request to
 Glue), and Iceberg tables are looked up there. When that attach fails (e.g. a Glue compatible server without the
 Iceberg REST endpoint) ATTACH logs a warning and still succeeds; the first use of an Iceberg table then reports the
 error. The hidden catalog is not listed: `SHOW ALL TABLES`, `duckdb_tables()` and `duckdb_databases()` show the
 tables under the Glue catalog only, and it is detached with it.
 
+Without `ATTACH_WITH_ICEBERG` (the default) nothing reaches Glue's Iceberg REST endpoint: Iceberg tables are listed
+with the columns Glue stores for them and `DROP TABLE` deletes their Glue entry, but reading, writing, altering or
+creating one (also through `glue_default_table_type = 'iceberg'`) is an error that names the option.
+
 ```sql
+ATTACH '123456789012' AS my_datalake (TYPE GLUE, ATTACH_WITH_ICEBERG true);
 CREATE TABLE my_datalake.default.events (id BIGINT, kind VARCHAR, day DATE) PARTITIONED BY (day)
     WITH (table_type = 'iceberg');
 INSERT INTO my_datalake.default.events VALUES (1, 'click', '2024-01-01');

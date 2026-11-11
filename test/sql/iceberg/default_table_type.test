@@ -21,6 +21,7 @@ set ignore_error_messages
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );

@@ -19,6 +19,7 @@ set ignore_error_messages
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
@@ -90,6 +91,7 @@ SELECT count(*) FROM duckdb_databases() WHERE database_name NOT IN ('memory', 's
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
@@ -103,6 +105,7 @@ SELECT * FROM my_datalake.default.ice_hidden;
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_other_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
@@ -126,6 +129,7 @@ SELECT * FROM my_datalake.default.ice_hidden;
 statement ok
 attach or replace '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
@@ -137,7 +141,7 @@ SELECT * FROM my_datalake.default.ice_hidden;
 
 # a failed ATTACH leaves no hidden catalog behind
 statement error
-attach '{GLUE_CATALOG_ID}' as my_failed_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA 'ice_hidden_missing');
+attach '{GLUE_CATALOG_ID}' as my_failed_datalake (TYPE glue, ATTACH_WITH_ICEBERG true, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA 'ice_hidden_missing');
 ----
 <REGEX>:.*default_schema 'ice_hidden_missing' does not exist.*
 
@@ -155,6 +159,7 @@ DETACH my_datalake;
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
@@ -175,6 +180,7 @@ DETACH my_datalake;
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
@@ -198,6 +204,7 @@ DETACH my_datalake;
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
     READ_ONLY
@@ -219,6 +226,7 @@ DETACH my_datalake;
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );

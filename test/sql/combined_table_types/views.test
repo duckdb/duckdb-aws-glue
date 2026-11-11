@@ -19,12 +19,19 @@ set ignore_error_messages
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
 statement ok
 DROP VIEW IF EXISTS my_datalake.default.mix_view_joined;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_direct;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_union;
 
 statement ok
 DROP VIEW IF EXISTS my_datalake.default.mix_view_iceberg;
@@ -61,6 +68,31 @@ SELECT * FROM my_datalake.default.mix_view_joined ORDER BY name;
 one	1.0
 three	3.0
 
+# one view over both tables directly, fully qualified
+statement ok
+CREATE VIEW my_datalake.default.mix_view_direct AS
+SELECT h.id, h.name, i.score FROM my_datalake.default.mix_view_hive h
+JOIN my_datalake.default.mix_view_ice i USING (id);
+
+query IIR
+SELECT * FROM my_datalake.default.mix_view_direct ORDER BY id;
+----
+1	one	0.5
+3	three	1.5
+
+# and schema-qualified, which the view stores as it is
+statement ok
+CREATE VIEW my_datalake.default.mix_view_union AS
+SELECT id, 'hive' AS source FROM "default".mix_view_hive
+UNION ALL
+SELECT id, 'iceberg' AS source FROM "default".mix_view_ice;
+
+query II
+SELECT source, count(*) FROM my_datalake.default.mix_view_union GROUP BY source ORDER BY source;
+----
+hive	3
+iceberg	2
+
 # the views read the current state of the Iceberg table
 statement ok
 INSERT INTO my_datalake.default.mix_view_ice VALUES (2, 10.0);
@@ -72,6 +104,19 @@ one	1.0
 three	3.0
 two	20.0
 
+query IIR
+SELECT * FROM my_datalake.default.mix_view_direct ORDER BY id;
+----
+1	one	0.5
+2	two	10.0
+3	three	1.5
+
+query II
+SELECT source, count(*) FROM my_datalake.default.mix_view_union GROUP BY source ORDER BY source;
+----
+hive	3
+iceberg	3
+
 # a fresh connection to the catalog reads the stored view SQL
 statement ok
 DETACH my_datalake;
@@ -79,6 +124,7 @@ DETACH my_datalake;
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
+    ATTACH_WITH_ICEBERG true,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
@@ -87,6 +133,18 @@ query I
 SELECT count(*) FROM my_datalake.default.mix_view_joined;
 ----
 3
+
+query IIR
+SELECT * FROM my_datalake.default.mix_view_direct ORDER BY id;
+----
+1	one	0.5
+2	two	10.0
+3	three	1.5
+
+query I
+SELECT count(*) FROM my_datalake.default.mix_view_union;
+----
+6
 
 # a view over a dropped Iceberg table fails when it is used
 statement ok
@@ -97,8 +155,24 @@ SELECT * FROM my_datalake.default.mix_view_joined;
 ----
 <REGEX>:.*mix_view_ice.*
 
+statement error
+SELECT * FROM my_datalake.default.mix_view_direct;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_union;
+----
+<REGEX>:.*mix_view_ice.*
+
 statement ok
 DROP VIEW my_datalake.default.mix_view_joined;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_direct;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_union;
 
 statement ok
 DROP VIEW my_datalake.default.mix_view_iceberg;

@@ -465,6 +465,7 @@ unique_ptr<BoundCreateTableInfo> GlueSchemaEntry::BindIcebergCreateTable(ClientC
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateIcebergTable(ClientContext &context, BoundCreateTableInfo &info) {
+	catalog.Cast<GlueCatalog>().ThrowIfIcebergDisabled(info.Base().GetTableName().GetIdentifierName());
 	auto &iceberg_schema = catalog.Cast<GlueCatalog>().GetIcebergSchema(context, database_info.name);
 	auto iceberg_info = BindIcebergCreateTable(context, info, iceberg_schema);
 	auto entry = iceberg_schema.CreateTable(iceberg_schema.catalog.GetCatalogTransaction(context), *iceberg_info);
@@ -957,6 +958,9 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &glue_table = entry->Cast<GlueTable>();
 	auto &current = DefinitionForWrite(context, glue_table);
 	auto format = current.GetFormat();
+	if (format.format == GlueFormat::ICEBERG) {
+		glue_catalog.ThrowIfIcebergDisabled(table_name);
+	}
 	if (!format.IsHive()) {
 		throw NotImplementedException("ALTER TABLE is only supported for Hive tables in a Glue catalog, '%s' is a %s "
 		                              "table",
@@ -1236,7 +1240,8 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction trans
 		                      "Time travel is only supported for Iceberg tables in a Glue catalog, \"%s\" is not one",
 		                      entry->name.GetIdentifierName());
 	}
-	if (AsIcebergTable(entry) && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+	if (AsIcebergTable(entry) && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY &&
+	    catalog.Cast<GlueCatalog>().IcebergEnabled()) {
 		GlueCatalog::ThrowIfInExplicitTransaction(context);
 		// The Iceberg catalog plans scans and DML of the table, and DROP / ALTER are bound to it, so they never
 		// reach this table set: the next lookup or listing after this transaction asks Glue again

@@ -71,6 +71,8 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 			attach_options.default_schema = Identifier(entry.second.ToString());
 		} else if (lower_name == "verify_connection") {
 			attach_options.verify_connection = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
+		} else if (lower_name == "attach_with_iceberg") {
+			attach_options.attach_with_iceberg = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else {
 			throw InvalidConfigurationException("Unrecognized option for Glue attach: '%s'", entry.first);
 		}
@@ -103,7 +105,9 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 			                                    catalog->options.path);
 		}
 	}
-	catalog->AttachIcebergCatalog(context);
+	if (catalog->options.attach_with_iceberg) {
+		catalog->AttachIcebergCatalog(context);
+	}
 	return std::move(catalog);
 }
 

@@ -1,0 +1,134 @@
+# name: test/sql/iceberg/attach_with_iceberg.test
+# description: without ATTACH_WITH_ICEBERG (default false) Iceberg tables are only listed, nothing reaches Glue's Iceberg REST endpoint
+# group: [iceberg]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement error
+attach '{GLUE_CATALOG_ID}' as my_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', ATTACH_WITH_ICEBERG 'maybe');
+----
+<REGEX>:.*Could not convert string 'maybe' to BOOL.*
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.no_ice_created;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.no_ice_ctas;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.no_ice_default;
+
+# an Iceberg table registered in Glue is listed with Glue's columns
+query II
+SELECT table_name, tags['table_type'] FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND table_name = 'fixture_iceberg';
+----
+fixture_iceberg	ICEBERG
+
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'fixture_iceberg';
+----
+id	INTEGER
+
+# but not read, written or altered
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg;
+----
+Iceberg table "fixture_iceberg" of Glue catalog "my_datalake" can only be listed and dropped: attach the catalog with ATTACH_WITH_ICEBERG true to read, write or create Iceberg tables
+
+statement error
+SELECT * FROM my_datalake.default.fixture_iceberg AT (VERSION => 1);
+----
+Iceberg table "fixture_iceberg" of Glue catalog "my_datalake" can only be listed and dropped
+
+statement error
+INSERT INTO my_datalake.default.fixture_iceberg VALUES (1);
+----
+Iceberg table "fixture_iceberg" of Glue catalog "my_datalake" can only be listed and dropped
+
+statement error
+DELETE FROM my_datalake.default.fixture_iceberg WHERE id = 1;
+----
+Iceberg table "fixture_iceberg" of Glue catalog "my_datalake" can only be listed and dropped
+
+statement error
+UPDATE my_datalake.default.fixture_iceberg SET id = 2;
+----
+Iceberg table "fixture_iceberg" of Glue catalog "my_datalake" can only be listed and dropped
+
+statement error
+ALTER TABLE my_datalake.default.fixture_iceberg ADD COLUMN b INTEGER;
+----
+Iceberg table "fixture_iceberg" of Glue catalog "my_datalake" can only be listed and dropped
+
+# nor created, by option, by CREATE TABLE ... AS or by the default table type
+statement error
+CREATE TABLE my_datalake.default.no_ice_created (id INTEGER) WITH (table_type = 'iceberg');
+----
+Iceberg table "no_ice_created" of Glue catalog "my_datalake" can only be listed and dropped
+
+statement error
+CREATE TABLE my_datalake.default.no_ice_ctas WITH (table_type = 'iceberg') AS SELECT 1 AS id;
+----
+Iceberg table "no_ice_ctas" of Glue catalog "my_datalake" can only be listed and dropped
+
+statement ok
+SET glue_default_table_type = 'iceberg';
+
+statement error
+CREATE TABLE my_datalake.default.no_ice_default (id INTEGER);
+----
+Iceberg table "no_ice_default" of Glue catalog "my_datalake" can only be listed and dropped
+
+statement ok
+RESET glue_default_table_type;
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name LIKE 'no_ice_%';
+----
+0
+
+# Hive tables are not affected
+statement ok
+CREATE TABLE my_datalake.default.no_ice_hive (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.no_ice_hive VALUES (1);
+
+query I
+SELECT * FROM my_datalake.default.no_ice_hive;
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.no_ice_hive;
+
+# with the option the ATTACH also attaches the Iceberg catalog: against a Glue without Iceberg REST endpoint (moto)
+# that only logs a warning, and Hive tables still work
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ATTACH_WITH_ICEBERG true,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'fixture_iceberg';
+----
+1

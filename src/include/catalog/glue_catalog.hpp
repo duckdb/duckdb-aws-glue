@@ -107,8 +107,13 @@ public:
 	                                            unique_ptr<LogicalOperator> plan) override;
 
 	//! The hidden Iceberg catalog over Glue's Iceberg REST endpoint, attached on ATTACH (and again when that failed
-	//! or was rolled back)
+	//! or was rolled back). Throws when the catalog was attached without ATTACH_WITH_ICEBERG.
 	Catalog &GetIcebergCatalog(ClientContext &context);
+	bool IcebergEnabled() const {
+		return options.attach_with_iceberg;
+	}
+	//! The error for using Iceberg table 'table_name' of a catalog attached without ATTACH_WITH_ICEBERG
+	void ThrowIfIcebergDisabled(const string &table_name) const;
 	//! Attach the Iceberg catalog, logging rather than throwing when that fails
 	void AttachIcebergCatalog(ClientContext &context);
 	SchemaCatalogEntry &GetIcebergSchema(ClientContext &context, const string &database_name);

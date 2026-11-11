@@ -449,6 +449,9 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
 	auto &glue_table = table.Cast<GlueTable>();
 	table_info = glue_table.schema.Cast<GlueSchemaEntry>().DefinitionForWrite(context, glue_table);
 	auto format = table_info.GetFormat();
+	if (format.format == GlueFormat::ICEBERG) {
+		glue_table.ParentCatalog().Cast<GlueCatalog>().ThrowIfIcebergDisabled(table.name.GetIdentifierName());
+	}
 	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "
 		                              "written",
@@ -517,6 +520,7 @@ PhysicalOperator &GlueCatalog::PlanCreateTableAs(ClientContext &context, Physica
 PhysicalOperator &GlueCatalog::PlanIcebergCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                         LogicalCreateTable &op, PhysicalOperator &plan) {
 	auto &glue_schema = op.schema.Cast<GlueSchemaEntry>();
+	ThrowIfIcebergDisabled(op.info->Base().GetTableName().GetIdentifierName());
 	ThrowIfInExplicitTransaction(context);
 	// CREATE TABLE ... AS on an existing table is planned as a plain CREATE TABLE: this only sees OR REPLACE
 	if (glue_schema.CheckCreateTableConflict(context, op.info->Base())) {
@@ -555,7 +559,18 @@ unique_ptr<LogicalOperator> GlueCatalog::BindCreateIndex(Binder &binder, CreateS
 //===--------------------------------------------------------------------===//
 // Iceberg
 //===--------------------------------------------------------------------===//
+void GlueCatalog::ThrowIfIcebergDisabled(const string &table_name) const {
+	if (!options.attach_with_iceberg) {
+		auto what =
+		    table_name.empty() ? string("Iceberg tables") : StringUtil::Format("Iceberg table \"%s\"", table_name);
+		throw NotImplementedException("%s of Glue catalog \"%s\" can only be listed and dropped: attach the catalog "
+		                              "with ATTACH_WITH_ICEBERG true to read, write or create Iceberg tables",
+		                              what, GetName().GetIdentifierName());
+	}
+}
+
 Catalog &GlueCatalog::GetIcebergCatalog(ClientContext &context) {
+	ThrowIfIcebergDisabled(string());
 	lock_guard<mutex> guard(iceberg_lock);
 	auto &db_manager = DatabaseManager::Get(context);
 	Identifier name(iceberg_database_name);
@@ -605,6 +620,7 @@ SchemaCatalogEntry &GlueCatalog::GetIcebergSchema(ClientContext &context, const 
 
 TableCatalogEntry &GlueCatalog::GetIcebergTable(ClientContext &context, const string &database_name,
                                                 const string &table_name, optional_ptr<BoundAtClause> at_clause) {
+	ThrowIfIcebergDisabled(table_name);
 	auto &iceberg_catalog = GetIcebergCatalog(context);
 	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY,
 	                       QualifiedName(iceberg_catalog.GetName(), Identifier(database_name), Identifier(table_name)),

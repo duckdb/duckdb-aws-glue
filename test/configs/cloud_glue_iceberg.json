@@ -1,7 +1,7 @@
 {
 	"description": "duckdb-iceberg's catalog_agnostic sqllogictests against the Iceberg tables of a live AWS Glue Data Catalog, attached with TYPE GLUE as my_datalake; run from the duckdb-iceberg source directory (make test-cloud-iceberg). Credentials from the AWS credential chain",
 	"comment": "DEFAULT_LOCATION gives the tables and schemas the tests create a location (Glue databases usually have no LocationUri). glue_default_table_type makes their plain CREATE TABLE an Iceberg table. glue_network_calls_via_duckdb = false keeps the Glue API calls out of the HTTP log, which some tests count requests in. skip_error_messages replaces the runner's default ('HTTP', ...), so REST errors fail a test instead of skipping it",
-	"on_init": "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION '{GLUE_REGION}'); SET GLOBAL glue_network_calls_via_duckdb = false; SET GLOBAL glue_default_table_type = 'iceberg'; ATTACH IF NOT EXISTS '{GLUE_CATALOG_ID}' AS my_datalake (TYPE GLUE, REGION '{GLUE_REGION}', DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}'); CREATE SCHEMA IF NOT EXISTS my_datalake.default;",
+	"on_init": "CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION '{GLUE_REGION}'); SET GLOBAL glue_network_calls_via_duckdb = false; SET GLOBAL glue_default_table_type = 'iceberg'; ATTACH IF NOT EXISTS '{GLUE_CATALOG_ID}' AS my_datalake (TYPE GLUE, ATTACH_WITH_ICEBERG true, REGION '{GLUE_REGION}', DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}'); CREATE SCHEMA IF NOT EXISTS my_datalake.default;",
 	"skip_error_messages": [
 		"Transaction support is not provided for Glue catalogs",
 		"is not an Iceberg catalog (type='glue')",
