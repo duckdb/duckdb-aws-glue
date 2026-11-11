@@ -1,7 +1,8 @@
 # name: test/sql/combined_table_types/iceberg_table_functions_failing.test
 # description: duckdb-iceberg's table functions that fail on the Iceberg tables of a Glue catalog. Each is written as
-#              'statement ok' to show what fails; the run stops at the first one, so leaves its tables behind
 # group: [combined_table_types]
+
+#              'statement ok' to show what fails; the run stops at the first one, so leaves its tables behind
 
 require httpfs
 
