@@ -87,7 +87,7 @@ FROM glue_calls();
 DeleteTable	1
 GetTable	1
 
-# a fresh connection's first query: the miss is kept from its first lookup on, so the second probe and the GetTables
+# a fresh connection's first statement: the miss is kept from its first lookup on, so the second probe and the GetTables
 # page are not sent (GetDatabase and GetTable read the new database, CreateTable, then the GetTable that reads the
 # created table back). The CREATE TABLE must stay the first statement on con_fresh that touches fresh_dl.
 statement ok con_fresh

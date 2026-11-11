@@ -67,7 +67,7 @@ TEST_CASE("A table miss from an API lookup does not outlive it", "[glue_catalog]
 	auto table = tables.Add("t");
 	Run(con, "SET glue_metadata_cache_scope = 'connection'");
 
-	// TableInfo looks the table up outside a query, so no QueryEnd follows it
+	// TableInfo looks the table up outside a statement, so no StatementEnd follows it
 	REQUIRE(!con.TableInfo(Identifier("lake"), Identifier("default"), Identifier(table)));
 	Run(other, "CREATE TABLE lake.default." + table + " (id INTEGER)");
 	Run(con, "DROP TABLE IF EXISTS lake.default." + table);

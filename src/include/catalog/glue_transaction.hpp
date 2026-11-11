@@ -32,8 +32,8 @@ public:
 	static void OnDetach(ClientContext &context, Catalog &catalog);
 	//! Whether glue_metadata_cache_scope is 'connection'
 	static bool ConnectionScoped(ClientContext &context);
-	//! Whether a query runs on the connection: only a lookup within one keeps a table Glue reports missing
-	static bool InQuery(ClientContext &context);
+	//! Whether a statement runs on the connection: only a lookup within one keeps a table Glue reports missing
+	static bool InStatement(ClientContext &context);
 	//! Clear the cache when the enclosing Glue mutation returns or throws
 	struct InvalidateOnExit {
 		InvalidateOnExit(ClientContext &context, Catalog &catalog) : context(context), catalog(catalog) {
@@ -44,7 +44,7 @@ public:
 		Catalog &catalog;
 	};
 
-	//! 'keep_miss' false: a table Glue reports missing is not kept (a lookup outside a query, which no hook ends)
+	//! 'keep_miss' false: a table Glue reports missing is not kept (a lookup outside a statement, which no hook ends)
 	shared_ptr<const GlueTableInfo> GetTable(const string &database_name, const string &table_name,
 	                                         const std::function<shared_ptr<const GlueTableInfo>()> &load,
 	                                         bool keep_miss = true);
@@ -177,12 +177,13 @@ public:
 		ClearAll();
 	}
 
-	//! Under the default scope a transaction's own cache, so that the misses in it end with the query too
+	//! Under the default scope a transaction's own cache, so that the misses in it end with the statement too
 	void TrackTransactionCache(const shared_ptr<GlueTransactionCache> &cache);
 
-	//! A miss only serves the query that looked the table up
-	void QueryBegin(ClientContext &context) override;
-	void QueryEnd(ClientContext &context) override;
+	//! A miss only serves the statement that looked the table up; a statement that expands into several (PIVOT,
+	//! PRAGMA) runs them as one query, with a StatementBegin and StatementEnd for each
+	void StatementBegin(ClientContext &context) override;
+	void StatementEnd(ClientContext &context) override;
 
 private:
 	struct CatalogCache {

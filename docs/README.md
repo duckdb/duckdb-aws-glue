@@ -291,9 +291,9 @@ With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the co
 per connection — two connections never share one — so another connection's write stays unseen until something clears
 this connection's cache: a write through it, a rollback, or DETACH.
 
-Under either scope, a table Glue reports missing is only remembered until the query that looked it up ends, so a table
-another connection creates is found by the next query, also within an explicit transaction. `Connection::TableInfo`
-runs outside a query and remembers no miss, unless another query's result is still open.
+Under either scope, a table Glue reports missing is only remembered until the statement that looked it up ends, so a
+table another connection creates is found by the next statement, also within an explicit transaction.
+`Connection::TableInfo` runs outside a statement and remembers no miss, unless another query's result is still open.
 
 ## Views
 

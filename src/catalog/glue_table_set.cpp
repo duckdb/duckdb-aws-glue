@@ -169,7 +169,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	// the definition Glue holds, fetched once per transaction (GlueTransactionCache) and outside entry_lock, so that a
 	// Glue round trip does not hold up the lookups of other tables
 	auto table =
-	    cache ? cache->GetTable(schema.GetDatabaseName(), glue_name, load, GlueTransactionCache::InQuery(context))
+	    cache ? cache->GetTable(schema.GetDatabaseName(), glue_name, load, GlueTransactionCache::InStatement(context))
 	          : load();
 	lock_guard<mutex> guard(entry_lock);
 	if (!cached && asked_glue) {

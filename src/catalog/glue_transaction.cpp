@@ -111,11 +111,11 @@ void GlueMetadataCacheState::TrackTransactionCache(const shared_ptr<GlueTransact
 	transaction_caches.push_back(cache);
 }
 
-void GlueMetadataCacheState::QueryBegin(ClientContext &context) {
+void GlueMetadataCacheState::StatementBegin(ClientContext &context) {
 	ClearMisses();
 }
 
-void GlueMetadataCacheState::QueryEnd(ClientContext &context) {
+void GlueMetadataCacheState::StatementEnd(ClientContext &context) {
 	ClearMisses();
 }
 
@@ -221,8 +221,8 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 	ClearHiveListingCache(context);
 }
 
-bool GlueTransactionCache::InQuery(ClientContext &context) {
-	// the transaction's active query, set for the connection's first query too
+bool GlueTransactionCache::InStatement(ClientContext &context) {
+	// core's active query number: set for each statement, the connection's first one included, and reset between them
 	return context.transaction.HasActiveTransaction() && context.transaction.GetActiveQuery() != MAXIMUM_QUERY_ID;
 }
 
