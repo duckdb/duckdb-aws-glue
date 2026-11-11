@@ -13,9 +13,15 @@
 #include <aws/core/http/HttpRequest.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/http/standard/StandardHttpResponse.h>
-#ifdef _WIN32
+// The SDK builds no HTTP client of its own for wasm, so there the bridge is the only transport and the setting is
+// ignored
+#if defined(__EMSCRIPTEN__)
+#define GLUE_HTTP_SDK_FALLBACK 0
+#elif defined(_WIN32)
+#define GLUE_HTTP_SDK_FALLBACK 1
 #include <aws/core/http/windows/WinHttpSyncHttpClient.h>
 #else
+#define GLUE_HTTP_SDK_FALLBACK 1
 #include <aws/core/http/curl/CurlHttpClient.h>
 #endif
 
@@ -53,6 +59,7 @@ namespace {
 //! Read the toggle, preferring the calling connection (a plain SET is session scoped) over the database settings.
 //! Defaults to true.
 bool NetworkCallsViaDuckDB(DatabaseInstance &db) {
+#if GLUE_HTTP_SDK_FALLBACK
 	Value value;
 	auto context = GlueHttpClientContextScope::Current();
 	if (context && context->TryGetCurrentSetting(NETWORK_VIA_DUCKDB_SETTING, value) && !value.IsNull()) {
@@ -61,6 +68,7 @@ bool NetworkCallsViaDuckDB(DatabaseInstance &db) {
 	if (db.TryGetCurrentSetting(NETWORK_VIA_DUCKDB_SETTING, value) && !value.IsNull()) {
 		return BooleanValue::Get(value);
 	}
+#endif
 	return true;
 }
 
@@ -241,11 +249,13 @@ public:
 		auto context = GlueHttpClientContextScope::Current();
 		if (context) {
 			auto &db = DatabaseInstance::GetDatabase(*context);
-			if (NetworkCallsViaDuckDB(db) && db.ExtensionIsLoaded("httpfs")) {
+			if (NetworkCallsViaDuckDB(db) && (!GLUE_HTTP_SDK_FALLBACK || db.ExtensionIsLoaded("httpfs"))) {
 				return Aws::MakeShared<GlueDuckDBHttpClient>("GlueDuckDBHttp", db);
 			}
 		}
-#ifdef _WIN32
+#if !GLUE_HTTP_SDK_FALLBACK
+		throw InternalException("Glue HTTP client requested outside a GlueHttpClientContextScope");
+#elif defined(_WIN32)
 		return Aws::MakeShared<Aws::Http::WinHttpSyncHttpClient>("GlueDuckDBHttp", config);
 #else
 		return Aws::MakeShared<Aws::Http::CurlHttpClient>("GlueDuckDBHttp", config);

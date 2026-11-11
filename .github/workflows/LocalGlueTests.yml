@@ -49,12 +49,13 @@ jobs:
           save: ${{ github.ref == 'refs/heads/main' }}
 
       # relassert without debug info: on Linux -g makes each loadable extension ~1.5 GB, and the test runner
-      # installs and loads avro, httpfs and glue from build/*/repository for every test database (~25s per test)
+      # installs and loads avro, httpfs and glue from build/*/repository for every test database (~25s per test).
+      # One link at a time: parallel links of the sanitizer binaries exhaust the runner's memory.
       - name: Build
         uses: duckdb/duckdb-ci/build-duckdb@main
         with:
           build-type: release
-          build: make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1
+          build: make release EXT_RELEASE_FLAGS="-DFORCE_ASSERT=1 -DDUCKDB_RELEASE_LINK_JOBS=1"
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
       - name: Run tests

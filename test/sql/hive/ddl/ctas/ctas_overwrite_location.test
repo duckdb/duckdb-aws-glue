@@ -136,6 +136,34 @@ SELECT count(*), sum(id) FROM my_datalake.default.ow_live;
 statement ok
 DROP TABLE my_datalake.default.ow_live;
 
+# nor over the files of a partition that lies outside its table's location
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ow_parts;
+
+statement ok
+CREATE TABLE my_datalake.default.ow_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ow_parts', {dt: 'moved'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ow_elsewhere/dt=moved');
+
+statement ok
+COPY (SELECT 7 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ow_elsewhere/dt=moved/f.parquet';
+
+statement error
+CREATE TABLE my_datalake.default.ow_table WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ow_elsewhere', overwrite = true)
+AS SELECT range AS id FROM range(2);
+----
+<REGEX>:.*overlaps the location .* of a partition of table 'default\.ow_parts', whose files it would delete.*
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.ow_parts;
+----
+1	7
+
+statement ok
+DROP TABLE my_datalake.default.ow_parts;
+
 # the location is listed with a glob: a glob character would miss its own files and match those of other prefixes
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.ow_glob;
@@ -165,6 +193,6 @@ AS SELECT range AS id FROM range(2);
 <REGEX>:.*Could not convert string 'maybe' to BOOL.*
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name IN ('ow_table', 'ow_plain', 'ow_live');
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name IN ('ow_table', 'ow_plain', 'ow_live', 'ow_parts');
 ----
 0

@@ -12,6 +12,7 @@
 
 #include "api/glue_api.hpp"
 #include "core/glue_types.hpp"
+#include "core/hive_location.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_schema_entry.hpp"
@@ -169,16 +170,11 @@ string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<
 		throw InvalidInputException("Table '%s' has no location in Glue, provide the partition location explicitly",
 		                            target.TableName());
 	}
-	auto &keys = target.table.partition_keys;
-	for (idx_t i = 0; i < keys.size(); i++) {
-		location += "/" + HivePartitioning::Escape(keys[i].name) + "=";
-		if (values[i] == HivePartitioning::DEFAULT_PARTITION_NAME) {
-			location += values[i];
-		} else {
-			location += HivePartitioning::EscapeValue(values[i]);
-		}
+	vector<string> keys;
+	for (auto &key : target.table.partition_keys) {
+		keys.push_back(key.name);
 	}
-	return location;
+	return Path::FromString(location).Join(HivePartitionDirectory(keys, values)).ToString();
 }
 
 //! Bind data for the functions that change one partition and report one row when executed

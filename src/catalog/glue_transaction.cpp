@@ -3,7 +3,7 @@
 #include "planning/hive_query_cache.hpp"
 
 #include "duckdb/common/atomic.hpp"
-#include "duckdb/common/error_data.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -30,40 +30,76 @@ void GlueTransaction::Start() {
 }
 
 void GlueTransaction::Commit() {
+	// writes are refused in explicit transactions, so a write still here at a commit is a bug, not a failed
+	// statement: its files may be in the table, so they stay
+	unique_ptr<GlueHiveWrite> write;
+	{
+		annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+		write = std::move(hive_write);
+	}
+	if (write) {
+		auto client_context = context.lock();
+		if (client_context) {
+			DUCKDB_LOG_WARNING(*client_context,
+			                   "A write into Hive table '%s.%s' had not completed when its transaction committed; its "
+			                   "files are kept",
+			                   write->database_name, write->table_name);
+		}
+	}
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
 }
 
 void GlueTransaction::Rollback() {
+	UndoHiveWrite();
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
-	// Rolled back: drop every table created in this transaction. A failed drop is logged (with the table
-	// name, so it can be dropped manually).
-	auto client_context = context.lock();
-	for (auto &created : created_tables) {
-		try {
-			GlueAPI::DropCreatedTable(created.client, created.catalog_id, created.database_name, created.table_name);
-		} catch (std::exception &ex) {
-			if (client_context) {
-				ErrorData error(ex);
-				DUCKDB_LOG_WARNING(*client_context,
-				                   "Table cleanup: could not drop Glue table '%s.%s' after rollback: %s",
-				                   created.database_name, created.table_name, error.RawMessage());
-			}
-		}
-	}
-}
-
-void GlueTransaction::AddCreatedTable(std::shared_ptr<Aws::Glue::GlueClient> client, string catalog_id,
-                                      string database_name, string table_name) {
-	created_tables.push_back(
-	    CreatedTable {std::move(client), std::move(catalog_id), std::move(database_name), std::move(table_name)});
 }
 
 GlueTransaction &GlueTransaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog).Cast<GlueTransaction>();
+}
+
+void GlueTransaction::AddHiveWrite(GlueHiveWrite write) {
+	annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+	if (hive_write) {
+		throw InternalException("Hive write '%s' started while write '%s' of the same transaction had not completed",
+		                        write.write_id, hive_write->write_id);
+	}
+	hive_write = make_uniq<GlueHiveWrite>(std::move(write));
+}
+
+optional_ptr<GlueHiveWrite> GlueTransaction::FindHiveWrite(const string &write_id) {
+	annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+	if (hive_write && hive_write->write_id == write_id) {
+		return hive_write.get();
+	}
+	return nullptr;
+}
+
+void GlueTransaction::CompleteHiveWrite(const string &write_id) {
+	annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+	if (hive_write && hive_write->write_id == write_id) {
+		hive_write.reset();
+	}
+}
+
+void GlueTransaction::UndoHiveWrite() {
+	unique_ptr<GlueHiveWrite> write;
+	{
+		annotated_lock_guard<annotated_mutex> guard(hive_write_lock);
+		write = std::move(hive_write);
+	}
+	if (!write) {
+		return;
+	}
+	auto client_context = context.lock();
+	if (!client_context) {
+		return;
+	}
+	write->Undo(*client_context, glue_catalog);
 }
 
 idx_t GlueTransactionCache::NextId() {

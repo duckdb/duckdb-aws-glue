@@ -1,0 +1,159 @@
+# name: test/sql/hive/dml/insert/insert_partition_schema_mismatch.test
+# description: INSERT refuses existing partitions whose column types differ from the table's, matched as the scan matches columns
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_schema_drift;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_schema_drift (id INTEGER, v INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift VALUES (1, 10, 'a');
+
+# the table's column changes, the existing partition keeps the schema it was created with
+statement ok
+ALTER TABLE my_datalake.default.ins_schema_drift ALTER COLUMN v TYPE BIGINT;
+
+query I
+SELECT [c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.ins_schema_drift', {dt: 'a'});
+----
+[int, int]
+
+# a bigint file in a partition that declares 'v' as int would not match what the partition declares
+statement error
+INSERT INTO my_datalake.default.ins_schema_drift VALUES (2, 20000000000, 'a');
+----
+partition [a] declares column 'v' as 'int', but the table declares column 'v' as 'bigint'
+
+# a new partition is created with the table's schema
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift VALUES (3, 30000000000, 'b');
+
+# nothing was written to 'a'
+query III
+SELECT id, v, dt FROM my_datalake.default.ins_schema_drift ORDER BY id;
+----
+1	10	a
+3	30000000000	b
+
+# a column added to the table: partition 'b' lacks it, but agrees on the columns it declares, so it is written to
+statement ok
+ALTER TABLE my_datalake.default.ins_schema_drift ADD COLUMN score DOUBLE;
+
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift (id, v, score, dt) VALUES (4, 40, 4.5, 'b');
+
+# 'a' still differs in 'v'
+statement error
+INSERT INTO my_datalake.default.ins_schema_drift (id, v, score, dt) VALUES (5, 50, 5.5, 'a');
+----
+partition [a] declares column 'v' as 'int', but the table declares column 'v' as 'bigint'
+
+# rows for other partitions in the same INSERT are refused with it
+statement error
+INSERT INTO my_datalake.default.ins_schema_drift (id, v, score, dt) VALUES (6, 60, 6.5, 'c'), (7, 70, 7.5, 'a');
+----
+partition [a] declares column 'v' as 'int', but the table declares column 'v' as 'bigint'
+
+query IIII
+SELECT id, v, score, dt FROM my_datalake.default.ins_schema_drift WHERE dt IN ('a', 'b') ORDER BY id;
+----
+1	10	NULL	a
+3	30000000000	NULL	b
+4	40	4.5	b
+
+# the partition is made to declare the table's columns by dropping and adding it again, which keeps its files
+statement ok
+CALL glue_drop_partition('my_datalake.default.ins_schema_drift', {dt: 'a'});
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ins_schema_drift', {dt: 'a'});
+
+query I
+SELECT [c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.ins_schema_drift', {dt: 'a'});
+----
+[int, bigint, double]
+
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift (id, v, score, dt) VALUES (8, 80000000000, 8.5, 'a');
+
+query IIII
+SELECT id, v, score, dt FROM my_datalake.default.ins_schema_drift WHERE dt = 'a' ORDER BY id;
+----
+1	10	NULL	a
+8	80000000000	8.5	a
+
+statement ok
+DROP TABLE my_datalake.default.ins_schema_drift;
+
+# parquet files are matched by name: after dropping a column in the middle, an older partition still agrees on every
+# column the table keeps
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_schema_dropped;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_schema_dropped (id INTEGER, v INTEGER, s VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.ins_schema_dropped VALUES (1, 10, 'x', 'a');
+
+statement ok
+ALTER TABLE my_datalake.default.ins_schema_dropped DROP COLUMN v;
+
+statement ok
+INSERT INTO my_datalake.default.ins_schema_dropped (id, s, dt) VALUES (2, 'y', 'a');
+
+query III
+SELECT id, s, dt FROM my_datalake.default.ins_schema_dropped ORDER BY id;
+----
+1	x	a
+2	y	a
+
+statement ok
+DROP TABLE my_datalake.default.ins_schema_dropped;
+
+# csv files are matched by position: a partition that declares another type at a position is refused, whatever the
+# column's name
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ins_schema_drift_csv;
+
+statement ok
+CREATE TABLE my_datalake.default.ins_schema_drift_csv (id INTEGER, v INTEGER, dt VARCHAR) PARTITIONED BY (dt)
+WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift_csv VALUES (1, 10, 'a');
+
+statement ok
+ALTER TABLE my_datalake.default.ins_schema_drift_csv RENAME COLUMN v TO w;
+
+# the same type at the same position: written to
+statement ok
+INSERT INTO my_datalake.default.ins_schema_drift_csv VALUES (2, 20, 'a');
+
+statement ok
+ALTER TABLE my_datalake.default.ins_schema_drift_csv ALTER COLUMN w TYPE BIGINT;
+
+statement error
+INSERT INTO my_datalake.default.ins_schema_drift_csv VALUES (3, 30, 'a');
+----
+partition [a] declares column 'v' as 'int', but the table declares column 'w' as 'bigint'
+
+statement ok
+DROP TABLE my_datalake.default.ins_schema_drift_csv;

@@ -37,6 +37,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	HiveJSONOptions json_options;
 	//! The partition keys, in order
 	vector<string> partition_keys;
+	//! When set, the name of the secret every listed file is opened with, instead of the one that matches its path
+	string file_secret;
 	//! Numbers the scans of a query (HiveQueryCache::NextScanId), so the GlueScan log can tell them apart
 	idx_t scan_id = 0;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -197,6 +199,13 @@ struct GluePartitionInfo {
 	unordered_map<string, string> serde_parameters;
 	//! The data columns the partition declares, which can differ from the table's; empty when not known
 	vector<GlueColumn> partition_columns;
+	//! The column this partition declares for the table's column 'index', matched as a scan reads the files: by
+	//! position in csv tables, by name (ignoring case) otherwise. Null when the partition declares none, e.g. for a
+	//! column added to the table later.
+	optional_ptr<const GlueColumn> FindPartitionColumn(const vector<GlueColumn> &table_columns, idx_t index,
+	                                                   bool by_position) const;
+	//! The first data column of the table whose type this partition declares differently (FindPartitionColumn)
+	optional_idx FindColumnTypeMismatch(const vector<GlueColumn> &table_columns, bool by_position) const;
 };
 
 //! A partition as GetPartition returns it: also its parameters

@@ -182,10 +182,10 @@ static vector<string> ToStdValues(const Aws::Vector<Aws::String> &values) {
 	return result;
 }
 
-set<vector<string>> GlueAPI::ExistingPartitions(ClientContext &context, GlueCatalog &catalog,
-                                                const string &database_name, const string &table_name,
-                                                const vector<vector<string>> &partitions) {
-	set<vector<string>> existing;
+map<vector<string>, string> GlueAPI::PartitionLocations(ClientContext &context, GlueCatalog &catalog,
+                                                        const string &database_name, const string &table_name,
+                                                        const vector<vector<string>> &partitions) {
+	map<vector<string>, string> existing;
 	if (partitions.empty()) {
 		return existing;
 	}
@@ -215,12 +215,23 @@ set<vector<string>> GlueAPI::ExistingPartitions(ClientContext &context, GlueCata
 				ThrowGlueError(outcome, StringUtil::Format("BatchGetPartition '%s.%s'", database_name, table_name));
 			}
 			for (auto &partition : outcome.GetResult().GetPartitions()) {
-				existing.insert(ToStdValues(partition.GetValues()));
+				existing.emplace(ToStdValues(partition.GetValues()),
+				                 ToStdString(partition.GetStorageDescriptor().GetLocation()));
 			}
 			auto unprocessed = outcome.GetResult().GetUnprocessedKeys();
 			attempt = unprocessed.size() < keys.size() ? 0 : attempt + 1;
 			keys = std::move(unprocessed);
 		}
+	}
+	return existing;
+}
+
+set<vector<string>> GlueAPI::ExistingPartitions(ClientContext &context, GlueCatalog &catalog,
+                                                const string &database_name, const string &table_name,
+                                                const vector<vector<string>> &partitions) {
+	set<vector<string>> existing;
+	for (auto &entry : PartitionLocations(context, catalog, database_name, table_name, partitions)) {
+		existing.insert(entry.first);
 	}
 	return existing;
 }
@@ -476,12 +487,14 @@ void GlueAPI::CheckDebugFailPartitionRegistration(ClientContext &, SetScope, Val
 	}
 }
 
-void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
-                                    const vector<GluePartitionInput> &partitions) {
+vector<GluePartitionInput> GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
+                                                          const GlueTableInfo &table,
+                                                          const vector<GluePartitionInput> &partitions) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "BatchCreatePartition");
+	vector<GluePartitionInput> already_existing;
 	if (partitions.empty()) {
-		return;
+		return already_existing;
 	}
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -553,7 +566,8 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 						                  database_name, table_name, PartitionValuesToString(values), message, code);
 					}
 					if (code == "AlreadyExistsException") {
-						// appending to an existing partition
+						// appending to an existing partition, or to one registered elsewhere: the caller tells
+						already_existing.push_back(partitions[entry->second]);
 						continue;
 					}
 					errors.push_back({entry->second, code, message});
@@ -570,6 +584,7 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 			}
 		}
 	}
+	return already_existing;
 }
 
 } // namespace duckdb

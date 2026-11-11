@@ -28,6 +28,14 @@ include_directories(${AWSSDK_INCLUDE_DIRS})
 set(GLUE_EXTENSION_FILES)
 add_subdirectory(src)
 
+# On wasm the loadable extension is an archive and DuckDB links the side module
+# in a separate emcc step that takes only what this variable names, so the
+# target_link_libraries below does not reach it
+if(EMSCRIPTEN)
+  set(DUCKDB_EXTENSION_GLUE_LINKED_LIBS
+      "../../vcpkg_installed/wasm32-emscripten/lib/lib*.a")
+endif()
+
 build_static_extension(${TARGET_NAME} ${GLUE_EXTENSION_FILES})
 build_loadable_extension(${TARGET_NAME} " " ${GLUE_EXTENSION_FILES})
 
@@ -53,4 +61,11 @@ if(BUILD_UNITTESTS
    AND NOT EMSCRIPTEN
    AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
   add_subdirectory(test/unittest)
+endif()
+
+# test-only GlueFileCredentialsCallback, linked into unittest
+if(BUILD_UNITTESTS
+   AND NOT CLANG_TIDY
+   AND DUCKDB_EXTENSION_GLUE_SHOULD_BUILD)
+  add_subdirectory(test/extension/glue_test_credentials)
 endif()

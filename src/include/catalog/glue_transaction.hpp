@@ -1,17 +1,21 @@
 #pragma once
 
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
+#include "execution/glue_hive_write.hpp"
 
 #include <functional>
 
 namespace duckdb {
 class GlueCatalog;
+class GlueSchemaEntry;
 
 enum class GlueTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -154,7 +158,9 @@ private:
 };
 
 //! Glue has no transactional semantics in this extension: every DDL statement is executed against the Glue API
-//! immediately. The transaction exists because every attached database needs one, and carries the metadata cache.
+//! immediately. The transaction exists because every attached database needs one, and carries the metadata cache. It
+//! also keeps the Hive writes of the running statement: a write that is still there when the transaction ends belongs
+//! to a statement that failed, and is undone (UndoHiveWrite).
 class GlueTransaction : public Transaction {
 public:
 	GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &manager, ClientContext &context);
@@ -164,12 +170,15 @@ public:
 	void Commit();
 	void Rollback();
 
-	//! Record a table created in this transaction so Rollback() drops it from Glue (Commit() keeps it). The Glue
-	//! client is captured now, while the transaction is active, because Rollback() has no context to resolve one.
-	void AddCreatedTable(std::shared_ptr<Aws::Glue::GlueClient> client, string catalog_id, string database_name,
-	                     string table_name);
-
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
+
+	//! A Hive write starts: it is undone when the transaction ends before CompleteHiveWrite. Writes are refused in
+	//! explicit transactions, so a transaction holds at most one
+	void AddHiveWrite(GlueHiveWrite write);
+	//! The write, or null when it was not added or has completed; the pointer stays valid until then
+	optional_ptr<GlueHiveWrite> FindHiveWrite(const string &write_id);
+	//! The write's files are written and its partitions registered, nothing to undo
+	void CompleteHiveWrite(const string &write_id);
 
 public:
 	GlueCatalog &glue_catalog;
@@ -178,15 +187,12 @@ public:
 	shared_ptr<GlueTransactionCache> cache;
 
 private:
-	//! A table created in this transaction, with the client captured to drop it with on rollback
-	struct CreatedTable {
-		std::shared_ptr<Aws::Glue::GlueClient> client;
-		string catalog_id;
-		string database_name;
-		string table_name;
-	};
-	vector<CreatedTable> created_tables;
+	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone
+	void UndoHiveWrite();
+
 	GlueTransactionState transaction_state;
+	annotated_mutex hive_write_lock;
+	unique_ptr<GlueHiveWrite> hive_write DUCKDB_GUARDED_BY(hive_write_lock);
 };
 
 } // namespace duckdb

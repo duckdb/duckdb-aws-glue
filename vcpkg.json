@@ -16,13 +16,23 @@
 				"rds",
 				"redshift",
 				"redshift-serverless",
-				"cloudformation"
+				"cloudformation",
+				"s3tables"
 			]
 		}
 	],
 	"vcpkg-configuration": {
 		"overlay-ports": [
+			"./vcpkg_ports",
 			"./extension-ci-tools/vcpkg_ports"
+		],
+		"registries": [
+			{
+				"kind": "git",
+				"repository": "https://github.com/duckdb/vcpkg-duckdb-ports",
+				"baseline": "8649dae4f075237c2a948263e76e4cda85b8c913",
+				"packages": [ "aws-sdk-cpp", "aws-checksums" ]
+			}
 		]
 	},
 	"builtin-baseline": "cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3"

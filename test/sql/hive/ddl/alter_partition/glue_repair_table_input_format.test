@@ -1,0 +1,50 @@
+# name: test/sql/hive/ddl/alter_partition/glue_repair_table_input_format.test
+# description: glue_repair_table refuses a table with another engine's InputFormat, whose files are not laid out the way Hive writes them, and registers nothing
+# group: [alter_partition]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require glue_test_credentials
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+COPY (SELECT 1 AS id, 'a' AS dt) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/repair_foreign' (FORMAT parquet, PARTITION_BY (dt));
+
+statement ok
+COPY (SELECT 1 AS id, 'a' AS dt) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/repair_hive' (FORMAT parquet, PARTITION_BY (dt));
+
+statement ok
+PRAGMA glue_test_credentials_create('my_datalake', '{"Name": "repair_foreign_input_format", "DatabaseName": "default", "TableType": "EXTERNAL_TABLE", "PartitionKeys": [{"Name": "dt", "Type": "string"}], "StorageDescriptor": {"Columns": [{"Name": "id", "Type": "int"}], "Location": "{DEFAULT_S3_LOCATION}/{TEST_DIR}/repair_foreign", "InputFormat": "com.example.hadoop.ManifestedParquetInputFormat", "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat", "SerdeInfo": {"SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"}}}');
+
+statement ok
+PRAGMA glue_test_credentials_create('my_datalake', '{"Name": "repair_hive_input_format", "DatabaseName": "default", "TableType": "EXTERNAL_TABLE", "PartitionKeys": [{"Name": "dt", "Type": "string"}], "StorageDescriptor": {"Columns": [{"Name": "id", "Type": "int"}], "Location": "{DEFAULT_S3_LOCATION}/{TEST_DIR}/repair_hive", "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat", "SerdeInfo": {"SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"}}}');
+
+statement error
+SELECT * FROM glue_repair_table('my_datalake.default.repair_foreign_input_format');
+----
+Not implemented Error: glue_repair_table of Glue table 'default.repair_foreign_input_format' is not supported: its InputFormat 'com.example.hadoop.ManifestedParquetInputFormat' is not one Hive uses for parquet tables
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.repair_foreign_input_format');
+----
+0
+
+# with Hive's InputFormat the same layout is repaired
+query II
+SELECT dt, location FROM glue_repair_table('my_datalake.default.repair_hive_input_format');
+----
+a	{DEFAULT_S3_LOCATION}/{TEST_DIR}/repair_hive/dt=a
+
+statement ok
+DROP TABLE my_datalake.default.repair_foreign_input_format;
+
+statement ok
+DROP TABLE my_datalake.default.repair_hive_input_format;

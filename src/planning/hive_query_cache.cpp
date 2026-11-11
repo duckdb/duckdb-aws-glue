@@ -1,5 +1,7 @@
 #include "planning/hive_query_cache.hpp"
 
+#include "core/hive_location.hpp"
+
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -23,7 +25,7 @@ public:
 		auto &listing = listings[directory];
 		if (!listing) {
 			auto &fs = FileSystem::GetFileSystem(context);
-			listing = shared_ptr<MultiFileList>(fs.GlobFileList(directory + "/**", FileGlobOptions::ALLOW_EMPTY));
+			listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
 		}
 		return listing;
 	}
@@ -126,7 +128,7 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->listing) {
 		auto &fs = FileSystem::GetFileSystem(context);
-		entry->listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
+		entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, key));
 	}
 	return entry->listing;
 }

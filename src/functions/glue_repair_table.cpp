@@ -1,5 +1,6 @@
 #include "functions/glue_repair_table.hpp"
 
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
@@ -13,6 +14,8 @@
 #include "api/glue_api.hpp"
 #include "api/glue_api_util.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_file_credentials.hpp"
+#include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
 #include "functions/glue_functions.hpp"
 #include "planning/hive_multi_file_reader.hpp"
@@ -38,11 +41,43 @@ struct GlueRepairTableState : public GlobalTableFunctionState {
 	bool applied = false;
 };
 
+//! The repair lists the table's files by path, without the credentials its scans read with
+// TODO: support repairing a table with credentials, by listing its files with them
+void ThrowIfReadWithFileCredentials(ClientContext &context, const Value &table_name,
+                                    const GluePartitionTarget &target) {
+	if (!GlueFileCredentialsCallback::Find(context)) {
+		return;
+	}
+	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY,
+	                       ResolveGlueTableName(context, "glue_repair_table", table_name.GetValue<string>()));
+	auto entry = Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
+		return;
+	}
+	if (!GlueFileCredentialsCallback::Get(context, entry->Cast<GlueTable>()).empty()) {
+		throw NotImplementedException("glue_repair_table of Glue table '%s', which is read with file credentials, is "
+		                              "not supported",
+		                              target.TableName());
+	}
+}
+
 unique_ptr<FunctionData> GlueRepairTableBind(ClientContext &context, TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GlueRepairTableBindData>();
 	result->target = ResolveGlueTable(context, "glue_repair_table", input.inputs[0]);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_repair_table");
+	auto &table = result->target.table;
+	// the partitions are read from the directory layout Hive writes; another engine's InputFormat lays files out its
+	// way
+	auto file_format = table.GetFileFormat();
+	if (!table.GetFormat().IsWritable(table, file_format)) {
+		throw NotImplementedException("glue_repair_table of Glue table '%s' is not supported: its InputFormat '%s' is "
+		                              "not one Hive uses for %s tables, so DuckDB does not know how the files below "
+		                              "the table location are laid out",
+		                              result->target.TableName(), table.input_format,
+		                              HiveFileFormatToString(file_format));
+	}
+	ThrowIfReadWithFileCredentials(context, input.inputs[0], result->target);
 	result->root = result->target.table.location;
 	StringUtil::RTrim(result->root, "/");
 	if (result->root.empty()) {

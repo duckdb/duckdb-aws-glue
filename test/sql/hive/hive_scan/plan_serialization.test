@@ -79,6 +79,16 @@ SELECT count(*) FROM (
 ----
 4
 
+# a CTE read twice below a LIMIT is inlined into each reference as a copy of its plan, whose scans are the table's
+query I
+WITH pairs AS (
+    SELECT a.dt FROM my_datalake.default.ps_orders a, my_datalake.default.ps_orders b
+    WHERE a.dt = b.dt AND a.id <> b.id)
+SELECT count(*) FROM my_datalake.default.ps_orders
+WHERE dt IN (SELECT dt FROM pairs) AND dt IN (SELECT dt FROM pairs) LIMIT 10;
+----
+2
+
 # a csv table keeps its reader and its dialect
 query II
 SELECT id, kind FROM my_datalake.default.ps_events ORDER BY id;
