@@ -36,6 +36,6 @@ if (NOT MINGW)
     # (fixed in duckdb-iceberg b5db08d53).
     duckdb_extension_load(iceberg
         GIT_URL https://github.com/duckdb/duckdb-iceberg
-        GIT_TAG 4c12f005062fc6ace3a79dc472e46712bf84974f
+        GIT_TAG 37dcf6504fc529480065f7bc9eb15cb77119ef07
     )
 endif()

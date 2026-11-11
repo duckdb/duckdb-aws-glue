@@ -115,7 +115,7 @@ SELECT * FROM my_datalake.default.ice_ctas_location;
 statement error
 CREATE TABLE my_datalake.default.ice_ctas WITH (table_type = 'iceberg') AS SELECT 1 AS id;
 ----
-<REGEX>:.*Catalog Error.*Table with name "ice_ctas" already exists in Glue database "default".*
+<REGEX>:.*Catalog Error.*Table with name "ice_ctas" already exists.*
 
 # IF NOT EXISTS on an existing table neither creates nor inserts anything
 statement ok
