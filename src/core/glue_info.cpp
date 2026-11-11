@@ -362,6 +362,12 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	if (GetSerDe() == HiveSerDe::OPEN_CSV && !escape_set && options.delimiter != "\\" && options.quote != "\\") {
 		options.field_escape = "\\";
 	}
+	// with escapeChar '\' read_csv would apply the escape before a separator or a line break, joining fields and lines,
+	// where OpenCSVSerde drops it: the lines are split by hive_opencsv_field instead
+	if (GetSerDe() == HiveSerDe::OPEN_CSV && escape_set && options.escape == "\\" && options.delimiter.size() == 1 &&
+	    options.quote.size() == 1 && options.delimiter != options.quote) {
+		options.line_fields = true;
+	}
 	return options;
 }
 
