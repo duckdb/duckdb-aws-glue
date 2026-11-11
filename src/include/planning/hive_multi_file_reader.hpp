@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
@@ -45,6 +46,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The keys the listing holds for a sampled partition on average, 0 until measured
+	atomic<idx_t> keys_per_partition {0};
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
@@ -144,9 +147,19 @@ private:
 	void ListRoot(const vector<idx_t> &partitions) const;
 	//! Lists the directories of 'partition_indexes' in parallel
 	void ListPartitions(const vector<idx_t> &partition_indexes) const;
-	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until
-	//! they hold one of 'partitions'
-	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
+	//! What the first listing of the plan gives the sample
+	struct ListingSample {
+		vector<OpenFileInfo> files;
+		//! The partitions whose keys it holds completely, also those without files
+		unordered_set<idx_t> partitions;
+		//! Their keys, data files or not
+		idx_t keys = 0;
+	};
+	bool BoolSetting(const char *name, bool default_value) const;
+	//! The partitions the fetched pages of the root listing hold completely, fetching more only until one is read
+	ListingSample SampleRootPartitions(const vector<idx_t> &partitions) const;
+	//! Called with the lock held
+	ListingSample SampleFromPlan() const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
 	//! Refuse to read a file attributed to 'owner' when its location is one two or more partitions are registered at

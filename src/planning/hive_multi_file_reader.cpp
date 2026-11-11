@@ -421,9 +421,9 @@ void HiveMultiFileList::PlanListings() const {
 	}
 	// The root's listing pages through every partition below it one page after another, while the partitions read are
 	// listed together: list the root when that takes fewer rounds of requests, or as many rounds and a tenth of the
-	// requests (on a one page root: ten partitions read). Each partition holds at least one file, so the partitions
-	// below the root bound its pages from below. hive_partition_listing_threshold replaces this with a fixed count of
-	// partitions read
+	// requests (on a one page root: ten partitions read). Each partition holds at least one key, or as many as the
+	// sample's listing holds per partition once measured. hive_partition_listing_threshold replaces this with a fixed
+	// count of partitions read
 	auto listed_together = PartitionsListedTogether(client_context);
 	idx_t partitions_below_root = 0;
 	for (auto &partition : *partitions) {
@@ -433,7 +433,8 @@ void HiveMultiFileList::PlanListings() const {
 			partitions_below_root++;
 		}
 	}
-	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
+	auto keys_below_root = partitions_below_root * MaxValue<idx_t>(scan_info->keys_per_partition.load(), 1);
+	auto root_pages = (keys_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
 	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
 	auto partition_requests = below_root.size();
 	bool list_root;
@@ -713,28 +714,61 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 	return MultiFileCount(expanded_files.size() + remaining, FileExpansionType::NOT_ALL_FILES_KNOWN);
 }
 
+bool HiveMultiFileList::BoolSetting(const char *name, bool default_value) const {
+	Value setting;
+	if (client_context.TryGetCurrentSetting(name, setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return default_value;
+}
+
 vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	lock_guard<mutex> lck(lock);
 	PlanListings();
-	vector<OpenFileInfo> files;
+	auto sample = SampleFromPlan();
+	auto &spanned = sample.partitions;
+	if (scan_info->partition_keys.empty() || sample.keys == 0 || spanned.empty() ||
+	    !BoolSetting("hive_partition_listing_measure_files", true) || ListingThreshold(client_context).IsValid()) {
+		return std::move(sample.files);
+	}
+	auto keys_per_partition = MaxValue<idx_t>((sample.keys + spanned.size() / 2) / spanned.size(), 1);
+	idx_t unmeasured = 0;
+	bool measured = scan_info->keys_per_partition.compare_exchange_strong(unmeasured, keys_per_partition);
+	// more keys per partition only lengthen the root's listing, so only a plan that lists it can change
+	if (measured && keys_per_partition > 1 && next_job == 0 && listing_jobs[0].root) {
+		planned = false;
+		listing_jobs.clear();
+		PlanListings();
+	}
+	return std::move(sample.files);
+}
+
+HiveMultiFileList::ListingSample HiveMultiFileList::SampleFromPlan() const {
+	ListingSample sample;
 	if (scan_info->partition_keys.empty()) {
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
-		              scan_info->file_secret, files);
-		return files;
+		              scan_info->file_secret, sample.files);
+		return sample;
 	}
 	if (listing_jobs.empty()) {
-		return files;
+		return sample;
 	}
 	if (listing_jobs[0].root) {
 		return SampleRootPartitions(listing_jobs[0].partitions);
 	}
 	auto partition_index = listing_jobs[0].partitions[0];
+	sample.partitions.insert(partition_index);
 	auto location = (*scan_info->Partitions(client_context))[partition_index].location;
 	StringUtil::RTrim(location, "/");
-	vector<OpenFileInfo> listed;
-	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, scan_info->file_secret, listed);
+	if (location.empty()) {
+		return sample;
+	}
+	auto listed = HiveQueryCache::Get(client_context)
+	                  ->GetDirectoryListing(client_context, location, CacheListings(client_context, *scan_info))
+	                  ->GetAllFiles();
 	// as ListPartitions keeps them: not the files of a partition registered at a location nested inside this one
 	BuildPartitionLocations();
+	auto prefix = location + "/";
 	auto comparable_size = ComparableLocation(location).size();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : listed) {
@@ -742,13 +776,18 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 		if (owner.IsValid() && owner.GetIndex() != partition_index) {
 			continue;
 		}
+		sample.keys++;
+		if (!IsDataFile(file, prefix)) {
+			continue;
+		}
+		CarryFileSecret(file, scan_info->file_secret);
 		scan_info->file_partitions[file.path] = partition_index;
-		files.push_back(std::move(file));
+		sample.files.push_back(std::move(file));
 	}
-	return files;
+	return sample;
 }
 
-vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t> &partitions) const {
+HiveMultiFileList::ListingSample HiveMultiFileList::SampleRootPartitions(const vector<idx_t> &partitions) const {
 	auto root = scan_info->root_location;
 	StringUtil::RTrim(root, "/");
 	auto root_prefix = root + "/";
@@ -763,7 +802,9 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	bool listed_all = false;
 	optional_idx last_partition;
 	idx_t last_partition_start = 0;
-	vector<OpenFileInfo> files;
+	idx_t last_partition_keys = 0;
+	ListingSample sample;
+	auto &files = sample.files;
 	vector<idx_t> file_partitions;
 	MultiFileListScanData scan;
 	listing->InitializeScan(scan);
@@ -783,6 +824,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			continue;
 		}
 		if (!IsDataFile(file, root_prefix)) {
+			sample.keys++;
 			continue;
 		}
 		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
@@ -790,6 +832,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			// pages come in key order, so the sampled partition's files are all seen
 			break;
 		}
+		sample.keys++;
 		auto owner = OwningPartition(file.path, comparable_root_size);
 		if (!owner.IsValid()) {
 			continue;
@@ -797,6 +840,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 		if (owner != last_partition) {
 			last_partition = owner;
 			last_partition_start = files.size();
+			last_partition_keys = sample.keys - 1;
 		}
 		if (!sampled.IsValid() && reading.count(owner.GetIndex())) {
 			sampled = owner;
@@ -811,12 +855,27 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	if (!listed_all && last_partition.IsValid() && last_partition != sampled) {
 		// the pages fetched may end inside the last partition
 		files.resize(last_partition_start);
+		sample.keys = last_partition_keys;
+	}
+	// the pages start at the root's first key, so they span every partition sorting up to the last one kept
+	auto all = scan_info->Partitions(client_context);
+	auto root_location = ComparableLocation(root) + "/";
+	string last_kept;
+	if (!files.empty()) {
+		last_kept = ComparableLocation((*all)[file_partitions[files.size() - 1]].location) + "/";
+	}
+	for (idx_t i = 0; i < all->size(); i++) {
+		auto location = ComparableLocation((*all)[i].location) + "/";
+		if (location.size() > root_location.size() && StringUtil::StartsWith(location, root_location) &&
+		    (listed_all || location <= last_kept)) {
+			sample.partitions.insert(i);
+		}
 	}
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (idx_t i = 0; i < files.size(); i++) {
 		scan_info->file_partitions[files[i].path] = file_partitions[i];
 	}
-	return files;
+	return sample;
 }
 
 vector<OpenFileInfo> HiveMultiFileList::GetDisplayFileList(optional_idx max_files) const {

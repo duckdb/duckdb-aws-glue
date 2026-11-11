@@ -83,7 +83,7 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
 
 - **Entry point** `src/glue_extension.cpp`: `Aws::InitAPI`, registers the `glue` StorageExtension, the table functions,
   the `glue_hive_ddl` grammar extension, and settings (`glue_network_calls_via_duckdb`, `glue_get_partitions_segments`,
-  `hive_partition_listing_threshold`).
+  `hive_partition_listing_threshold`, `hive_partition_listing_measure_files`).
 - **Catalog layer** `src/catalog/`: the usual DuckDB custom-catalog shape — `GlueCatalog` → `GlueSchemaSet` →
   `GlueSchemaEntry` (a Glue database) → `GlueTableSet` → `GlueTable`. `GlueAttach` parses ATTACH options. DDL
   (CREATE/DROP schema/table, ALTER column) is implemented in `GlueSchemaEntry`; Glue types are mapped in
