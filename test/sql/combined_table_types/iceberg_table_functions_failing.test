@@ -1,0 +1,88 @@
+# name: test/sql/combined_table_types/iceberg_table_functions_failing.test
+# description: duckdb-iceberg's table functions that fail on the Iceberg tables of a Glue catalog. Each is written as
+#              'statement ok' to show what fails; the run stops at the first one, so leaves its tables behind
+# group: [combined_table_types]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ATTACH_WITH_ICEBERG true,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_fnf_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_fnf_ice;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.mix_fnf_schema CASCADE;
+
+statement ok
+CREATE TABLE my_datalake.default.mix_fnf_ice (id INTEGER, val VARCHAR) WITH (table_type = 'iceberg');
+
+statement ok
+INSERT INTO my_datalake.default.mix_fnf_ice VALUES (1, 'a');
+
+statement ok
+INSERT INTO my_datalake.default.mix_fnf_ice VALUES (2, 'b');
+
+statement ok
+CREATE VIEW my_datalake.default.mix_fnf_view AS SELECT * FROM my_datalake.default.mix_fnf_ice;
+
+statement ok
+CREATE SCHEMA my_datalake.mix_fnf_schema;
+
+# fails: a fully qualified name skips the table entry lookup, so the maintenance loader looks up 'my_datalake' by name
+# and finds the Glue catalog (duckdb-iceberg ParseRewriteTableName, maintenance_table_loader.cpp)
+statement ok
+SELECT * FROM iceberg_rewrite_data_files('my_datalake.default.mix_fnf_ice', rewrite_all := true);
+
+# fails: Glue views are not Iceberg views
+statement ok
+SELECT * FROM iceberg_view_metadata('my_datalake.default.mix_fnf_view');
+
+# fail: the schema is Glue's, not an Iceberg schema
+statement ok
+SELECT * FROM iceberg_schema_properties(my_datalake.mix_fnf_schema);
+
+statement ok
+CALL set_iceberg_schema_properties(my_datalake.mix_fnf_schema, {'mix_fnf_prop': '1'});
+
+statement ok
+CALL remove_iceberg_schema_properties(my_datalake.mix_fnf_schema, ['mix_fnf_prop']);
+
+# fails: Glue refuses Iceberg tables inside an explicit transaction
+statement ok
+BEGIN;
+
+statement ok
+SELECT * FROM iceberg_snapshots('my_datalake.default.mix_fnf_ice');
+
+statement ok
+ROLLBACK;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_fnf_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_fnf_ice;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.mix_fnf_schema CASCADE;

@@ -1,5 +1,5 @@
 # name: test/sql/combined_table_types/iceberg_table_functions.test
-# description: duckdb-iceberg's table functions on the Iceberg tables of a Glue catalog
+# description: duckdb-iceberg's table functions that work on the Iceberg tables of a Glue catalog
 # group: [combined_table_types]
 
 require httpfs
@@ -25,16 +25,10 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 );
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.mix_fn_view;
-
-statement ok
 DROP TABLE IF EXISTS my_datalake.default.mix_fn_ice;
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.mix_fn_hive;
-
-statement ok
-DROP SCHEMA IF EXISTS my_datalake.mix_fn_schema CASCADE;
 
 statement ok
 CREATE TABLE my_datalake.default.mix_fn_ice (id INTEGER, val VARCHAR) WITH (table_type = 'iceberg');
@@ -48,14 +42,8 @@ INSERT INTO my_datalake.default.mix_fn_ice VALUES (2, 'b');
 statement ok
 CREATE TABLE my_datalake.default.mix_fn_hive (id INTEGER);
 
-statement ok
-CREATE VIEW my_datalake.default.mix_fn_view AS SELECT * FROM my_datalake.default.mix_fn_ice;
-
-statement ok
-CREATE SCHEMA my_datalake.mix_fn_schema;
-
 #---------------------------------------------------------------------------
-# control: functions that resolve the table entry, expected to work
+# metadata functions, which resolve the table entry through Glue
 #---------------------------------------------------------------------------
 statement ok
 SELECT * FROM iceberg_snapshots('my_datalake.default.mix_fn_ice');
@@ -69,25 +57,9 @@ SELECT * FROM iceberg_load_table_response(my_datalake.default.mix_fn_ice);
 statement ok
 SELECT * FROM iceberg_scan('my_datalake.default.mix_fn_ice');
 
-statement ok
-SET VARIABLE mix_fn_first_snapshot = (
-    SELECT snapshot_id FROM iceberg_snapshots('my_datalake.default.mix_fn_ice') ORDER BY sequence_number LIMIT 1);
-
-statement ok
-SELECT * FROM iceberg_rollback_to_snapshot('my_datalake.default.mix_fn_ice', getvariable('mix_fn_first_snapshot'));
-
 #---------------------------------------------------------------------------
-# expected to fail through a Glue catalog
-#---------------------------------------------------------------------------
-# looks the catalog up by name: 'my_datalake' is type glue
-statement ok
-SELECT * FROM iceberg_rewrite_data_files('my_datalake.default.mix_fn_ice', rewrite_all := true);
-
-# Glue views are not Iceberg views
-statement ok
-SELECT * FROM iceberg_view_metadata('my_datalake.default.mix_fn_view');
-
 # scan planning (client side: Glue's Iceberg REST endpoint does not plan on the server)
+#---------------------------------------------------------------------------
 statement ok
 SELECT * FROM iceberg_scan_plan('my_datalake.default.mix_fn_ice');
 
@@ -97,7 +69,9 @@ SET VARIABLE mix_fn_tasks = (SELECT list(task) FROM iceberg_scan_plan('my_datala
 statement ok
 SELECT * FROM iceberg_scan_tasks(getvariable('mix_fn_tasks'));
 
-# table properties (to be removed)
+#---------------------------------------------------------------------------
+# table properties
+#---------------------------------------------------------------------------
 statement ok
 SELECT * FROM iceberg_table_properties(my_datalake.default.mix_fn_ice);
 
@@ -107,17 +81,9 @@ CALL set_iceberg_table_properties(my_datalake.default.mix_fn_ice, {'mix.fn.prop'
 statement ok
 CALL remove_iceberg_table_properties(my_datalake.default.mix_fn_ice, ['mix.fn.prop']);
 
-# schema properties (to be removed): the schema is Glue's
-statement ok
-SELECT * FROM iceberg_schema_properties(my_datalake.mix_fn_schema);
-
-statement ok
-CALL set_iceberg_schema_properties(my_datalake.mix_fn_schema, {'mix_fn_prop': '1'});
-
-statement ok
-CALL remove_iceberg_schema_properties(my_datalake.mix_fn_schema, ['mix_fn_prop']);
-
+#---------------------------------------------------------------------------
 # short names after USE
+#---------------------------------------------------------------------------
 statement ok
 USE my_datalake.default;
 
@@ -127,34 +93,42 @@ SELECT * FROM iceberg_snapshots('mix_fn_ice');
 statement ok
 SELECT * FROM iceberg_scan('mix_fn_ice');
 
+# a short name resolves the table entry through Glue, a fully qualified one does not (see
+# iceberg_table_functions_failing.test)
+statement ok
+SELECT * FROM iceberg_rewrite_data_files('mix_fn_ice', rewrite_all := true);
+
 statement ok
 USE memory;
 
-# inside an explicit transaction
+#---------------------------------------------------------------------------
+# rollback, last: it removes the second snapshot
+#---------------------------------------------------------------------------
 statement ok
-BEGIN;
+SET VARIABLE mix_fn_first_snapshot = (
+    SELECT snapshot_id FROM iceberg_snapshots('my_datalake.default.mix_fn_ice') ORDER BY sequence_number LIMIT 1);
 
 statement ok
-SELECT * FROM iceberg_snapshots('my_datalake.default.mix_fn_ice');
+SELECT * FROM iceberg_rollback_to_snapshot('my_datalake.default.mix_fn_ice', getvariable('mix_fn_first_snapshot'));
 
-statement ok
-ROLLBACK;
+query II
+SELECT * FROM my_datalake.default.mix_fn_ice;
+----
+1	a
 
-# an Iceberg function on a Hive table
-statement ok
+#---------------------------------------------------------------------------
+# an Iceberg function on a Hive table is refused
+#---------------------------------------------------------------------------
+statement error
 SELECT * FROM iceberg_snapshots('my_datalake.default.mix_fn_hive');
+----
+Table my_datalake.default.mix_fn_hive is not an Iceberg table
 
 #---------------------------------------------------------------------------
 # cleanup
 #---------------------------------------------------------------------------
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.mix_fn_view;
+DROP TABLE my_datalake.default.mix_fn_ice;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.mix_fn_ice;
-
-statement ok
-DROP TABLE IF EXISTS my_datalake.default.mix_fn_hive;
-
-statement ok
-DROP SCHEMA IF EXISTS my_datalake.mix_fn_schema CASCADE;
+DROP TABLE my_datalake.default.mix_fn_hive;
