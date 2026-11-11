@@ -54,7 +54,8 @@ struct GlueDatabaseInfo {
 	//! Glue's CreateTime has whole seconds, so a recreate within one second with the same fields is not told apart.
 	bool IsSameDefinition(const GlueDatabaseInfo &other) const {
 		return create_time_ms == other.create_time_ms && location_uri == other.location_uri &&
-		       description == other.description && parameters == other.parameters;
+		       description == other.description && parameters == other.parameters && catalog_id == other.catalog_id &&
+		       is_resource_link == other.is_resource_link;
 	}
 };
 
