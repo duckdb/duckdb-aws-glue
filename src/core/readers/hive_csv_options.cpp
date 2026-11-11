@@ -2,7 +2,6 @@
 
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
-#include "re2/re2.h"
 #include "duckdb/common/types.hpp"
 
 namespace duckdb {
@@ -19,11 +18,6 @@ HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) con
 		return null_for_invalid_data ? HiveFieldConversion::TRY_EPOCH : HiveFieldConversion::EPOCH;
 	}
 	return null_for_invalid_data ? HiveFieldConversion::TRY_CAST : HiveFieldConversion::CAST;
-}
-
-string HiveCSVOptions::FieldEscapePattern() const {
-	return duckdb_re2::RE2::QuoteMeta(field_escape) + "([" + duckdb_re2::RE2::QuoteMeta(field_escape) +
-	       duckdb_re2::RE2::QuoteMeta(quote) + "])?";
 }
 
 bool HiveCSVOptions::operator==(const HiveCSVOptions &other) const {

@@ -245,6 +245,9 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		if (GetQuoteCharacter().size() > 1 || GetEscapeCharacter().size() > 1) {
 			refuse("has a quoteChar or escapeChar of more than one byte");
 		}
+		if (GetFieldDelimiter() == GetQuoteCharacter()) {
+			refuse("has the same separatorChar and quoteChar");
+		}
 		return;
 	}
 	string value;
@@ -355,18 +358,19 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
 	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
 	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
-	// without escapeChar OpenCSVSerde reads with a '\' escape, which read_csv, given the quote character, would keep;
-	// an explicit escapeChar '"', which this extension writes, is read as it is
+	// without escapeChar OpenCSVSerde reads with a '\' escape, as with escapeChar '\', which read_csv does not apply as
+	// it does: the lines are split by SplitOpenCSVLine instead; an explicit escapeChar '"', which this extension
+	// writes, is read as it is
 	string escape_char;
 	auto escape_set = TryGetProperty("escapeChar", escape_char) && !escape_char.empty();
-	if (GetSerDe() == HiveSerDe::OPEN_CSV && !escape_set && options.delimiter != "\\" && options.quote != "\\") {
-		options.field_escape = "\\";
-	}
-	// with escapeChar '\' read_csv would apply the escape before a separator or a line break, joining fields and lines,
-	// where OpenCSVSerde drops it: the lines are split by hive_opencsv_field instead
-	if (GetSerDe() == HiveSerDe::OPEN_CSV && escape_set && options.escape == "\\" && options.delimiter.size() == 1 &&
-	    options.quote.size() == 1 && options.delimiter != options.quote) {
+	if (GetSerDe() == HiveSerDe::OPEN_CSV && (!escape_set || options.escape == "\\") && options.delimiter != "\\" &&
+	    options.quote != "\\") {
+		if (!escape_set) {
+			// written with the quote character as the escape, so a '\' is doubled
+			options.field_escape = "\\";
+		}
 		options.line_fields = true;
+		options.escape = "\\";
 	}
 	return options;
 }
