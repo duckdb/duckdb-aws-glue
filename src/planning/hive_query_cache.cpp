@@ -141,11 +141,25 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
 	if (!expression.empty()) {
+		if (entry->refused_expressions.count(expression)) {
+			// refused by an earlier scan: the caller falls back to all partitions without asking again
+			throw InvalidInputException(
+			    GlueAPI::PartitionExpressionRejectedInfo(),
+			    StringUtil::Format("Glue already refused the expression '%s' in this query", expression));
+		}
 		// a selection of the partitions: kept apart from the full list, and only for this query
 		auto &partitions = entry->filtered_partitions[expression];
 		if (!partitions) {
-			partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
-			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name, expression));
+			try {
+				partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
+				    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name, expression));
+			} catch (std::exception &ex) {
+				entry->filtered_partitions.erase(expression);
+				if (GlueAPI::IsPartitionExpressionRejected(ErrorData(ex))) {
+					entry->refused_expressions.insert(expression);
+				}
+				throw;
+			}
 		}
 		return partitions;
 	}

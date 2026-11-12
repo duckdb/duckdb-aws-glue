@@ -96,9 +96,24 @@ static bool TryGlueLiteral(const Expression &expr, const LogicalType &key_type, 
 	}
 }
 
-//! The comparison in Glue's syntax, which spells not-equal '<>'
+//! The comparison in Glue's syntax, or nothing for one Glue doesn't have (IS [NOT] DISTINCT FROM)
 static string GlueComparisonOperator(ExpressionType type) {
-	return type == ExpressionType::COMPARE_NOTEQUAL ? "<>" : ExpressionTypeToOperator(type);
+	switch (type) {
+	case ExpressionType::COMPARE_EQUAL:
+		return "=";
+	case ExpressionType::COMPARE_NOTEQUAL:
+		return "<>";
+	case ExpressionType::COMPARE_LESSTHAN:
+		return "<";
+	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
+		return "<=";
+	case ExpressionType::COMPARE_GREATERTHAN:
+		return ">";
+	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+		return ">=";
+	default:
+		return string();
+	}
 }
 
 //! Writes 'filter' as a Glue partition filter that keeps at least the partitions DuckDB keeps. False when there is no

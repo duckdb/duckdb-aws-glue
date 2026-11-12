@@ -1,5 +1,7 @@
 #pragma once
 
+#include "duckdb/common/unordered_set.hpp"
+
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -18,6 +20,8 @@ struct GlueTableEntry {
 	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
 	//! The partitions a GetPartitions Expression matched, by expression: the scans with the same filters share one
 	unordered_map<string, shared_ptr<const vector<GluePartitionInfo>>> filtered_partitions DUCKDB_GUARDED_BY(lock);
+	//! The expressions Glue refused in this query, so that later scans don't send them again
+	unordered_set<string> refused_expressions DUCKDB_GUARDED_BY(lock);
 };
 
 //! The sample of a table, measured once per query for every scan of the table

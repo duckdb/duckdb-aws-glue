@@ -316,6 +316,10 @@ string GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, co
 //! Tags the exception we throw when Glue refuses a GetPartitions expression (see IsPartitionExpressionRejected)
 static constexpr const char *PARTITION_EXPRESSION_REJECTED = "glue_partition_expression_rejected";
 
+unordered_map<string, string> GlueAPI::PartitionExpressionRejectedInfo() {
+	return {{PARTITION_EXPRESSION_REJECTED, "true"}};
+}
+
 bool GlueAPI::IsPartitionExpressionRejected(const ErrorData &error) {
 	return error.Type() == ExceptionType::INVALID_INPUT && error.ExtraInfo().count(PARTITION_EXPRESSION_REJECTED);
 }
@@ -354,10 +358,13 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 		auto outcome = client.GetPartitions(request);
 		if (!outcome.IsSuccess()) {
 			auto error_type = outcome.GetError().GetErrorType();
+			// Glue answers an expression it can not apply with InvalidInputException, or with InvalidStateException
+			// when a partition value can not be compared with the literal ("__HIVE_DEFAULT_PARTITION__" is not an
+			// integer)
 			if (!expression.empty() && (error_type == Aws::Glue::GlueErrors::INVALID_INPUT ||
 			                            error_type == Aws::Glue::GlueErrors::INVALID_STATE)) {
 				throw InvalidInputException(
-				    {{PARTITION_EXPRESSION_REJECTED, "true"}},
+				    GlueAPI::PartitionExpressionRejectedInfo(),
 				    StringUtil::Format("Glue GetPartitions '%s.%s' refused the expression '%s': %s (%s)", database_name,
 				                       table_name, expression, ToStdString(outcome.GetError().GetMessage()),
 				                       ToStdString(outcome.GetError().GetExceptionName())));

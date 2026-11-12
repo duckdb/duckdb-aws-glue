@@ -110,9 +110,9 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::FetchPartitions(Client
 		if (!GlueAPI::IsPartitionExpressionRejected(error)) {
 			throw;
 		}
-		// Glue couldn't use the expression, e.g. a partition value it can't compare with the literal. That's fine, we
-		// apply the filters to the partition values ourselves anyway. Anything else (throttling, a timeout) fails the
-		// scan, since retrying without the expression would only fetch more.
+		// Glue refused the expression, e.g. a partition value it can not compare with the literal. The filters are
+		// applied to the partition values in any case, so all partitions are fetched instead. Other errors (throttling,
+		// timeouts) fail the scan.
 		DUCKDB_LOG_WARNING(context, "Glue could not filter the partitions of '%s' with '%s', listing all: %s",
 		                   Describe(), partition_expression, error.RawMessage());
 		partition_expression.clear();

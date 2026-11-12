@@ -148,6 +148,8 @@ public:
 	//! True when Glue refused the GetPartitions expression itself, e.g. it couldn't compare a partition value with the
 	//! literal. False when the request just failed (throttling, a timeout, access denied).
 	static bool IsPartitionExpressionRejected(const ErrorData &error);
+	//! The extra info that marks an exception as a refused GetPartitions expression
+	static unordered_map<string, string> PartitionExpressionRejectedInfo();
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
 	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
 	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.
