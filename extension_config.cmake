@@ -24,9 +24,9 @@ duckdb_extension_load(httpfs
 )
 
 if (NOT MINGW)
-    duckdb_extension_load(avro
+  duckdb_extension_load(avro
         GIT_URL https://github.com/duckdb/duckdb-avro
-        GIT_TAG 4d95356ce9433a14165156dbc6f59dcc91bd4889
+        GIT_TAG b7b157f50dd0a3e6cfd30d9dd273a388fc2b9939
         SUBMODULES "third_party/avro-c"
     )
 endif()
