@@ -130,7 +130,7 @@ CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'frobnicate'}
 Type with name frobnicate does not exist
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'HUGEINT'});
+CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'INTERVAL'});
 ----
 can not be converted to a Glue type
 

@@ -707,12 +707,26 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 	}
 	vector<Identifier> names;
 	vector<LogicalType> types;
+	vector<unique_ptr<Expression>> select_list;
+	bool needs_cast = false;
 	for (auto &column : op.info->Base().columns.Logical()) {
 		names.push_back(column.Name());
-		types.push_back(column.Type());
+		// the type the table's files are read with, e.g. DECIMAL(38,0) for a HUGEINT
+		auto glue_type = GlueTypes::ToLogicalType(GlueTypes::FromLogicalType(column.Type()));
+		needs_cast = needs_cast || glue_type != column.Type();
+		select_list.push_back(BoundCastExpression::AddCastToType(
+		    context, make_uniq<BoundReferenceExpression>(column.Type(), select_list.size()), glue_type));
+		types.push_back(std::move(glue_type));
+	}
+	reference<PhysicalOperator> source = plan;
+	if (needs_cast) {
+		auto &projection = planner.Make<PhysicalProjection>(types, std::move(select_list), op.estimated_cardinality);
+		projection.children.push_back(plan);
+		source = projection;
 	}
 	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
-	PlanWrite(context, planner, op, insert, nullptr, table_info, plan, names, types, schema, std::move(op.info));
+	PlanWrite(context, planner, op, insert, nullptr, table_info, source.get(), names, types, schema,
+	          std::move(op.info));
 	return insert;
 }
 
