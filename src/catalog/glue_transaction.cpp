@@ -105,6 +105,10 @@ void GlueTransaction::UndoHiveWrite() {
 	write->Undo(*client_context, glue_catalog);
 }
 
+shared_ptr<GlueMetadataCacheState> GlueMetadataCacheState::Get(ClientContext &context) {
+	return context.registered_state->GetOrCreate<GlueMetadataCacheState>(NAME);
+}
+
 void GlueMetadataCacheState::TrackTransactionCache(const shared_ptr<GlueTransactionCache> &cache) {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	PruneTransactionCaches();

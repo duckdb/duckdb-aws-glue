@@ -142,9 +142,7 @@ private:
 class GlueMetadataCacheState : public ClientContextState {
 public:
 	static constexpr const char *NAME = "glue_metadata_cache";
-	static shared_ptr<GlueMetadataCacheState> Get(ClientContext &context) {
-		return context.registered_state->GetOrCreate<GlueMetadataCacheState>(NAME);
-	}
+	static shared_ptr<GlueMetadataCacheState> Get(ClientContext &context);
 
 	shared_ptr<GlueTransactionCache> GetCache(const string &catalog_name, idx_t attach_oid) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
