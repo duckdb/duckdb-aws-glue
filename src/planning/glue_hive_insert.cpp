@@ -35,8 +35,8 @@
 #include "core/glue_log_types.hpp"
 #include "core/glue_types.hpp"
 #include "core/hive_location.hpp"
+#include "execution/glue_written_files.hpp"
 #include "execution/hive_copy.hpp"
-#include "functions/glue_written_files.hpp"
 
 namespace duckdb {
 
@@ -762,8 +762,10 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 }
 
 void GlueHiveInsert::RecordWrittenFiles(ClientContext &context, const vector<string> &files) const {
-	GlueWrittenFilesState::Get(context)->AddFiles(files);
 	auto table = table_info.schema_name + "." + table_info.name;
+	if (!files.empty() && GlueWrittenFiles::IsEnabled(context)) {
+		GlueWrittenFiles::Append(context, table, files);
+	}
 	for (auto &file : files) {
 		DUCKDB_LOG(context, GlueDataFileWrittenLogType, table, file);
 	}

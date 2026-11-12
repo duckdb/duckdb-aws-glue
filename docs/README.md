@@ -271,14 +271,17 @@ their codec themselves.
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
 
-`SELECT file_path FROM glue_written_files()` lists the data files the connection's last `INSERT` or `CREATE TABLE ... AS`
-into a Hive table wrote, one row per file, for example to give a manifest of what a query wrote. The next `INSERT` or
-`CREATE TABLE ... AS` replaces the list when its statement ends. If that statement fails while running, the list is empty.
-Other statements leave it in place, and every connection has its own.
+With `SET glue_store_written_files = true`, every `INSERT` or `CREATE TABLE ... AS` into a Hive table adds the data
+files it wrote to the temporary table `temp.main.glue_written_files`, one row per file with the `query_id` of the
+statement, the `table` (`database.table`) and the `file_path`, for example to give a manifest of what a query wrote. The
+table is created by the first write that stores its files. Its rows are added once the write's partitions are
+registered, in the write's transaction, so a write that fails adds none. Like any temporary table, it belongs to the
+connection.
 
 ```sql
+SET glue_store_written_files = true;
 INSERT INTO lake.db.events SELECT ...;
-SELECT file_path FROM glue_written_files();
+SELECT file_path FROM temp.main.glue_written_files WHERE query_id = (SELECT max(query_id) FROM temp.main.glue_written_files);
 -- s3://bucket/db/events/day=2026-11-09/<write id>_<file id>.snappy.parquet
 -- s3://bucket/db/events/day=2026-11-10/<write id>_<file id>.snappy.parquet
 ```
@@ -554,7 +557,7 @@ SELECT "table", scan_id, event, partitions, partitions_read, listings, files, du
 FROM duckdb_logs_parsed('GlueScan');
 ```
 
-The `GlueDataFileWritten` log type (`INFO`) records the same files `glue_written_files()` lists, one entry per data file
+The `GlueDataFileWritten` log type (`INFO`) records the same files `glue_store_written_files` stores, one entry per data file
 with the `table` and the `file_path`, logged once the write is complete.
 
 ```sql
