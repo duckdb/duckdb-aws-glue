@@ -528,6 +528,9 @@ descriptor with its columns, which the scan checks the partitions it reads again
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
 
+Table metadata is fetched eagerly in an async manner during planning phase to reduce planning time. This feature
+can be turned off using `SET glue_prefetch_scan_metadata = false`.
+
 ## Inspecting tables
 
 Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,

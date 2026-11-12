@@ -23,6 +23,7 @@
 #include <mutex>
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction_manager.hpp"
+#include "planning/hive_metadata_prefetch.hpp"
 
 namespace duckdb {
 
@@ -145,6 +146,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES),
 	                          SetHiveFooterStatisticsMaxFiles);
 
+	config.AddExtensionOption("glue_prefetch_scan_metadata",
+	                          "Before a statement is optimized, fetch the partitions and the cardinality sample of "
+	                          "every Glue table it scans at the same time. False fetches them one table at a time, "
+	                          "when the optimizer first needs each. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
 	                          "twice `threads` files. False reads one thread per file, which a file that holds a line "
@@ -182,6 +189,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	if (!instance.ExtensionIsLoaded("parquet")) {
 		throw MissingExtensionException("The glue extension requires the parquet extension to be loaded!");
 	}
+	OptimizerExtension::Register(config, HiveMetadataPrefetch());
 	// ATTACH '<catalog id>' (TYPE GLUE)
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
 

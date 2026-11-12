@@ -138,6 +138,9 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
 	// per table, so the Glue calls for different tables do not wait on each other
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (entry->error.HasError()) {
+		entry->error.Throw();
+	}
 	if (!entry->partitions) {
 		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
 		auto load = [&]() {
@@ -145,7 +148,16 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
 		};
 		auto cache = GlueTransactionCache::Of(context, catalog);
-		entry->partitions = cache ? cache->GetPartitions(info.database_name, info.table_name, load) : load();
+		try {
+			entry->partitions = cache ? cache->GetPartitions(info.database_name, info.table_name, load) : load();
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			// an interrupted fetch is not Glue's answer
+			if (error.Type() != ExceptionType::INTERRUPT) {
+				entry->error = std::move(error);
+			}
+			throw;
+		}
 	}
 	return entry->partitions;
 }

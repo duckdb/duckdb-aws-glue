@@ -1,0 +1,70 @@
+# name: benchmark/optimizer/join_five_glue_tables.benchmark
+# description: join four partitioned Glue tables and an unpartitioned one in the local Glue (moto) + S3 (MinIO), S3 requests delayed by 20 ms
+# group: [optimizer]
+
+# Join ordering asks every scan for its cardinality, whose sample lists the table and reads one footer;
+# glue_prefetch_scan_metadata fetches these for the four partitioned tables at the same time instead of one after
+# another (dim is counted from its footers at bind). The load skips tables that already exist.
+
+name Join five Glue tables
+group optimizer
+
+require parquet
+
+require httpfs
+
+require glue
+
+cache glue_join_five_tables.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_join_five_tables;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_five_tables.a PARTITIONED BY (p) AS SELECT range AS k, range % 7 AS v, range % 20 AS p FROM range(20000);
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_five_tables.b PARTITIONED BY (p) AS SELECT range AS k, range % 7 AS v, range % 20 AS p FROM range(20000);
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_five_tables.c PARTITIONED BY (p) AS SELECT range AS k, range % 7 AS v, range % 20 AS p FROM range(20000);
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_five_tables.d PARTITIONED BY (p) AS SELECT range AS k, range % 7 AS v, range % 20 AS p FROM range(20000);
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_five_tables.dim AS SELECT range AS k, 'item ' || range AS name FROM range(20000);
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+
+run
+SET enable_external_file_cache=false;
+SET glue_enable_partition_key_statistics=false;
+SET debug_fs_delay_mean_ms=20;
+SELECT count(*), sum(a.v + b.v + c.v + d.v)
+FROM my_datalake.bench_join_five_tables.a a
+JOIN my_datalake.bench_join_five_tables.b b USING (k)
+JOIN my_datalake.bench_join_five_tables.c c USING (k)
+JOIN my_datalake.bench_join_five_tables.d d USING (k)
+JOIN my_datalake.bench_join_five_tables.dim i USING (k);
+
+result II
+20000	239988
