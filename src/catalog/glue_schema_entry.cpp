@@ -1113,9 +1113,6 @@ const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
 		database_info.description = std::move(database.description);
 		database_info.location_uri = std::move(database.location_uri);
 		database_info.parameters = std::move(database.parameters);
-		database_info.create_time_ms = database.create_time_ms;
-		database_info.catalog_id = std::move(database.catalog_id);
-		database_info.is_resource_link = database.is_resource_link;
 		schema_info_loaded = true;
 	}
 	return database_info;
@@ -1129,9 +1126,6 @@ bool GlueSchemaEntry::MergeSchemaInfo(const GlueDatabaseInfo &database) {
 	database_info.description = database.description;
 	database_info.location_uri = database.location_uri;
 	database_info.parameters = database.parameters;
-	database_info.create_time_ms = database.create_time_ms;
-	database_info.catalog_id = database.catalog_id;
-	database_info.is_resource_link = database.is_resource_link;
 	schema_info_loaded = true;
 	return true;
 }

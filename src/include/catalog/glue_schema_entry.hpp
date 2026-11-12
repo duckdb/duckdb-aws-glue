@@ -67,7 +67,7 @@ public:
 	void Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
 	//! Serves a single-name equality on the entry name with one table lookup instead of listing every table
 	void Scan(ClientContext &context, SchemaScanInfo &info) override;
-	//! Suggests from the tables this attach has already seen; a missing-name error must not list Glue
+	//! Suggests from the tables this attach has already seen
 	SimilarCatalogEntry GetSimilarEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 	optional_ptr<CatalogEntry> LookupEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
@@ -95,7 +95,7 @@ public:
 	//! The database definition, asked from Glue first if the entry was created from the name alone
 	const GlueDatabaseInfo &GetSchemaInfo(ClientContext &context);
 	//! Take the definition of a database known by name alone from a listing. Once loaded, tells whether the listed
-	//! definition is the loaded one: false means another client replaced or altered the database
+	//! definition is the loaded one: false means another client dropped and recreated the database
 	bool MergeSchemaInfo(const GlueDatabaseInfo &database);
 
 private:

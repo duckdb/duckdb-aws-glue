@@ -38,9 +38,6 @@ GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database) {
 	result.description = ToStdString(database.GetDescription());
 	result.location_uri = ToStdString(database.GetLocationUri());
 	result.parameters = ToStdMap(database.GetParameters());
-	if (database.CreateTimeHasBeenSet()) {
-		result.create_time_ms = database.GetCreateTime().Millis();
-	}
 	return result;
 }
 

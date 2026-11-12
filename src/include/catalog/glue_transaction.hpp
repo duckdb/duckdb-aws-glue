@@ -76,8 +76,8 @@ public:
 	idx_t Id() const {
 		return id;
 	}
-	//! Whether the entry set with this id (GlueTableSet / GlueSchemaSet) was listed from Glue under this cache. A
-	//! listing holds until the cache is cleared, like the metadata it resolved.
+	//! Whether the entry set with this id (GlueTableSet / GlueSchemaSet) was listed from Glue under this cache; the
+	//! listing holds until the cache is cleared
 	bool HasListed(idx_t set_id) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		return listed_sets.count(set_id) > 0;

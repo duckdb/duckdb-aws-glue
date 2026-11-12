@@ -25,8 +25,7 @@ public:
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup);
 	//! The entries of the given type (TABLE_ENTRY or VIEW_ENTRY), listed from Glue once per metadata cache
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
-	//! The entries already in the set, without listing Glue. Runs without a catalog transaction, so the callback
-	//! must not keep a reference to an entry past the call.
+	//! The entries already in the set, without listing Glue
 	void ScanLoaded(const std::function<void(CatalogEntry &)> &callback);
 	//! Insert a (new) entry into the set, replacing any existing entry with the same name
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
@@ -39,10 +38,10 @@ public:
 
 private:
 	//! Lists the database from Glue unless the transaction's cache has this set listed, and merges the listing into
-	//! entries. Holds listing_lock throughout and entry_lock only for the merge, not for the Glue call.
+	//! entries. Called with entry_lock held.
 	void LoadEntries(ClientContext &context, GlueTransactionCache &cache);
 	//! One first-page GetTables warming the metadata cache, instead of a GetTable per table. Only warms the
-	//! cache: entries stay per referenced table and Scan still lists, so neither outlives the page's truth.
+	//! cache: entries stay per referenced table and Scan still enumerates, so neither outlives the page's truth.
 	void BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache);
 	static bool BatchTableLookups(ClientContext &context);
 	static void SetTableTypeTag(GlueTable &entry);
@@ -53,8 +52,6 @@ private:
 private:
 	GlueSchemaEntry &schema;
 	GlueCatalog &catalog;
-	//! Serializes LoadEntries; taken before entry_lock, never by a lookup
-	mutex listing_lock;
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
 	//! Identifies this set among the sets a GlueTransactionCache has listed
@@ -63,8 +60,8 @@ private:
 	idx_t direct_lookups = 0;
 	//! The GlueTransactionCache::Id() the last successful bulk fetch warmed (0 = none yet)
 	idx_t bulk_loaded_cache_id = 0;
-	//! GetTables was refused for lack of permission: no more bulk fetches or listings
-	bool get_tables_forbidden = false;
+	//! GetTables was refused for lack of permission: no more bulk fetches
+	bool batch_forbidden = false;
 };
 
 } // namespace duckdb

@@ -165,7 +165,7 @@ SELECT count(*) FROM duckdb_tables() WHERE database_name = 'listing_dl' AND sche
 ----
 0
 
-# a table looked up by name stays listed when the listing is refused, and the refusal is not retried
+# a table looked up by name stays listed when the listing is refused; the refusal is asked again by the next statement
 query I con4
 SELECT id FROM listing_dl.fault_access_denied_btl.t1;
 ----
@@ -182,7 +182,7 @@ t1
 query I con4
 SELECT glue_calls('GetTables');
 ----
-0
+1
 
 loop i 1 6
 
