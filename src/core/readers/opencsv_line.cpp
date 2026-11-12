@@ -62,6 +62,16 @@ void ParseOpenCSVLine(const char *line, idx_t length, const OpenCSVDialect &dial
 	auto special = [&](char c) {
 		return c == dialect.escape || c == dialect.quote || c == separator_start;
 	};
+	// a separator of one byte, the usual case, is compared as a byte
+	auto single_byte = separator_size == 1;
+	auto separator_at = [&](idx_t at) {
+		return single_byte ? at < length && line[at] == separator_start
+		                   : IsSeparatorAt(line, length, at, dialect.separator);
+	};
+	auto separator_before = [&](idx_t at) {
+		return single_byte ? at >= 1 && line[at - 1] == separator_start
+		                   : IsSeparatorBefore(line, at, dialect.separator);
+	};
 	idx_t position = 0;
 	while (position < length) {
 		auto c = line[position];
@@ -90,8 +100,7 @@ void ParseOpenCSVLine(const char *line, idx_t length, const OpenCSVDialect &dial
 				position++;
 			} else {
 				// a quote in the middle of a field, not next to a separator, is a literal character
-				if (char_position > 2 && !IsSeparatorBefore(line, position, dialect.separator) && has_next &&
-				    !IsSeparatorAt(line, length, position + 1, dialect.separator)) {
+				if (char_position > 2 && !separator_before(position) && has_next && !separator_at(position + 1)) {
 					if (!field_empty && field_blank) {
 						field.clear();
 						field_empty = true;
@@ -102,7 +111,7 @@ void ParseOpenCSVLine(const char *line, idx_t length, const OpenCSVDialect &dial
 				in_quotes = !in_quotes;
 			}
 			in_field = !in_field;
-		} else if (!in_quotes && IsSeparatorAt(line, length, position, dialect.separator)) {
+		} else if (!in_quotes && separator_at(position)) {
 			position += separator_size - 1;
 			if (keep && !emit(field_index, field)) {
 				return;
