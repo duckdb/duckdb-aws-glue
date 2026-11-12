@@ -30,8 +30,19 @@ unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
 		// So duckdb_tables().comment shows what Glue stores as Table.Description
 		info.comment = Value(table.description);
 	}
+	auto is_iceberg = table.GetFormat().format == GlueFormat::ICEBERG;
 	auto add_column = [&](const GlueColumn &column) {
-		ColumnDefinition definition(Identifier(column.name), GlueTypes::ToLogicalType(column.type));
+		LogicalType type;
+		try {
+			type = GlueTypes::ToLogicalType(column.type);
+		} catch (std::exception &) {
+			if (!is_iceberg) {
+				throw;
+			}
+			// only listed: scans and DESCRIBE of an Iceberg table use the schema of the Iceberg catalog
+			type = LogicalType::UNKNOWN;
+		}
+		ColumnDefinition definition(Identifier(column.name), std::move(type));
 		if (!column.comment.empty()) {
 			definition.SetComment(Value(column.comment));
 		}
@@ -219,6 +230,12 @@ optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> en
 void GlueTableSet::RemoveEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
 	RetireEntry(name);
+}
+
+void GlueTableSet::InvalidateEntry(const string &name) {
+	lock_guard<mutex> guard(entry_lock);
+	RetireEntry(name);
+	is_loaded = false;
 }
 
 void GlueTableSet::RetireEntry(const string &name) {

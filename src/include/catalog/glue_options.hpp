@@ -28,6 +28,9 @@ struct GlueAttachOptions {
 	Identifier default_schema;
 	//! Run the ATTACH-time GetDatabases reachability probe (default true); false defers the first Glue call
 	bool verify_connection = true;
+	//! Also attach a hidden iceberg catalog over Glue's Iceberg REST endpoint, which serves the Iceberg tables
+	//! (default false: Iceberg tables are listed, and can be dropped, but not read, written or created)
+	bool attach_with_iceberg = false;
 };
 
 } // namespace duckdb

@@ -18,6 +18,8 @@ class GlueClient;
 } // namespace Aws
 
 namespace duckdb {
+class AttachedDatabase;
+class BoundAtClause;
 class GlueTable;
 
 //! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
@@ -64,6 +66,10 @@ public:
 		return false;
 	}
 	optional<Identifier> GetDefaultSchema() const override;
+	//! Only Iceberg tables can be read at a snapshot, see GlueSchemaEntry::LookupEntry
+	bool SupportsTimeTravel() const override {
+		return true;
+	}
 	//! Allow CREATE TABLE ... PARTITIONED BY (...) WITH (location = '...', <property> = '...'); the options are
 	//! validated in GlueSchemaEntry::CreateTable
 	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
@@ -100,6 +106,20 @@ public:
 	unique_ptr<LogicalOperator> BindCreateIndex(Binder &binder, CreateStatement &stmt, TableCatalogEntry &table,
 	                                            unique_ptr<LogicalOperator> plan) override;
 
+	//! The hidden Iceberg catalog over Glue's Iceberg REST endpoint, attached on ATTACH (and again when that failed
+	//! or was rolled back). Throws when the catalog was attached without ATTACH_WITH_ICEBERG.
+	Catalog &GetIcebergCatalog(ClientContext &context);
+	bool IcebergEnabled() const {
+		return options.attach_with_iceberg;
+	}
+	//! The error for using Iceberg table 'table_name' of a catalog attached without ATTACH_WITH_ICEBERG
+	void ThrowIfIcebergDisabled(const string &table_name) const;
+	//! Attach the Iceberg catalog, logging rather than throwing when that fails
+	void AttachIcebergCatalog(ClientContext &context);
+	SchemaCatalogEntry &GetIcebergSchema(ClientContext &context, const string &database_name);
+	TableCatalogEntry &GetIcebergTable(ClientContext &context, const string &database_name, const string &table_name,
+	                                   optional_ptr<BoundAtClause> at_clause = nullptr);
+
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
 	bool InMemory() override;
 	string GetDBPath() override;
@@ -120,6 +140,8 @@ private:
 	//! Throw unless Glue's current definition of 'table' (returned in 'table_info') is a Hive table DuckDB writes
 	static GlueTable &GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
 	                                     GlueTableInfo &table_info);
+	PhysicalOperator &PlanIcebergCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
+	                                           LogicalCreateTable &op, PhysicalOperator &plan);
 	//! Apply one CREATE / ALTER SCHEMA option: 'comment' is the Description, 'location' the LocationUri and any other
 	//! key a database parameter
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);
@@ -141,6 +163,9 @@ private:
 	mutex reported_id_lock;
 	//! empty until Glue reports one: not cached as none, the catalog may get a database of its own later
 	string reported_catalog_id;
+	mutex iceberg_lock;
+	string iceberg_database_name;
+	shared_ptr<AttachedDatabase> iceberg_database;
 };
 
 } // namespace duckdb

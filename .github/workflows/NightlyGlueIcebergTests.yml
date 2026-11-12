@@ -1,0 +1,166 @@
+# Runs duckdb-iceberg's catalog_agnostic sqllogictests (from the iceberg sources pinned in extension_config.cmake)
+# against the Iceberg tables of a live AWS Glue Data Catalog attached with TYPE GLUE (test/configs/cloud_glue_iceberg.json),
+# nightly on main of duckdb/duckdb-aws-glue, or on the selected branch when a maintainer starts it from the Actions tab.
+#
+# It uses the 'cloud-glue' environment of .github/workflows/CloudGlueTests.yml (GLUE_CATALOG_ID, GLUE_REGION,
+# AWS_ROLE_ARN or the AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY secrets) and its bucket
+# duckdb-glue-ci-<account id>-<region>, writing under duckdb-aws-glue-cloud-tests/iceberg-ci-<run id>-<attempt>/,
+# which it deletes at the end. The tests create and drop Iceberg tables and Glue databases in the account, including in
+# the Glue database 'default': use an account that holds nothing else.
+
+name: Nightly Glue Iceberg tests
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+# shares the Glue database 'default' of the account with the Cloud Glue tests: one run at a time
+concurrency:
+  group: cloud-glue-tests
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  glue-iceberg-tests:
+    if: github.event_name != 'schedule' || github.repository == 'duckdb/duckdb-aws-glue'
+    runs-on: ubuntu-latest
+    environment: cloud-glue
+    timeout-minutes: 240
+
+    permissions:
+      contents: read
+      # AWS_ROLE_ARN: OIDC token for configure-aws-credentials
+      id-token: write
+
+    env:
+      GEN: ninja
+      GH_TOKEN: ${{ github.token }}
+      # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: ${{ vars.GLUE_REGION }}
+
+    steps:
+      - name: Check that a maintainer started the run
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          role=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.triggering_actor }}/permission" --jq .role_name)
+          echo "${{ github.triggering_actor }} has role '$role'"
+          if [ "$role" != "admin" ] && [ "$role" != "maintain" ]; then
+            echo "::error::Only maintainers can run the Glue Iceberg tests"
+            exit 1
+          fi
+
+      - name: Check the configuration
+        run: |
+          missing=0
+          for name in GLUE_CATALOG_ID GLUE_REGION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable $name is not set in the 'cloud-glue' environment"
+              missing=1
+            fi
+          done
+          exit $missing
+        env:
+          GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+          GLUE_REGION: ${{ vars.GLUE_REGION }}
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      # the build and its vcpkg dependencies otherwise fill the runner's disk
+      - name: Free disk space
+        uses: ./duckdb/.github/actions/cleanup_runner
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq ninja-build jq
+
+      - name: Setup Ccache
+        uses: ./duckdb/.github/actions/ccache-action
+        with:
+          save: false
+
+      - name: Build
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        with:
+          build-type: release
+          build: python3 duckdb/scripts/ci/retry.py -- make release
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
+
+      # the tests and their includes come from the iceberg sources the build fetched
+      - name: Iceberg sources
+        run: |
+          dir=build/release/_deps/iceberg_extension_fc-src
+          if [ ! -d "$dir/test/sql/local/catalog_test_config_setup/catalog_agnostic" ]; then
+            echo "::error::$dir has no catalog_agnostic tests: was iceberg fetched to another directory?"
+            exit 1
+          fi
+          git -C "$dir" log -1 --format='Testing duckdb-iceberg %H'
+
+      - name: AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          aws-region: ${{ vars.GLUE_REGION }}
+
+      - name: Test bucket
+        id: bucket
+        run: |
+          bucket="duckdb-glue-ci-$GLUE_CATALOG_ID-$GLUE_REGION"
+          if ! aws s3api head-bucket --bucket "$bucket" --expected-bucket-owner "$GLUE_CATALOG_ID" 2>/dev/null; then
+            if [ "$GLUE_REGION" = "us-east-1" ]; then
+              aws s3api create-bucket --bucket "$bucket"
+            else
+              aws s3api create-bucket --bucket "$bucket" --create-bucket-configuration "LocationConstraint=$GLUE_REGION"
+            fi
+          fi
+          aws s3api put-bucket-lifecycle-configuration --bucket "$bucket" --expected-bucket-owner "$GLUE_CATALOG_ID" \
+            --lifecycle-configuration '{"Rules": [{"ID": "expire-ci-data", "Status": "Enabled", "Filter": {"Prefix": "duckdb-aws-glue-cloud-tests/"},
+              "Expiration": {"Days": 2}, "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 1}}]}'
+          echo "location=s3://$bucket/duckdb-aws-glue-cloud-tests/iceberg-ci-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+          echo "runs_prefix=s3://$bucket/duckdb-aws-glue-cloud-tests/iceberg-ci-" >> "$GITHUB_OUTPUT"
+        env:
+          GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+          GLUE_REGION: ${{ vars.GLUE_REGION }}
+
+      # Iceberg tables an earlier run did not drop: their metadata files expired with the bucket's lifecycle rule or the
+      # run's cleanup, and DROP TABLE IF EXISTS of such a table in a test fails
+      - name: Delete Iceberg tables of earlier runs
+        run: bash scripts/drop_glue_iceberg_tables.sh "${{ steps.bucket.outputs.runs_prefix }}"
+
+      # cloud_glue_iceberg.json with the catalog, region and S3 prefix of the run
+      - name: Test config
+        run: |
+          jq --arg catalog "$GLUE_CATALOG_ID" --arg region "$GLUE_REGION" --arg location "$DEFAULT_S3_LOCATION" '
+            .test_env |= map(
+                if .env_name == "GLUE_CATALOG_ID" then .env_value = $catalog
+                elif .env_name == "GLUE_REGION" then .env_value = $region
+                elif .env_name == "DEFAULT_S3_LOCATION" then .env_value = $location
+                else . end)
+          ' test/configs/cloud_glue_iceberg.json > "$RUNNER_TEMP/cloud_glue_iceberg_ci.json"
+          jq '{on_init, test_env}' "$RUNNER_TEMP/cloud_glue_iceberg_ci.json"
+        env:
+          GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+          GLUE_REGION: ${{ vars.GLUE_REGION }}
+          DEFAULT_S3_LOCATION: ${{ steps.bucket.outputs.location }}
+
+      - name: Run tests
+        run: make test-cloud-iceberg TEST_BUILD=release CLOUD_ICEBERG_TEST_CONFIG="$RUNNER_TEMP/cloud_glue_iceberg_ci.json"
+
+      # before the S3 data, which the tables' metadata files are part of; the trailing slash keeps the prefix from
+      # matching another run's, e.g. iceberg-ci-123-1 and iceberg-ci-123-10
+      - name: Delete the run's Iceberg tables
+        if: always() && steps.bucket.outputs.location != ''
+        run: bash scripts/drop_glue_iceberg_tables.sh "${{ steps.bucket.outputs.location }}/"
+
+      - name: Delete the run's S3 data
+        if: always() && steps.bucket.outputs.location != ''
+        run: aws s3 rm --recursive --only-show-errors "${{ steps.bucket.outputs.location }}/"

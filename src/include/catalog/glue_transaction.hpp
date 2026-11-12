@@ -171,6 +171,9 @@ public:
 	void Rollback();
 
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
+	//! An Iceberg table this transaction looked up: the Iceberg catalog binds its DDL, so the cached Glue entry of
+	//! the table is refreshed once the transaction ends
+	void AddIcebergTable(const string &database_name, const string &table_name);
 
 	//! A Hive write starts: it is undone when the transaction ends before CompleteHiveWrite. Writes are refused in
 	//! explicit transactions, so a transaction holds at most one
@@ -187,10 +190,12 @@ public:
 	shared_ptr<GlueTransactionCache> cache;
 
 private:
+	void InvalidateIcebergTables();
 	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone
 	void UndoHiveWrite();
 
 	GlueTransactionState transaction_state;
+	vector<pair<string, string>> iceberg_tables;
 	annotated_mutex hive_write_lock;
 	unique_ptr<GlueHiveWrite> hive_write DUCKDB_GUARDED_BY(hive_write_lock);
 };

@@ -1,0 +1,335 @@
+# name: test/sql/combined_table_types/views.test
+# description: Glue views over Hive and Iceberg tables
+# group: [combined_table_types]
+
+require httpfs
+
+require glue
+
+require iceberg
+
+require-env GLUE_CATALOG_ID
+
+# Glue's Iceberg REST endpoint, which moto does not serve
+require-env ICEBERG_SUPPORTED
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ATTACH_WITH_ICEBERG true,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_joined;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_direct;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_union;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_cte;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_cte_shadow;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_recursive;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_window;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.mix_view_iceberg;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_view_hive;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mix_view_ice;
+
+statement ok
+CREATE TABLE my_datalake.default.mix_view_hive (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.mix_view_hive VALUES (1, 'one'), (2, 'two'), (3, 'three');
+
+statement ok
+CREATE TABLE my_datalake.default.mix_view_ice (id INTEGER, score DOUBLE) WITH (table_type = 'iceberg');
+
+statement ok
+INSERT INTO my_datalake.default.mix_view_ice VALUES (1, 0.5), (3, 1.5);
+
+statement ok
+CREATE VIEW my_datalake.default.mix_view_iceberg AS SELECT id, score * 2 AS double_score FROM my_datalake.default.mix_view_ice;
+
+statement ok
+CREATE VIEW my_datalake.default.mix_view_joined AS
+SELECT h.name, i.double_score FROM my_datalake.default.mix_view_hive h
+JOIN my_datalake.default.mix_view_iceberg i USING (id);
+
+query II
+SELECT * FROM my_datalake.default.mix_view_joined ORDER BY name;
+----
+one	1.0
+three	3.0
+
+# one view over both tables directly, fully qualified
+statement ok
+CREATE VIEW my_datalake.default.mix_view_direct AS
+SELECT h.id, h.name, i.score FROM my_datalake.default.mix_view_hive h
+JOIN my_datalake.default.mix_view_ice i USING (id);
+
+query IIR
+SELECT * FROM my_datalake.default.mix_view_direct ORDER BY id;
+----
+1	one	0.5
+3	three	1.5
+
+# and schema-qualified, which the view stores as it is
+statement ok
+CREATE VIEW my_datalake.default.mix_view_union AS
+SELECT id, 'hive' AS source FROM "default".mix_view_hive
+UNION ALL
+SELECT id, 'iceberg' AS source FROM "default".mix_view_ice;
+
+query II
+SELECT source, count(*) FROM my_datalake.default.mix_view_union GROUP BY source ORDER BY source;
+----
+hive	3
+iceberg	2
+
+# CTEs over both tables; the bare names in the body are CTEs, not tables of the catalog
+statement ok
+CREATE VIEW my_datalake.default.mix_view_cte AS
+WITH ice AS (SELECT id, score FROM my_datalake.default.mix_view_ice),
+     hive AS (SELECT id, name FROM my_datalake.default.mix_view_hive),
+     joined AS (SELECT hive.name, ice.score FROM hive LEFT JOIN ice USING (id))
+SELECT name, coalesce(score, 0) AS score, score IS NOT NULL AS in_iceberg FROM joined;
+
+query TRT
+SELECT * FROM my_datalake.default.mix_view_cte ORDER BY name;
+----
+one	0.5	true
+three	1.5	true
+two	0.0	false
+
+# a CTE named like the Iceberg table it reads
+statement ok
+CREATE VIEW my_datalake.default.mix_view_cte_shadow AS
+WITH mix_view_ice AS (SELECT id, score FROM my_datalake.default.mix_view_ice WHERE score > 1)
+SELECT h.name, s.score FROM my_datalake.default.mix_view_hive h JOIN mix_view_ice s USING (id);
+
+query TR
+SELECT * FROM my_datalake.default.mix_view_cte_shadow ORDER BY name;
+----
+three	1.5
+
+# a recursive CTE whose bounds come from both tables
+statement ok
+CREATE VIEW my_datalake.default.mix_view_recursive AS
+WITH RECURSIVE ids(n) AS (
+    SELECT min(id) FROM my_datalake.default.mix_view_ice
+    UNION ALL
+    SELECT n + 1 FROM ids WHERE n < (SELECT max(id) FROM my_datalake.default.mix_view_hive)
+)
+SELECT n, name FROM ids LEFT JOIN my_datalake.default.mix_view_hive h ON h.id = ids.n;
+
+query IT
+SELECT * FROM my_datalake.default.mix_view_recursive ORDER BY n;
+----
+1	one
+2	two
+3	three
+
+# a subquery on the Iceberg table filtering the Hive table, with a window function
+statement ok
+CREATE VIEW my_datalake.default.mix_view_window AS
+SELECT id, name, row_number() OVER (ORDER BY id DESC) AS rn
+FROM my_datalake.default.mix_view_hive
+WHERE id IN (SELECT id FROM my_datalake.default.mix_view_ice);
+
+query ITI
+SELECT * FROM my_datalake.default.mix_view_window ORDER BY id;
+----
+1	one	2
+3	three	1
+
+# the views read the current state of the Iceberg table
+statement ok
+INSERT INTO my_datalake.default.mix_view_ice VALUES (2, 10.0);
+
+query II
+SELECT * FROM my_datalake.default.mix_view_joined ORDER BY name;
+----
+one	1.0
+three	3.0
+two	20.0
+
+query IIR
+SELECT * FROM my_datalake.default.mix_view_direct ORDER BY id;
+----
+1	one	0.5
+2	two	10.0
+3	three	1.5
+
+query II
+SELECT source, count(*) FROM my_datalake.default.mix_view_union GROUP BY source ORDER BY source;
+----
+hive	3
+iceberg	3
+
+query TRT
+SELECT * FROM my_datalake.default.mix_view_cte ORDER BY name;
+----
+one	0.5	true
+three	1.5	true
+two	10.0	true
+
+query TR
+SELECT * FROM my_datalake.default.mix_view_cte_shadow ORDER BY name;
+----
+three	1.5
+two	10.0
+
+query IT
+SELECT * FROM my_datalake.default.mix_view_recursive ORDER BY n;
+----
+1	one
+2	two
+3	three
+
+query ITI
+SELECT * FROM my_datalake.default.mix_view_window ORDER BY id;
+----
+1	one	3
+2	two	2
+3	three	1
+
+# a fresh connection to the catalog reads the stored view SQL
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ATTACH_WITH_ICEBERG true,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT count(*) FROM my_datalake.default.mix_view_joined;
+----
+3
+
+query IIR
+SELECT * FROM my_datalake.default.mix_view_direct ORDER BY id;
+----
+1	one	0.5
+2	two	10.0
+3	three	1.5
+
+query I
+SELECT count(*) FROM my_datalake.default.mix_view_union;
+----
+6
+
+query TRT
+SELECT * FROM my_datalake.default.mix_view_cte ORDER BY name;
+----
+one	0.5	true
+three	1.5	true
+two	10.0	true
+
+query TR
+SELECT * FROM my_datalake.default.mix_view_cte_shadow ORDER BY name;
+----
+three	1.5
+two	10.0
+
+query IT
+SELECT * FROM my_datalake.default.mix_view_recursive ORDER BY n;
+----
+1	one
+2	two
+3	three
+
+query ITI
+SELECT * FROM my_datalake.default.mix_view_window ORDER BY id;
+----
+1	one	3
+2	two	2
+3	three	1
+
+# a view over a dropped Iceberg table fails when it is used
+statement ok
+DROP TABLE my_datalake.default.mix_view_ice;
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_joined;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_direct;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_union;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_cte;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_cte_shadow;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_recursive;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement error
+SELECT * FROM my_datalake.default.mix_view_window;
+----
+<REGEX>:.*mix_view_ice.*
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_joined;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_direct;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_union;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_cte;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_cte_shadow;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_recursive;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_window;
+
+statement ok
+DROP VIEW my_datalake.default.mix_view_iceberg;
+
+statement ok
+DROP TABLE my_datalake.default.mix_view_hive;
