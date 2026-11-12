@@ -1684,8 +1684,7 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 //===--------------------------------------------------------------------===//
 // The scan as a standard reader call (functions/hive_reader_call.hpp)
 //===--------------------------------------------------------------------===//
-//! The scan info of a Hive scan this build of the extension bound: its multi-file reader is this build's
-static optional_ptr<const HiveScanInfo> BoundHiveScanInfo(const LogicalGet &get) {
+optional_ptr<const HiveScanInfo> HiveScanInfo::TryGet(const LogicalGet &get) {
 	if (get.function.GetName() != "hive_scan" || !get.bind_data) {
 		return nullptr;
 	}
@@ -1747,7 +1746,7 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 }
 
 optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get) {
-	auto info = BoundHiveScanInfo(get);
+	auto info = HiveScanInfo::TryGet(get);
 	if (!info || (info->file_format == HiveFileFormat::PARQUET && HasBinaryColumn(*info))) {
 		return nullopt;
 	}
@@ -1779,7 +1778,7 @@ optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get) {
 
 optional<vector<unique_ptr<ParsedExpression>>> HiveScanGetFilePartitionValues(const LogicalGet &get,
                                                                               const string &path) {
-	auto info = BoundHiveScanInfo(get);
+	auto info = HiveScanInfo::TryGet(get);
 	if (!info || info->partition_keys.empty()) {
 		return nullopt;
 	}
@@ -1879,7 +1878,7 @@ static TableFunctionToSQLResult ReadTableByName(const LogicalGet &get, string re
 //! The scan as the reader calls that read its files, one per partition, UNION ALLed, each selecting every column of the
 //! scan in order (a partition key as the partition's value). Without files, a relation of the columns with no rows.
 static TableFunctionToSQLResult HiveScanToSQL(ClientContext &, const LogicalGet &get) {
-	auto info = BoundHiveScanInfo(get);
+	auto info = HiveScanInfo::TryGet(get);
 	if (!info) {
 		return {nullptr, "hive_scan"};
 	}

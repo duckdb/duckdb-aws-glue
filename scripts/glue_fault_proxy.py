@@ -16,7 +16,9 @@ forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
-amz-sdk-request header) and forwarded when the SDK retries it."""
+amz-sdk-request header) and forwarded when the SDK retries it. GetPartitions on a fault_partitions_denied* database
+fails with AccessDeniedException, and on a fault_slow_get_partitions* database answers one partition per page, each
+after SLOW_GET_PARTITIONS_SECONDS, so a statement can end while the partitions are fetched."""
 
 import argparse
 import http.client
@@ -40,6 +42,11 @@ THROTTLED_PREFIX = "fault_throttled"
 # BatchCreatePartition on a database with this prefix is forwarded after a delay
 SLOW_PARTITIONS_PREFIX = "fault_slow_partitions"
 SLOW_PARTITIONS_SECONDS = 4
+# GetPartitions on a database with this prefix fails with AccessDeniedException
+PARTITIONS_DENIED_PREFIX = "fault_partitions_denied"
+# GetPartitions on a database with this prefix answers a page of one partition after a delay
+SLOW_GET_PARTITIONS_PREFIX = "fault_slow_get_partitions"
+SLOW_GET_PARTITIONS_SECONDS = 0.5
 # BatchCreatePartition on a database with this prefix finds its table recreated by another client, and then fails
 RECREATED_PREFIX = "fault_recreated_during_write"
 # BatchCreatePartition on a database with this prefix races another client registering the partitions elsewhere
@@ -112,6 +119,24 @@ def is_slow_partitions(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(SLOW_PARTITIONS_PREFIX)
 
 
+def is_partitions_denied(target, database):
+    return target == "AWSGlue.GetPartitions" and database.startswith(PARTITIONS_DENIED_PREFIX)
+
+
+def is_slow_get_partitions(target, database):
+    return target == "AWSGlue.GetPartitions" and database.startswith(SLOW_GET_PARTITIONS_PREFIX)
+
+
+def one_partition_page(data, token):
+    """The partition at offset 'token' of moto's answer, with a NextToken while more follow."""
+    partitions = json.loads(data)["Partitions"]
+    offset = int(token or 0)
+    page = {"Partitions": partitions[offset:offset + 1]}
+    if offset + 1 < len(partitions):
+        page["NextToken"] = str(offset + 1)
+    return json.dumps(page).encode()
+
+
 def is_recreated_during_write(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(RECREATED_PREFIX)
 
@@ -159,11 +184,18 @@ class Handler(BaseHTTPRequestHandler):
             error = "AccessDeniedException"
         if not error and is_throttled(database, self.headers.get("amz-sdk-request")):
             error = "ThrottlingException"
+        if not error and is_partitions_denied(target, database):
+            error = "AccessDeniedException"
         if error:
             self.reply_error(error)
             return
         if is_slow_partitions(target, database):
             time.sleep(SLOW_PARTITIONS_SECONDS)
+        slow_pages = is_slow_get_partitions(target, database)
+        if slow_pages:
+            time.sleep(SLOW_GET_PARTITIONS_SECONDS)
+            token = request.pop("NextToken", None)
+            body = json.dumps(request).encode()
         if is_recreated_during_write(target, database):
             self.recreate_as_other_client(database, request["TableName"])
             self.reply_error("InternalServiceException")
@@ -189,6 +221,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if target == "AWSGlue.GetTables" and status == 200:
             data = without_denied_tables(data)
+        if slow_pages and status == 200:
+            data = one_partition_page(data, token)
         self.reply(status, headers, data)
 
     def forward(self, target, body):
