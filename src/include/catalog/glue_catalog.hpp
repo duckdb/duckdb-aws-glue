@@ -19,6 +19,7 @@ class GlueClient;
 
 namespace duckdb {
 class GlueTable;
+class GlueTableResolver;
 
 //! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
 enum class TableLookup : uint8_t {
@@ -117,9 +118,6 @@ public:
 	std::shared_ptr<Aws::Glue::GlueClient> glue_client;
 
 private:
-	//! Throw unless Glue's current definition of 'table' (returned in 'table_info') is a Hive table DuckDB writes
-	static GlueTable &GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
-	                                     GlueTableInfo &table_info);
 	//! Apply one CREATE / ALTER SCHEMA option: 'comment' is the Description, 'location' the LocationUri and any other
 	//! key a database parameter
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);
@@ -141,6 +139,7 @@ private:
 	mutex reported_id_lock;
 	//! empty until Glue reports one: not cached as none, the catalog may get a database of its own later
 	string reported_catalog_id;
+	unique_ptr<GlueTableResolver> table_resolver;
 };
 
 } // namespace duckdb

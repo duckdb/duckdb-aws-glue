@@ -23,6 +23,7 @@
 #include "catalog/glue_file_credentials.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_table_resolver.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/scan_filter_equality.hpp"
 #include "planning/glue_hive_insert.hpp"
@@ -30,7 +31,8 @@
 namespace duckdb {
 
 GlueCatalog::GlueCatalog(AttachedDatabase &db_p, AccessMode access_mode, GlueAttachOptions options_p)
-    : Catalog(db_p), access_mode(access_mode), options(std::move(options_p)), schemas(*this) {
+    : Catalog(db_p), access_mode(access_mode), options(std::move(options_p)), schemas(*this),
+      table_resolver(make_uniq<GlueTableResolver>(*this)) {
 }
 
 GlueCatalog::~GlueCatalog() {
@@ -151,6 +153,7 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 
 void GlueCatalog::OnDetach(ClientContext &context) {
 	GlueTransactionCache::OnDetach(context, *this);
+	table_resolver->OnDetach(context);
 }
 
 void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
@@ -340,6 +343,10 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
 		switch (TryLookupTableBeforeSchema(transaction, lookup_info, database_name, result)) {
 		case TableLookup::TABLE_FOUND:
+			if (result.entry->type == CatalogType::TABLE_ENTRY) {
+				result.entry = &table_resolver->Resolve(transaction.GetContext(), result.entry->Cast<GlueTable>());
+			}
+			return result;
 		case TableLookup::TABLE_NOT_FOUND:
 		case TableLookup::SCHEMA_NOT_FOUND:
 			// 'result' holds the table and its schema, the schema alone, or neither
@@ -352,6 +359,9 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 	if (schema) {
 		result.schema = &schema->Cast<SchemaCatalogEntry>();
 		result.entry = result.schema->LookupEntry(transaction, lookup_info);
+		if (result.entry && result.entry->type == CatalogType::TABLE_ENTRY) {
+			result.entry = &table_resolver->Resolve(transaction.GetContext(), result.entry->Cast<GlueTable>());
+		}
 	}
 	return result;
 }
@@ -443,66 +453,13 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context, const cha
 	}
 }
 
-GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
-                                           GlueTableInfo &table_info) {
-	auto &glue_table = table.Cast<GlueTable>();
-	table_info = glue_table.schema.Cast<GlueSchemaEntry>().DefinitionForWrite(context, glue_table);
-	auto format = table_info.GetFormat();
-	if (!format.IsHive()) {
-		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "
-		                              "written",
-		                              statement, table.name.GetIdentifierName(), format.Describe(table_info));
-	}
-	// an InputFormat of another engine over a Parquet or text SerDe is a layout DuckDB does not know
-	auto file_format = table_info.GetFileFormat();
-	if (!format.IsWritable(table_info, file_format)) {
-		throw NotImplementedException("%s into Glue table '%s' is not supported: its InputFormat '%s' is not one Hive "
-		                              "uses for %s tables, so DuckDB does not know how the files below the table "
-		                              "location are laid out",
-		                              statement, table.name.GetIdentifierName(), table_info.input_format,
-		                              HiveFileFormatToString(file_format));
-	}
-	// the partitions an INSERT registers are ignored by Athena, and the files may belong under a location template
-	if (table_info.IsPartitionProjected()) {
-		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses Athena partition "
-		                              "projection (projection.enabled), so the partitions it would register are "
-		                              "ignored by Athena. Set projection.enabled to false and register the partitions "
-		                              "to write it",
-		                              statement, table.name.GetIdentifierName());
-	}
-	// Hive and Spark bucket with different hash functions and file names; neither is implemented
-	if (table_info.IsBucketed()) {
-		throw NotImplementedException("%s into Glue table '%s' is not supported: the table is %s, and DuckDB does not "
-		                              "write a bucketed layout.",
-		                              statement, table.name.GetIdentifierName(), table_info.DescribeBucketing());
-	}
-	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
-	// keys DuckDB writes
-	if (table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
-		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses the OpenX JSON SerDe "
-		                              "'%s', DuckDB writes JSON tables only with the Hive JsonSerDe "
-		                              "(org.apache.hive.hcatalog.data.JsonSerDe)",
-		                              statement, table.name.GetIdentifierName(), table_info.serde_library);
-	}
-	return glue_table;
-}
-
 //===--------------------------------------------------------------------===//
 // Planning
 //===--------------------------------------------------------------------===//
 PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                           optional_ptr<PhysicalOperator> plan) {
 	ThrowIfInExplicitTransaction(context);
-	GlueTableInfo table_info;
-	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
-	// an INSERT writes by path, without the credentials the table's scans read with
-	// TODO: support INSERT into a table with credentials, by writing its files with them
-	if (!GlueFileCredentialsCallback::Get(context, glue_table).empty()) {
-		throw NotImplementedException("INSERT into Glue table '%s', which is read with file credentials, is not "
-		                              "supported",
-		                              op.table.name.GetIdentifierName());
-	}
-	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, table_info, plan);
+	return op.table.Cast<GlueTable>().PlanInsert(context, planner, op, plan);
 }
 
 PhysicalOperator &GlueCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,

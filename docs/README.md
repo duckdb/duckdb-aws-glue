@@ -1,9 +1,6 @@
 # DuckDB Glue extension
 
-**Experimental** extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
-SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Tables of other
-formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or
-written.
+**Experimental** extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Iceberg tables can be read through the Iceberg extension using the same Glue catalog names. Iceberg writes and reads of other table formats such as Delta are not supported.
 
 Use DDL/DML statements in this extension in production at your own risk. There is no guarantee that all incompatibilities between DuckDB and Trino/Spark engines writing to hive tables in glue have been discovered.
 
@@ -27,10 +24,15 @@ Attach options:
 
 ## Reading
 
-A table's format is read from its parameters (`table_type`, `spark.sql.sources.provider`, `metadata_location`) and
-otherwise from its InputFormat: Hudi tables (`HoodieParquetInputFormat`, ...) and symlink manifest tables
-(`SymlinkTextInputFormat`, e.g. a Delta `_symlink_format_manifest`) register a Parquet or text SerDe, so only the
-InputFormat tells them apart from a Hive table. They are listed but not read or written, like Iceberg and Delta.
+A table's format is read from its parameters (`table_type`, `spark.sql.sources.provider`, `metadata_location`) and otherwise from its InputFormat. Hudi tables (`HoodieParquetInputFormat`, ...) and symlink manifest tables (`SymlinkTextInputFormat`, e.g. a Delta `_symlink_format_manifest`) register a Parquet or text SerDe, so only the InputFormat tells them apart from a Hive table. They are listed but not read or written.
+
+Hive and Iceberg tables use their normal Glue names in direct queries and views. Iceberg queries use the schema reported by the Iceberg extension, which can differ from the columns registered in Glue.
+
+The Iceberg extension must be available through DuckDB's normal extension loading mechanism to read Iceberg tables. It uses the Glue attachment's catalog ID, region, endpoint and selected secret. No separate user attachment or catalog mapping setting is needed.
+
+Catalog listings such as `duckdb_columns()` report the table columns registered in Glue. `DESCRIBE table` binds a query and reports the Iceberg schema instead. Listing an Iceberg table, inspecting its definition with `glue_get_table_response()`, and dropping its Glue registration do not require a working Iceberg reader. Requests for a view's columns may bind its query and therefore require the readers for its tables.
+
+Iceberg tables remain read-only through Glue. Iceberg database resource links and time travel through the Glue attachment are not supported.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
@@ -321,6 +323,26 @@ this connection's cache: a write through it, a rollback, or DETACH.
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
 - `ALTER VIEW ... RENAME` and `COMMENT ON VIEW` are not supported.
+
+Glue views can join Hive and Iceberg tables from the same Glue database using their normal names.
+
+```sql
+ATTACH '123456789012' AS lake (TYPE GLUE, SECRET aws_secret, REGION 'us-east-1');
+
+-- sales.customers is Hive; sales.orders is Iceberg.
+CREATE VIEW lake.sales.orders_by_customer AS
+SELECT c.name, o.amount
+FROM lake.sales.customers c
+JOIN lake.sales.orders o ON c.id = o.id;
+
+SELECT * FROM lake.sales.orders_by_customer;
+```
+
+View expansion uses ordinary table binding. There is no Iceberg-specific rewrite of the view body. The stored SQL keeps `sales.customers` and `sales.orders`, with no internal reader alias or extra table-type parameter.
+
+Iceberg metadata is loaded when its table scan is bound. This can happen during `PREPARE`, `EXPLAIN`, `DESCRIBE`, or a request for a view's columns. Direct queries and views use the same binding path.
+
+Existing views that contain an old Iceberg attachment alias are not migrated.
 
 ## Reading without a catalog: hive_scan
 

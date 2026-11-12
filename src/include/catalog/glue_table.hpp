@@ -5,25 +5,29 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 
 #include "core/glue_info.hpp"
+#include "catalog/glue_table_implementation.hpp"
 
 namespace duckdb {
 class GlueCatalog;
 
-//! A table registered in the Glue Data Catalog. Only Hive (Glue native) tables can be scanned and written; tables
-//! of other formats (Iceberg, Delta, ...) are listed with the columns Glue reports but can not be read.
+//! A Glue-owned table identity whose schema and scan are supplied by a table implementation.
 class GlueTable : public TableCatalogEntry {
 public:
-	GlueTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, GlueTableInfo table_info);
+	GlueTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, GlueTableInfo table_info,
+	          unique_ptr<GlueTableImplementation> implementation = nullptr);
 
 public:
 	const ColumnList &GetColumns() const override;
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
+	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
+	                              const EntryLookupInfo &lookup) override;
+	PhysicalOperator &PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
+	                             optional_ptr<PhysicalOperator> plan);
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
-	//! filename: the location of the data file a row was read from, as for read_parquet and hive_scan, and the
-	//! metadata columns of Trino's Hive connector ("$path", "$file_size", ...)
+	//! The implementation's virtual columns, including any format-specific metadata columns.
 	virtual_column_map_t GetVirtualColumns() const override;
-	//! None: the files of a Hive table have no row identifier
+	//! The implementation's row identifiers, if supported.
 	vector<column_t> GetRowIdColumns() const override;
 
 	//! Called by duckdb_tables().sql / ToSQL(). On a Hive table we can round-trip, the sql column
@@ -31,18 +35,13 @@ public:
 	//! ..." reason inline, so a bulk catalog scan never breaks on a single bad table.
 	unique_ptr<CreateInfo> GetInfo() const override;
 
-private:
-	//! Scan a Hive table with read_parquet over the files of the partitions Glue lists (or the table location for an
-	//! unpartitioned table), using the HiveMultiFileReader for Glue's schema and partition values
-	TableFunction GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data);
-
 public:
 	//! The table definition as returned by Glue when the entry was created
 	GlueTableInfo table_info;
 
 private:
-	//! The columns of the table: data columns first, partition keys last
-	ColumnList columns;
+	ColumnList metadata_columns;
+	unique_ptr<GlueTableImplementation> implementation;
 };
 
 } // namespace duckdb

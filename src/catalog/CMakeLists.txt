@@ -7,6 +7,8 @@ add_library_unity(
   glue_schema_entry.cpp
   glue_schema_set.cpp
   glue_table.cpp
+  glue_table_implementation.cpp
+  glue_table_resolver.cpp
   glue_table_set.cpp
   glue_transaction.cpp
   glue_view.cpp
