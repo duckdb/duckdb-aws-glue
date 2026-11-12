@@ -554,6 +554,16 @@ SELECT "table", scan_id, event, partitions, partitions_read, listings, files, du
 FROM duckdb_logs_parsed('GlueScan');
 ```
 
+The `GlueDataFileWritten` log type (`INFO`) records the same files `glue_written_files()` lists, one entry per data file
+with the `table` and the `file_path`, logged once the write's partitions are registered.
+
+```sql
+CALL enable_logging('GlueDataFileWritten', storage = 'memory');
+INSERT INTO lake.db.events SELECT ...;
+SELECT query_id, "table", file_path FROM duckdb_logs_parsed('GlueDataFileWritten')
+WHERE connection_id = current_connection_id() ORDER BY timestamp;
+```
+
 ## Testing
 
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:

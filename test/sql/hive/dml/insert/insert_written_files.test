@@ -31,6 +31,9 @@ SELECT count(*) FROM glue_written_files();
 0
 
 statement ok
+CALL enable_logging('GlueDataFileWritten');
+
+statement ok
 CREATE TABLE my_datalake.default.written_files (id INTEGER);
 
 statement ok
@@ -50,6 +53,24 @@ SELECT count(*) FROM (
 );
 ----
 0
+
+# the GlueDataFileWritten log has the same files, from the INSERT's query on this connection
+query I
+SELECT count(*) FROM (
+    (SELECT file_path FROM glue_written_files()
+     EXCEPT SELECT file_path FROM duckdb_logs_parsed('GlueDataFileWritten'))
+    UNION ALL
+    (SELECT file_path FROM duckdb_logs_parsed('GlueDataFileWritten')
+     EXCEPT SELECT file_path FROM glue_written_files())
+);
+----
+0
+
+query III
+SELECT count(DISTINCT query_id), bool_and(connection_id = current_connection_id()), min("table")
+FROM duckdb_logs_parsed('GlueDataFileWritten');
+----
+1	true	my_datalake.default.written_files
 
 # other statements leave them in place
 statement ok

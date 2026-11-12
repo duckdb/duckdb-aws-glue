@@ -50,6 +50,18 @@ public:
 	static string ConstructLogMessage(const GlueScanEvent &event);
 };
 
+//! A data file an INSERT or CREATE TABLE AS into a Hive table wrote, logged once its partitions are registered
+class GlueDataFileWrittenLogType : public LogType {
+public:
+	static constexpr const char *NAME = "GlueDataFileWritten";
+	static constexpr LogLevel LEVEL = LogLevel::LOG_INFO;
+
+	GlueDataFileWrittenLogType();
+
+	static LogicalType GetLogType();
+	static string ConstructLogMessage(const string &table, const string &file_path);
+};
+
 void RegisterGlueLogTypes(DatabaseInstance &db);
 //! The Glue requests in the HTTP log: glue_requests()
 unique_ptr<CreateMacroInfo> GetGlueRequestsMacro();
