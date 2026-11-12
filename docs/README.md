@@ -271,18 +271,6 @@ their codec themselves.
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
 
-`SELECT file_path FROM glue_written_files()` lists the data files the connection's last `INSERT` or `CREATE TABLE ... AS`
-into a Hive table wrote, one row per file, for example to give a manifest of what a query wrote. The next `INSERT` or
-`CREATE TABLE ... AS` replaces the list when its statement ends. If that statement fails while running, the list is empty.
-Other statements leave it in place, and every connection has its own.
-
-```sql
-INSERT INTO lake.db.events SELECT ...;
-SELECT file_path FROM glue_written_files();
--- s3://bucket/db/events/day=2026-11-09/<write id>_<file id>.snappy.parquet
--- s3://bucket/db/events/day=2026-11-10/<write id>_<file id>.snappy.parquet
-```
-
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
 of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
@@ -552,6 +540,19 @@ CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');
 SELECT operation, count(*), sum(duration_ms) FROM glue_requests() GROUP BY operation;
 SELECT "table", scan_id, event, partitions, partitions_read, listings, files, duration_ms, detail
 FROM duckdb_logs_parsed('GlueScan');
+```
+
+The `GlueDataFileWritten` log type (`INFO`) records each data file an `INSERT` or `CREATE TABLE ... AS` into a Hive
+table wrote, with the `table` and the `file_path`, for example to give a manifest of what a query wrote. A write logs its
+files once their partitions are registered; a write that fails before that logs none, as its files are deleted.
+
+```sql
+CALL enable_logging('GlueDataFileWritten');
+INSERT INTO lake.db.events SELECT ...;
+SELECT query_id, "table", file_path FROM duckdb_logs_parsed('GlueDataFileWritten')
+WHERE connection_id = current_connection_id() ORDER BY timestamp;
+-- s3://bucket/db/events/day=2026-11-09/<write id>_<file id>.snappy.parquet
+-- s3://bucket/db/events/day=2026-11-10/<write id>_<file id>.snappy.parquet
 ```
 
 ## Testing

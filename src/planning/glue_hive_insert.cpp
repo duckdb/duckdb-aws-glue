@@ -3,6 +3,7 @@
 #include "api/glue_api_util.hpp"
 
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
@@ -34,7 +35,7 @@
 #include "core/glue_types.hpp"
 #include "core/hive_location.hpp"
 #include "execution/hive_copy.hpp"
-#include "functions/glue_written_files.hpp"
+#include "core/glue_log_types.hpp"
 
 namespace duckdb {
 
@@ -759,6 +760,13 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
+void GlueHiveInsert::LogWrittenFiles(ClientContext &context, const vector<string> &files) const {
+	auto table = catalog.GetName().GetIdentifierName() + "." + table_info.schema_name + "." + table_info.name;
+	for (auto &file : files) {
+		DUCKDB_LOG(context, GlueDataFileWrittenLogType, table, file);
+	}
+}
+
 //! Case sensitive, like S3 paths
 using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 
@@ -810,7 +818,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		transaction.CompleteHiveWrite(write_id);
-		GlueWrittenFilesState::Get(context)->AddFiles(state.written_files);
+		LogWrittenFiles(context, state.written_files);
 		return SinkFinalizeType::READY;
 	}
 
@@ -895,7 +903,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		                  table_info.schema_name, table_info.name, error.RawMessage());
 	}
 	transaction.CompleteHiveWrite(write_id);
-	GlueWrittenFilesState::Get(context)->AddFiles(state.written_files);
+	LogWrittenFiles(context, state.written_files);
 	return SinkFinalizeType::READY;
 }
 

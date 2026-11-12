@@ -8,7 +8,6 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "core/hive_location.hpp"
-#include "functions/glue_written_files.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 
 #include "duckdb/common/file_system.hpp"
@@ -108,7 +107,6 @@ GlueHiveCopy::GlueHiveCopy(PhysicalPlan &physical_plan, vector<LogicalType> type
 }
 
 unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &context) const {
-	GlueWrittenFilesState::Get(context)->BeginWrite();
 	annotated_lock_guard<annotated_mutex> guard(start_lock);
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	// keyed on the transaction, not this operator: each execution of the plan registers its write

@@ -9,6 +9,7 @@
 namespace duckdb {
 
 constexpr LogLevel GlueScanLogType::LEVEL;
+constexpr LogLevel GlueDataFileWrittenLogType::LEVEL;
 
 static Value OptionalCount(optional_idx value) {
 	return value.IsValid() ? Value::UBIGINT(value.GetIndex()) : Value(LogicalType::UBIGINT);
@@ -45,9 +46,23 @@ string GlueScanLogType::ConstructLogMessage(const GlueScanEvent &event) {
 	return Value::STRUCT(std::move(children)).ToString();
 }
 
+GlueDataFileWrittenLogType::GlueDataFileWrittenLogType() : LogType(NAME, LEVEL, GetLogType()) {
+}
+
+LogicalType GlueDataFileWrittenLogType::GetLogType() {
+	child_list_t<LogicalType> children = {{"table", LogicalType::VARCHAR}, {"file_path", LogicalType::VARCHAR}};
+	return LogicalType::STRUCT(children);
+}
+
+string GlueDataFileWrittenLogType::ConstructLogMessage(const string &table, const string &file_path) {
+	child_list_t<Value> children = {{"table", Value(table)}, {"file_path", Value(file_path)}};
+	return Value::STRUCT(std::move(children)).ToString();
+}
+
 void RegisterGlueLogTypes(DatabaseInstance &db) {
 	auto &log_manager = db.GetLogManager();
 	log_manager.RegisterLogType(make_uniq<GlueScanLogType>());
+	log_manager.RegisterLogType(make_uniq<GlueDataFileWrittenLogType>());
 }
 
 // The operation is the X-Amz-Target header, which the HTTP log does not redact

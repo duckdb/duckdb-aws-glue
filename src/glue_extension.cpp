@@ -11,7 +11,6 @@
 #include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
 #include "functions/glue_repair_table.hpp"
-#include "functions/glue_written_files.hpp"
 #include "grammar/glue_grammar.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
@@ -171,7 +170,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetGlueReplaceColumnsFunction());
 	loader.RegisterFunction(GetGlueAlterTableFunction());
 	loader.RegisterFunction(GetGlueRepairTableFunction());
-	loader.RegisterFunction(GetGlueWrittenFilesFunction());
 	loader.RegisterFunction(*GetGlueRequestsMacro());
 	// ALTER TABLE ... ADD / DROP PARTITION etc., switched on with SET active_grammar_extensions = ['glue_hive_ddl']
 	RegisterGlueGrammarExtension(instance);
