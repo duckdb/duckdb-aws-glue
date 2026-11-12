@@ -187,8 +187,8 @@ public:
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
 	//! (so a prepared statement's two binds share it).
 	shared_ptr<GlueTransactionCache> cache;
-	//! Resolved table implementations are pinned to the transaction that selected their metadata.
-	reference_map_t<GlueTable, unique_ptr<GlueTable>> resolved_tables;
+	//! Resolved entries are pinned to the transaction that selected their metadata.
+	reference_map_t<GlueTable, unique_ptr<CatalogEntry>> resolved_tables;
 
 private:
 	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone

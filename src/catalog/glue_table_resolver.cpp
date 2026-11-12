@@ -4,26 +4,28 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/secret/secret.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/parser/parsed_data/create_view_info.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 
 namespace duckdb {
 
-//! Compatibility with Iceberg's current catalog API.
+//! Owns the Iceberg catalog delegated to by Glue.
 class IcebergCatalogBridge {
 public:
 	explicit IcebergCatalogBridge(GlueCatalog &catalog) : catalog(catalog) {
 	}
-	TableCatalogEntry &Resolve(ClientContext &context, const GlueTable &table);
-	void OnDetach(ClientContext &context);
-
-private:
 	Catalog &GetCatalog(ClientContext &context);
+	void OnDetach(ClientContext &context);
 
 private:
 	GlueCatalog &catalog;
@@ -34,39 +36,40 @@ private:
 
 namespace {
 
-class IcebergTableImplementation : public GlueTableImplementation {
+class IcebergRedirectView : public ViewCatalogEntry {
 public:
-	IcebergTableImplementation(IcebergCatalogBridge &bridge, const ColumnList &columns)
-	    : GlueTableImplementation(columns.Copy()), bridge(bridge) {
+	IcebergRedirectView(ClientContext &context, GlueTable &table, IcebergCatalogBridge &bridge, CreateViewInfo &info)
+	    : ViewCatalogEntry(table.ParentCatalog(), table.ParentSchema(), info), context(context), table(table),
+	      bridge(bridge) {
 	}
 
-	const ColumnList &GetColumns() const override {
-		return table ? table->GetColumns() : GlueTableImplementation::GetColumns();
-	}
-	TableFunction BindScan(ClientContext &context, GlueTable &glue_table, unique_ptr<FunctionData> &bind_data,
-	                       const EntryLookupInfo &lookup) override {
-		if (!table) {
-			auto &schema = glue_table.ParentSchema().Cast<GlueSchemaEntry>();
-			if (schema.GetSchemaInfo(context).is_resource_link) {
-				throw BinderException("Glue cannot automatically read Iceberg table \"%s.%s\" through a resource link",
-				                      schema.name, glue_table.name);
-			}
-			table = &bridge.Resolve(context, glue_table);
+	const SelectStatement &GetQuery() override {
+		auto &schema = table.ParentSchema().Cast<GlueSchemaEntry>();
+		if (schema.GetSchemaInfo(context).is_resource_link) {
+			throw BinderException("Glue cannot automatically read Iceberg table \"%s.%s\" through a resource link",
+			                      schema.name, table.name);
 		}
-		EntryLookupInfo physical_lookup(
-		    lookup, QualifiedName(table->ParentCatalog().GetName(), table->ParentSchema().name, table->name));
-		return table->GetScanFunction(context, bind_data, physical_lookup);
+		auto &reader = bridge.GetCatalog(context);
+		auto ref = make_uniq<BaseTableRef>();
+		ref->SetQualifiedName(reader.GetName(), schema.name, table.name);
+		auto select = make_uniq<SelectNode>();
+		select->select_list.push_back(make_uniq<StarExpression>());
+		select->from_table = std::move(ref);
+		query = make_uniq<SelectStatement>();
+		query->node = std::move(select);
+		return *query;
 	}
-	virtual_column_map_t GetVirtualColumns() const override {
-		return table ? table->GetVirtualColumns() : virtual_column_map_t {};
-	}
-	vector<column_t> GetRowIdColumns() const override {
-		return table ? table->GetRowIdColumns() : vector<column_t> {};
+
+	unique_ptr<CatalogEntry> Copy(ClientContext &context) const override {
+		auto info = GetInfo();
+		return make_uniq<IcebergRedirectView>(context, table, bridge, info->Cast<CreateViewInfo>());
 	}
 
 private:
+	// Redirect entries live in the Glue transaction of this context.
+	ClientContext &context;
+	GlueTable &table;
 	IcebergCatalogBridge &bridge;
-	optional_ptr<TableCatalogEntry> table;
 };
 
 } // namespace
@@ -112,19 +115,6 @@ Catalog &IcebergCatalogBridge::GetCatalog(ClientContext &context) {
 	return MetaTransaction::Get(context).UseDatabase(database).GetCatalog();
 }
 
-TableCatalogEntry &IcebergCatalogBridge::Resolve(ClientContext &context, const GlueTable &table) {
-	auto &reader = GetCatalog(context);
-	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY,
-	                       QualifiedName(reader.GetName(), table.ParentSchema().name, table.name));
-	auto entry = Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
-	if (!entry || entry->type != CatalogType::TABLE_ENTRY) {
-		throw CatalogException(
-		    "Iceberg table \"%s.%s\" is registered in Glue but is not returned by its Iceberg endpoint",
-		    table.table_info.schema_name, table.table_info.name);
-	}
-	return entry->Cast<TableCatalogEntry>();
-}
-
 void IcebergCatalogBridge::OnDetach(ClientContext &context) {
 	lock_guard<mutex> guard(lock);
 	if (!database) {
@@ -145,30 +135,28 @@ GlueTableResolver::GlueTableResolver(GlueCatalog &catalog)
 GlueTableResolver::~GlueTableResolver() {
 }
 
-GlueTable &GlueTableResolver::Resolve(ClientContext &context, GlueTable &table) {
+CatalogEntry &GlueTableResolver::Resolve(ClientContext &context, GlueTable &table) {
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	auto existing = transaction.resolved_tables.find(table);
 	if (existing != transaction.resolved_tables.end()) {
 		return *existing->second;
 	}
-	unique_ptr<GlueTableImplementation> implementation;
-	switch (table.table_info.GetFormat().format) {
-	case GlueFormat::HIVE:
-		implementation = GlueTableImplementation::CreateHive(table.GetColumns());
-		break;
-	case GlueFormat::ICEBERG:
-		implementation = make_uniq<IcebergTableImplementation>(*iceberg, table.GetColumns());
-		break;
-	default:
-		implementation = GlueTableImplementation::CreateUnsupported(table.GetColumns());
-		break;
-	}
 	auto &schema = table.ParentSchema();
-	CreateTableInfo info(schema, table.name);
-	info.columns = implementation->GetColumns().Copy();
-	info.comment = table.comment;
-	auto resolved = make_uniq<GlueTable>(catalog, schema, info, table.table_info, std::move(implementation));
+	unique_ptr<CatalogEntry> resolved;
+	auto format = table.table_info.GetFormat().format;
+	if (format == GlueFormat::ICEBERG) {
+		CreateViewInfo info(schema, table.name);
+		resolved = make_uniq<IcebergRedirectView>(context, table, *iceberg, info);
+	} else {
+		auto implementation = format == GlueFormat::HIVE
+		                          ? GlueTableImplementation::CreateHive(table.GetColumns())
+		                          : GlueTableImplementation::CreateUnsupported(table.GetColumns());
+		CreateTableInfo info(schema, table.name);
+		info.columns = table.GetColumns().Copy();
+		resolved = make_uniq<GlueTable>(catalog, schema, info, table.table_info, std::move(implementation));
+	}
 	resolved->oid = table.oid;
+	resolved->comment = table.comment;
 	resolved->tags = table.tags;
 	auto &result = *resolved;
 	transaction.resolved_tables.emplace(table, std::move(resolved));

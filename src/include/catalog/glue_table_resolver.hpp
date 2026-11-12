@@ -3,10 +3,10 @@
 #include "duckdb/common/unique_ptr.hpp"
 
 namespace duckdb {
+class CatalogEntry;
 class ClientContext;
 class GlueCatalog;
 class GlueTable;
-class GlueTableImplementation;
 class IcebergCatalogBridge;
 
 class GlueTableResolver {
@@ -14,7 +14,7 @@ public:
 	explicit GlueTableResolver(GlueCatalog &catalog);
 	~GlueTableResolver();
 
-	GlueTable &Resolve(ClientContext &context, GlueTable &table);
+	CatalogEntry &Resolve(ClientContext &context, GlueTable &table);
 	void OnDetach(ClientContext &context);
 
 private:

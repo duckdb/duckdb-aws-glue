@@ -338,9 +338,9 @@ JOIN lake.sales.orders o ON c.id = o.id;
 SELECT * FROM lake.sales.orders_by_customer;
 ```
 
-View expansion uses ordinary table binding. There is no Iceberg-specific rewrite of the view body. The stored SQL keeps `sales.customers` and `sales.orders`, with no internal reader alias or extra table-type parameter.
+The stored SQL keeps `sales.customers` and `sales.orders`, with no internal attachment alias or extra table-type parameter. When binding an Iceberg reference, Glue supplies an in-memory view that selects from the table in a hidden Iceberg catalog. This redirect is not stored in Glue. DuckDB binds the real Iceberg table and tracks its catalog and transaction normally.
 
-Iceberg metadata is loaded when its table scan is bound. This can happen during `PREPARE`, `EXPLAIN`, `DESCRIBE`, or a request for a view's columns. Direct queries and views use the same binding path.
+The Iceberg catalog is attached when the binder expands the redirect. Iceberg then resolves the table and binds its scan. This can happen during `PREPARE`, `EXPLAIN`, `DESCRIBE`, or a request for a view's columns. Direct queries and stored views use the same path.
 
 Existing views that contain an old Iceberg attachment alias are not migrated.
 

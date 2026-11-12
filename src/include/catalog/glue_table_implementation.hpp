@@ -11,7 +11,7 @@ class LogicalInsert;
 class PhysicalOperator;
 class PhysicalPlanGenerator;
 
-//! A table's schema and supported operations, independent of its catalog identity.
+//! Operations for tables handled inside the Glue catalog.
 class GlueTableImplementation {
 public:
 	explicit GlueTableImplementation(ColumnList columns) : columns(std::move(columns)) {

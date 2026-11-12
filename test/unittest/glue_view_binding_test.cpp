@@ -12,6 +12,7 @@
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 #include "duckdb/transaction/duck_transaction_manager.hpp"
 #include "functions/glue_functions.hpp"
@@ -302,7 +303,7 @@ TEST_CASE("Glue view reader follows a change in the default Glue secret", "[glue
 	REQUIRE(!DatabaseManager::Get(*con.context).GetDatabase(first_reader));
 }
 
-TEST_CASE("Glue table names remain valid when its scan belongs to another catalog", "[glue_table_binding]") {
+TEST_CASE("Glue table names remain valid through an Iceberg redirect view", "[glue_table_binding]") {
 	ViewBindingFixture fixture;
 	auto result = Run(*fixture.con, "SELECT lake.sales.orders.amount FROM lake.sales.orders")->Fetch();
 	REQUIRE(result);
@@ -317,6 +318,43 @@ TEST_CASE("Glue table names remain valid when its scan belongs to another catalo
 	REQUIRE(joined->GetValue(0, 0).ToString() == "Ada");
 	REQUIRE(joined->GetValue(1, 0).ToString() == "42");
 	Run(*fixture.con, "EXPLAIN SELECT * FROM lake.sales.orders");
+}
+
+TEST_CASE("Glue redirects register the Iceberg catalog and bind its real table", "[glue_table_binding]") {
+	ViewBindingFixture fixture;
+	auto &con = *fixture.con;
+	auto prepared = con.Prepare("SELECT * FROM lake.sales.orders_by_customer");
+	REQUIRE_FALSE(prepared->HasError());
+	REQUIRE(fixture.reader->names.size() == 1);
+	auto reader_name = fixture.reader->names.back();
+	auto &properties = prepared->GetStatementProperties();
+	REQUIRE(properties.read_databases.count(Identifier("lake")) == 1);
+	REQUIRE(properties.read_databases.count(reader_name) == 1);
+	REQUIRE(properties.modified_databases.empty());
+
+	Run(con, "BEGIN");
+	auto plan = con.ExtractPlan("SELECT amount FROM lake.sales.orders");
+	vector<reference<LogicalOperator>> pending;
+	pending.emplace_back(*plan);
+	idx_t scans = 0;
+	while (!pending.empty()) {
+		auto &op = pending.back().get();
+		pending.pop_back();
+		for (auto &child : op.children) {
+			pending.emplace_back(*child);
+		}
+		if (op.type != LogicalOperatorType::LOGICAL_GET) {
+			continue;
+		}
+		auto table = op.Cast<LogicalGet>().GetTable();
+		REQUIRE(table);
+		REQUIRE(table->ParentCatalog().GetName() == reader_name);
+		REQUIRE(table->ParentSchema().name == Identifier("sales"));
+		REQUIRE(table->name == Identifier("orders"));
+		scans++;
+	}
+	REQUIRE(scans == 1);
+	Run(con, "COMMIT");
 }
 
 TEST_CASE("Glue metadata operations do not require an Iceberg reader", "[glue_table_binding]") {
@@ -358,10 +396,14 @@ TEST_CASE("Glue diagnostic names and DROP bind even if the Iceberg table is miss
 	fixture.tables.push_back(std::move(missing));
 	fixture.Warm();
 	auto &con = *fixture.con;
+	// The mock has no Glue listing endpoint for suggestions in unrelated schemas.
+	Run(con, "SET catalog_error_max_schemas = 0");
 
 	auto result = con.Query("SELECT * FROM lake.sales.missing_orders");
 	REQUIRE(result->HasError());
-	REQUIRE(result->GetError().find("not returned by its Iceberg endpoint") != string::npos);
+	INFO(result->GetError());
+	REQUIRE(result->GetError().find("missing_orders") != string::npos);
+	REQUIRE(result->GetError().find("does not exist") != string::npos);
 	REQUIRE(fixture.reader->names.size() == 1);
 	fixture.Warm();
 
@@ -394,7 +436,7 @@ TEST_CASE("Binding an Iceberg scan does not replace the columns reported by Glue
 	Run(con, "COMMIT");
 }
 
-TEST_CASE("The Iceberg compatibility adapter does not enable writes", "[glue_table_binding]") {
+TEST_CASE("The Iceberg redirect does not enable writes", "[glue_table_binding]") {
 	ViewBindingFixture fixture;
 	auto &con = *fixture.con;
 	for (auto &sql : {"INSERT INTO lake.sales.orders VALUES (2, 99)", "DELETE FROM lake.sales.orders",

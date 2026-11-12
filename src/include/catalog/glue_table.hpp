@@ -10,7 +10,7 @@
 namespace duckdb {
 class GlueCatalog;
 
-//! A Glue-owned table identity whose schema and scan are supplied by a table implementation.
+//! Glue metadata, with local scan and write support for Hive tables.
 class GlueTable : public TableCatalogEntry {
 public:
 	GlueTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, GlueTableInfo table_info,
