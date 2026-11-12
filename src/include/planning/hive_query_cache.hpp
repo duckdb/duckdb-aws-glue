@@ -70,9 +70,11 @@ private:
 };
 
 //! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table
-//! With an 'expression' in Glue's partition filter syntax, only the partitions it matches, fetched once per expression
+//! With an 'expression', only the partitions it matches, fetched once per expression, unless every partition is cached
+//! already: then those. 'filtered' tells which.
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info,
-                                                               const string &expression = string());
+                                                               const string &expression = string(),
+                                                               bool *filtered = nullptr);
 //! Drop the connection's cached directory listings
 void ClearHiveListingCache(ClientContext &context);
 

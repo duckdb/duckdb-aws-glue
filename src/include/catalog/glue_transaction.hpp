@@ -60,6 +60,17 @@ public:
 		}
 		return Resolve(*entry, load);
 	}
+	//! The partitions already cached for the table, or null; never loads
+	shared_ptr<const vector<GluePartitionInfo>> CachedPartitions(const string &database_name,
+	                                                             const string &table_name) {
+		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			entry = FindEntry(partitions, database_name + "\n" + table_name);
+		}
+		annotated_lock_guard<annotated_mutex> guard(entry->load_lock);
+		return entry->value;
+	}
 	void Clear() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();

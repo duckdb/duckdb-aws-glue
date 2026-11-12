@@ -134,13 +134,21 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info,
-                                                               const string &expression) {
+                                                               const string &expression, bool *filtered) {
+	if (filtered) {
+		*filtered = false;
+	}
 	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
 	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
 	// per table, so the Glue calls for different tables do not wait on each other
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
-	if (!expression.empty()) {
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	if (!expression.empty() && !entry->partitions && cache) {
+		entry->partitions = cache->CachedPartitions(info.database_name, info.table_name);
+	}
+	// with every partition at hand already, it is the scan's pruning that selects them, not Glue
+	if (!expression.empty() && !entry->partitions) {
 		if (entry->refused_expressions.count(expression)) {
 			// refused by an earlier scan: the caller falls back to all partitions without asking again
 			throw InvalidInputException(
@@ -161,6 +169,9 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 				throw;
 			}
 		}
+		if (filtered) {
+			*filtered = true;
+		}
 		return partitions;
 	}
 	if (!entry->partitions) {
@@ -168,7 +179,6 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 			return make_shared_ptr<const vector<GluePartitionInfo>>(
 			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
 		};
-		auto cache = GlueTransactionCache::Of(context, catalog);
 		entry->partitions = cache ? cache->GetPartitions(info.database_name, info.table_name, load) : load();
 	}
 	return entry->partitions;

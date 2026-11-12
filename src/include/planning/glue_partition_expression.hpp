@@ -13,10 +13,8 @@ struct PartitionKeyProjection {
 	idx_t partition_key_index;
 };
 
-//! The filters of a scan written as the Expression of a GetPartitions request, so that Glue returns only the
-//! partitions they match. A filter that cannot be written is left out: the expression keeps at least every partition
-//! the filters keep, and the filters are still applied to the partition values Glue returns. Empty when no filter can
-//! be written. The indexes of the filters the expression covers go in 'used_filters'.
+//! The filters as a GetPartitions Expression matching at least the partitions they keep; empty if none can be written.
+//! 'used_filters' gets the indexes of the filters it covers.
 string GluePartitionExpression(const HiveScanInfo &info, TableIndex table_index,
                                const vector<PartitionKeyProjection> &projections,
                                const vector<unique_ptr<Expression>> &filters, unordered_set<idx_t> &used_filters);

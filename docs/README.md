@@ -479,7 +479,7 @@ given to `GetPartitions` as its `Expression`, so Glue returns only the partition
 and `OR`. String ranges are given only for ASCII literals, where Glue and DuckDB order strings the same. Other filters
 are applied to the partition values Glue returns, as before, and an expression Glue refuses falls back to fetching all
 partitions. Two scans of a table with different filters then make two `GetPartitions` calls, and `EXPLAIN` counts only
-the partitions Glue returned. The setting is off by default: with it on, a partition registered at a location inside
+the partitions Glue returned. A scan with a filtered partition list lists each partition it reads instead of the table root, whose other partitions it does not know, and partitions the metadata cache holds already are used without a filtered request. The setting is off by default: with it on, a partition registered at a location inside
 another partition's location is not yet accounted for when the filter leaves it out.
 
 ## Inspecting tables

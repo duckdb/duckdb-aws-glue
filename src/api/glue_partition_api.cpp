@@ -358,9 +358,7 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 		auto outcome = client.GetPartitions(request);
 		if (!outcome.IsSuccess()) {
 			auto error_type = outcome.GetError().GetErrorType();
-			// Glue answers an expression it can not apply with InvalidInputException, or with InvalidStateException
-			// when a partition value can not be compared with the literal ("__HIVE_DEFAULT_PARTITION__" is not an
-			// integer)
+			// InvalidState: a partition value Glue can't compare with the literal, e.g. __HIVE_DEFAULT_PARTITION__
 			if (!expression.empty() && (error_type == Aws::Glue::GlueErrors::INVALID_INPUT ||
 			                            error_type == Aws::Glue::GlueErrors::INVALID_STATE)) {
 				throw InvalidInputException(

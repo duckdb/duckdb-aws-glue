@@ -140,13 +140,11 @@ public:
 	                              const string &table_name, const GluePartitionDetails &partition,
 	                              const vector<string> &new_values);
 	//! List the partitions of a Hive table (GetPartitions, all pages)
-	//! Pass an 'expression' in Glue's partition filter syntax, e.g. "dt = '2024-01-01'", to get only the partitions it
-	//! matches.
+	//! With an 'expression' (Glue's partition filter syntax), only the partitions it matches
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name,
 	                                               const string &expression = string());
-	//! True when Glue refused the GetPartitions expression itself, e.g. it couldn't compare a partition value with the
-	//! literal. False when the request just failed (throttling, a timeout, access denied).
+	//! Whether Glue refused the GetPartitions expression itself, rather than the request failing
 	static bool IsPartitionExpressionRejected(const ErrorData &error);
 	//! The extra info that marks an exception as a refused GetPartitions expression
 	static unordered_map<string, string> PartitionExpressionRejectedInfo();

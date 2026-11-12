@@ -82,9 +82,10 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
+	//! Whether Glue returned only the partitions the partition expression matched
+	bool PartitionsFiltered() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
-	//! The Expression of the GetPartitions request Partitions() makes, so that Glue returns only the partitions it
-	//! matches. Nothing once the partitions are loaded
+	//! The GetPartitions Expression of the fetch Partitions() makes; ignored once the partitions are loaded
 	void SetPartitionExpression(string expression) const;
 
 private:

@@ -15,10 +15,30 @@ namespace duckdb {
 //! The longest expression GetPartitions accepts
 static constexpr idx_t GLUE_MAX_PARTITION_EXPRESSION_LENGTH = 2048;
 
+namespace {
+
+//! Writes the filters of one scan in Glue's partition filter syntax
+class GlueFilterWriter {
+public:
+	GlueFilterWriter(const HiveScanInfo &info, TableIndex table_index,
+	                 const vector<PartitionKeyProjection> &projections)
+	    : info(info), table_index(table_index), projections(projections) {
+	}
+
+	bool TryWrite(const Expression &filter, string &result) const;
+
+private:
+	optional_ptr<const string> PartitionKeyOf(const Expression &expr) const;
+
+	const HiveScanInfo &info;
+	TableIndex table_index;
+	const vector<PartitionKeyProjection> &projections;
+};
+
+} // namespace
+
 //! The partition key 'expr' refers to, if it is a column of this scan and the key's name needs no quoting
-static optional_ptr<const string> PartitionKeyOf(const Expression &expr, TableIndex table_index,
-                                                 const vector<PartitionKeyProjection> &projections,
-                                                 const HiveScanInfo &info) {
+optional_ptr<const string> GlueFilterWriter::PartitionKeyOf(const Expression &expr) const {
 	if (expr.GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 		return nullptr;
 	}
@@ -54,9 +74,7 @@ static bool IsGlueDate(const string &str) {
 	return true;
 }
 
-//! Writes the literal if Glue compares it the way DuckDB does: an integer, a date, or a string that needs no
-//! escaping. A range ('ordered') on a string also needs ASCII, the only case where Glue (UTF-16) and DuckDB (UTF-8)
-//! sort alike.
+//! The literal, if Glue compares it as DuckDB does; string ranges ('ordered') need ASCII, where UTF-16 and UTF-8 agree
 static bool TryGlueLiteral(const Expression &expr, const LogicalType &key_type, bool ordered, string &result) {
 	if (expr.GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
 		return false;
@@ -116,17 +134,15 @@ static string GlueComparisonOperator(ExpressionType type) {
 	}
 }
 
-//! Writes 'filter' as a Glue partition filter that keeps at least the partitions DuckDB keeps. False when there is no
-//! way to write it.
-static bool TryGlueFilter(const Expression &filter, TableIndex table_index,
-                          const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info, string &result) {
+//! 'filter' as a Glue partition filter keeping at least the partitions DuckDB keeps; false when it can't be written
+bool GlueFilterWriter::TryWrite(const Expression &filter, string &result) const {
 	auto type = filter.GetExpressionType();
 	if (type == ExpressionType::CONJUNCTION_AND || type == ExpressionType::CONJUNCTION_OR) {
 		// any child of an AND narrows the partitions down on its own; an OR needs every child
 		vector<string> parts;
 		for (auto &child : filter.Cast<BoundConjunctionExpression>().GetChildren()) {
 			string part;
-			if (TryGlueFilter(*child, table_index, projections, info, part)) {
+			if (TryWrite(*child, part)) {
 				parts.push_back("(" + part + ")");
 			} else if (type == ExpressionType::CONJUNCTION_OR) {
 				return false;
@@ -140,7 +156,7 @@ static bool TryGlueFilter(const Expression &filter, TableIndex table_index,
 	}
 	if (type == ExpressionType::COMPARE_IN) {
 		auto &children = filter.Cast<BoundOperatorExpression>().GetChildren();
-		auto key = PartitionKeyOf(*children[0], table_index, projections, info);
+		auto key = PartitionKeyOf(*children[0]);
 		if (!key) {
 			return false;
 		}
@@ -161,7 +177,7 @@ static bool TryGlueFilter(const Expression &filter, TableIndex table_index,
 			return false;
 		}
 		auto &input = BoundBetweenExpression::Input(between);
-		auto key = PartitionKeyOf(input, table_index, projections, info);
+		auto key = PartitionKeyOf(input);
 		string lower, upper;
 		if (!key || !TryGlueLiteral(BoundBetweenExpression::LowerBound(between), input.GetReturnType(), true, lower) ||
 		    !TryGlueLiteral(BoundBetweenExpression::UpperBound(between), input.GetReturnType(), true, upper)) {
@@ -184,12 +200,12 @@ static bool TryGlueFilter(const Expression &filter, TableIndex table_index,
 	auto &right = BoundComparisonExpression::Right(comparison);
 	bool ordered = type != ExpressionType::COMPARE_EQUAL && type != ExpressionType::COMPARE_NOTEQUAL;
 	string literal;
-	auto key = PartitionKeyOf(left, table_index, projections, info);
+	auto key = PartitionKeyOf(left);
 	if (key && TryGlueLiteral(right, left.GetReturnType(), ordered, literal)) {
 		result = *key + " " + op + " " + literal;
 		return true;
 	}
-	key = PartitionKeyOf(right, table_index, projections, info);
+	key = PartitionKeyOf(right);
 	if (key && TryGlueLiteral(left, right.GetReturnType(), ordered, literal)) {
 		result = *key + " " + GlueComparisonOperator(FlipComparisonExpression(type)) + " " + literal;
 		return true;
@@ -200,10 +216,11 @@ static bool TryGlueFilter(const Expression &filter, TableIndex table_index,
 string GluePartitionExpression(const HiveScanInfo &info, TableIndex table_index,
                                const vector<PartitionKeyProjection> &projections,
                                const vector<unique_ptr<Expression>> &filters, unordered_set<idx_t> &used_filters) {
+	GlueFilterWriter writer(info, table_index, projections);
 	vector<string> parts;
 	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
 		string part;
-		if (TryGlueFilter(*filters[filter_index], table_index, projections, info, part)) {
+		if (writer.TryWrite(*filters[filter_index], part)) {
 			parts.push_back("(" + part + ")");
 			used_filters.insert(filter_index);
 		}
