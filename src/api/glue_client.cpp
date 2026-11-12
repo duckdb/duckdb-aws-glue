@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_retry_strategy.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -10,6 +11,7 @@
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/client/RetryStrategy.h>
 #include <aws/glue/model/GetDatabasesRequest.h>
 
@@ -118,6 +120,11 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 		config.retryStrategy =
 		    std::make_shared<Aws::Client::StandardRetryStrategy>(static_cast<long>(glue_max_retries + 1));
 	}
+	// Null unless glue_max_retries is set: the configuration leaves it to the client, which creates it this way
+	if (!config.retryStrategy) {
+		config.retryStrategy = config.configFactories.retryStrategyCreateFn();
+	}
+	config.retryStrategy = std::make_shared<GlueLoggingRetryStrategy>(std::move(config.retryStrategy));
 
 	Aws::Auth::AWSCredentials credentials(key_id, secret, session_token);
 	auto provider = std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(credentials);

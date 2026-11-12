@@ -1,0 +1,118 @@
+# name: test/sql/hive/catalog/glue_retry_logging.test
+# description: Each retry of a Glue call is logged as GlueRetry with the error that caused it, and glue_max_retries = 0 fails the call without one
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.fault_throttled_grl;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.fault_throttled_grl.t;
+
+statement ok
+CREATE TABLE my_datalake.fault_throttled_grl.t AS SELECT 42 AS id;
+
+statement ok
+CALL enable_logging('GlueRetry', storage = 'memory');
+
+# every request on a fault_throttled* database is refused once with ThrottlingException, then let through
+statement ok
+attach '{GLUE_CATALOG_ID}' as throttled_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT id FROM throttled_dl.fault_throttled_grl.t;
+----
+42
+
+# one entry for the one throttled GetTable
+query IIIII
+SELECT error, status, retry, request_id IS NOT NULL, count(*) OVER ()
+FROM duckdb_logs_parsed('GlueRetry');
+----
+ThrottlingException	400	1	true	1
+
+# the same through the AWS SDK's own HTTP client
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SET glue_network_calls_via_duckdb = false;
+
+query I
+SELECT id FROM throttled_dl.fault_throttled_grl.t;
+----
+42
+
+# one entry for the one throttled GetTable
+query IIIII
+SELECT error, status, retry, request_id IS NOT NULL, count(*) OVER ()
+FROM duckdb_logs_parsed('GlueRetry');
+----
+ThrottlingException	400	1	true	1
+
+statement ok
+RESET glue_network_calls_via_duckdb;
+
+# the standard policy of glue_max_retries logs its retry too
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SET glue_max_retries = 2;
+
+query I
+SELECT id FROM throttled_dl.fault_throttled_grl.t;
+----
+42
+
+query II
+SELECT retry, count(*) OVER () FROM duckdb_logs_parsed('GlueRetry');
+----
+1	1
+
+# without retries the throttled call fails, and nothing is logged as retried
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SET glue_max_retries = 0;
+
+statement error
+SELECT id FROM throttled_dl.fault_throttled_grl.t;
+----
+<REGEX>:.*ThrottlingException.*
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry');
+----
+0
+
+statement ok
+RESET glue_max_retries;
+
+statement ok
+DETACH throttled_dl;
+
+statement ok
+DROP TABLE my_datalake.fault_throttled_grl.t;
+
+statement ok
+DROP SCHEMA my_datalake.fault_throttled_grl;

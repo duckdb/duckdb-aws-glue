@@ -14,12 +14,15 @@ fault_noncanonical_values* database registers each value with a leading '0', as 
 ('01' for 1). A BatchCreatePartition on a fault_slow_partitions* database is
 forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while partitions are registered; one on a
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
-with InternalServiceException, so the write that registers them fails with a table that is no longer its own."""
+with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
+request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
+amz-sdk-request header) and forwarded when the SDK retries it."""
 
 import argparse
 import http.client
 import json
 import time
+import uuid
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -29,6 +32,8 @@ LISTING_FAULTS = {"fault_access_denied": "AccessDeniedException", "fault_invalid
 RACED_CREATE_PREFIX = "fault_already_exists"
 # UpdateTable on a database with this prefix races another client's update of the same table
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
+# the first attempt of a request on a database with this prefix is throttled, its retries are not
+THROTTLED_PREFIX = "fault_throttled"
 # BatchCreatePartition on a database with this prefix is forwarded after a delay
 SLOW_PARTITIONS_PREFIX = "fault_slow_partitions"
 SLOW_PARTITIONS_SECONDS = 4
@@ -79,6 +84,11 @@ def as_other_clients_object(target, request):
         columns = request["TableInput"].setdefault("StorageDescriptor", {}).setdefault("Columns", [])
         columns.append({"Name": "created_by_another_client", "Type": "int"})
     return json.dumps(request).encode()
+
+
+def is_throttled(database, sdk_request):
+    attempts = (sdk_request or "").replace(" ", "").split(";")
+    return database.startswith(THROTTLED_PREFIX) and "attempt=1" in attempts
 
 
 def is_raced_update(target, database):
@@ -132,6 +142,8 @@ class Handler(BaseHTTPRequestHandler):
         request = parse_request(body)
         database = request_database(target, request)
         error = listing_error(target, database)
+        if not error and is_throttled(database, self.headers.get("amz-sdk-request")):
+            error = "ThrottlingException"
         if error:
             self.reply_error(error)
             return
@@ -210,7 +222,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def reply_error(self, error):
         payload = json.dumps({"__type": error, "Message": "injected by glue_fault_proxy"}).encode()
-        self.reply(400, [("Content-Type", "application/x-amz-json-1.1"), ("x-amzn-ErrorType", error)], payload)
+        headers = [("Content-Type", "application/x-amz-json-1.1"), ("x-amzn-ErrorType", error)]
+        self.reply(400, headers + [("x-amzn-RequestId", str(uuid.uuid4()))], payload)
 
     def reply(self, status, headers, body):
         self.send_response(status)

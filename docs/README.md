@@ -555,13 +555,26 @@ FROM duckdb_logs_parsed('GlueScan');
 ```
 
 The `GlueDataFileWritten` log type (`INFO`) records the same files `glue_written_files()` lists, one entry per data file
-with the `table` and the `file_path`, logged once the write's partitions are registered.
+with the `table` and the `file_path`, logged once the write is complete.
 
 ```sql
 CALL enable_logging('GlueDataFileWritten', storage = 'memory');
 INSERT INTO lake.db.events SELECT ...;
 SELECT query_id, "table", file_path FROM duckdb_logs_parsed('GlueDataFileWritten')
 WHERE connection_id = current_connection_id() ORDER BY timestamp;
+```
+
+The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry strategy decides on for a Glue API call,
+before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
+the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got
+no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection). The retry limit is
+`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew does not go through the
+retry strategy and is not logged.
+
+```sql
+CALL enable_logging('GlueRetry', storage = 'memory');
+-- ... run queries ...
+SELECT error, status, count(*) FROM duckdb_logs_parsed('GlueRetry') GROUP BY ALL;
 ```
 
 ## Testing
@@ -580,8 +593,9 @@ which the tests use in their ATTACH; tests are skipped without a config (`requir
 The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
 GetTables on a database named `fault_access_denied*` / `fault_invalid_input*` with that Glue error, and carries out
 CreateDatabase / CreateTable on a `fault_already_exists*` database before answering AlreadyExistsException (what it
-creates differs from what was asked for); tests that need it are skipped without it. It also sets
-`GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
+creates differs from what was asked for), and refuses the first attempt of each request on a `fault_throttled*`
+database with ThrottlingException, letting the SDK's retries through; tests that need it are skipped without it. It
+also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
 `link_db` as Glue does through a database resource link whose target is `target_db`.
 
 ```sh

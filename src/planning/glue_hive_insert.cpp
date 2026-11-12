@@ -3,7 +3,6 @@
 #include "api/glue_api_util.hpp"
 
 #include "duckdb/common/file_system.hpp"
-#include "duckdb/logging/logger.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
@@ -23,6 +22,7 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/parsed_data/copy_info.hpp"
 #include "duckdb/planner/operator/logical_copy_to_file.hpp"
@@ -32,10 +32,10 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "core/glue_log_types.hpp"
 #include "core/glue_types.hpp"
 #include "core/hive_location.hpp"
 #include "execution/hive_copy.hpp"
-#include "core/glue_log_types.hpp"
 #include "functions/glue_written_files.hpp"
 
 namespace duckdb {
@@ -763,7 +763,7 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 
 void GlueHiveInsert::RecordWrittenFiles(ClientContext &context, const vector<string> &files) const {
 	GlueWrittenFilesState::Get(context)->AddFiles(files);
-	auto table = catalog.GetName().GetIdentifierName() + "." + table_info.schema_name + "." + table_info.name;
+	auto table = table_info.schema_name + "." + table_info.name;
 	for (auto &file : files) {
 		DUCKDB_LOG(context, GlueDataFileWrittenLogType, table, file);
 	}

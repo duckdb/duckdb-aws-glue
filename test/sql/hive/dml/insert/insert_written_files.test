@@ -31,7 +31,7 @@ SELECT count(*) FROM glue_written_files();
 0
 
 statement ok
-CALL enable_logging('GlueDataFileWritten');
+CALL enable_logging('GlueDataFileWritten', storage := 'memory');
 
 statement ok
 CREATE TABLE my_datalake.default.written_files (id INTEGER);
@@ -70,7 +70,7 @@ query III
 SELECT count(DISTINCT query_id), bool_and(connection_id = current_connection_id()), min("table")
 FROM duckdb_logs_parsed('GlueDataFileWritten');
 ----
-1	true	my_datalake.default.written_files
+1	true	default.written_files
 
 # other statements leave them in place
 statement ok
