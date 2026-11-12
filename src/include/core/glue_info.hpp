@@ -1,6 +1,9 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector.hpp"
@@ -11,6 +14,11 @@
 #include "core/readers/hive_json_options.hpp"
 
 namespace duckdb {
+
+//! A table / partition as the Glue SDK returned it, kept with the projection so that a write can be built from it
+//! instead of fetching the object again. Opaque outside api/, which alone defines them.
+struct GlueFetchedTable;
+struct GlueFetchedPartition;
 
 enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
 
@@ -29,6 +37,10 @@ public:
 
 //! A Glue "Database", exposed as a DuckDB schema
 struct GlueDatabaseInfo {
+	//! the catalog the database resides in
+	string catalog_id;
+	//! a Glue resource link (TargetDatabase set): a database of another catalog
+	bool is_resource_link = false;
 	string name;
 	string description;
 	//! Optional S3 location tables of this database default to
@@ -57,7 +69,10 @@ GlueTableType GlueTableTypeFromString(const string &type);
 //! A Glue "Table"
 struct GlueTableInfo {
 	string name;
-	string database_name;
+	//! The schema name of the table in the attached Glue catalog
+	string schema_name;
+	//! Table.DatabaseName as Glue returned it: through a resource link, the link's target database
+	string glue_database_name;
 	//! The Glue TableType as written (EXTERNAL_TABLE, VIRTUAL_VIEW, ...), not the open table format
 	string glue_table_type;
 	GlueTableType table_type = GlueTableType::OTHER;
@@ -83,8 +98,14 @@ struct GlueTableInfo {
 	//! StorageDescriptor.SortColumns, in Glue's order; only name and sort_order are set
 	vector<GlueColumn> sort_columns;
 	unordered_map<string, string> parameters;
+	//! Glue's VersionId and CreateTime of a fetched table; a DROP + CREATE starts at the same version again, CreateTime
+	//! (and TableType, within one second) tells the two apart. Empty for a definition not fetched from Glue.
+	string version_id;
+	int64_t create_time_ms = 0;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
+	//! The Table object this projection was made from; null for a definition not fetched from Glue
+	shared_ptr<const GlueFetchedTable> fetched;
 
 public:
 	bool IsView() const {
@@ -92,11 +113,16 @@ public:
 	}
 	//! The table format and what it was derived from (GlueTableFormat::Detect)
 	GlueTableFormat GetFormat() const;
+	//! Whether 'other' is the same Glue version of the table; false when either version is unknown
+	bool IsSameVersion(const GlueTableInfo &other) const;
 	//! The 'metadata_location' parameter of an Iceberg table (empty if not present)
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
 	string GetParameter(const string &key) const;
 	bool IsBucketed() const;
+	//! Whether this is a partitioned table with Athena partition projection on (projection.enabled): Athena then
+	//! derives the partitions from the projection.* parameters and ignores the ones registered in Glue
+	bool IsPartitionProjected() const;
 	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;
 	//! The SerDe, derived from serde_library; throws NotImplementedException for other SerDes
@@ -107,13 +133,15 @@ public:
 	bool TryGetProperty(const string &key, string &result) const;
 	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
 	string GetFieldDelimiter() const;
-	//! The codec to write a csv / json table's files with (write.compression, else compressionType), uncompressed when
-	//! the table names none; throws for a codec DuckDB can not write. Files are read with the codec their extension
-	//! says, whatever the table records.
+	//! The codec to write a csv / json table's files with (write.compression, else write_compression, else
+	//! compressionType), uncompressed when the table names none; throws for a codec DuckDB can not write. Files are
+	//! read with the codec their extension says, whatever the table records.
 	FileCompressionType GetTextCompression() const;
 	//! The codec the table records for its files, as DuckDB's writer for 'format' names it ('null' for an uncompressed
 	//! avro file), empty when it records none; throws for a codec DuckDB can not write
 	string GetCodec(HiveFileFormat format) const;
+	//! The format's codec parameter 'key', else write_compression, empty when the table records neither
+	string GetCodecParameter(const string &key) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
 	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
@@ -124,7 +152,7 @@ public:
 	void CheckTextSerdeSupported(HiveFileFormat format) const;
 	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote
 	string GetQuoteCharacter() const;
-	//! OpenCSVSerde's escapeChar, else its quote character; empty for LazySimpleSerDe
+	//! OpenCSVSerde's escapeChar, else its quote character; LazySimpleSerDe's escape.delim (empty without)
 	string GetEscapeCharacter() const;
 	//! How the files of a csv table are read
 	HiveCSVOptions GetCSVOptions() const;
@@ -143,11 +171,14 @@ struct GlueViewInfo {
 	//! The Glue database (a DuckDB schema) the view lives in
 	string database_name;
 	string name;
-	//! The SELECT as DuckDB prints it; unqualified names in it belong to database_name
+	//! ViewOriginalText: the SELECT as written
 	string sql;
-	//! The bound output columns; empty for a view created with DEFER_BINDING
+	//! ViewExpandedText: tables as <db>.<table>, of other Glue catalogs by catalog id (executed)
+	string expanded_sql;
+	//! The bound output columns
 	vector<GlueColumn> columns;
 	bool secure = false;
+	bool has_column_alias_list = false;
 };
 
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location
@@ -161,6 +192,27 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
+	//! The partition's own StorageDescriptor.InputFormat and SerdeInfo, which Hive reads its files with and which can
+	//! differ from the table's; empty when not known (a hive_scan, a deserialized plan)
+	string input_format;
+	string serde_library;
+	unordered_map<string, string> serde_parameters;
+	//! The data columns the partition declares, which can differ from the table's; empty when not known
+	vector<GlueColumn> partition_columns;
+	//! The column this partition declares for the table's column 'index', matched as a scan reads the files: by
+	//! position in csv tables, by name (ignoring case) otherwise. Null when the partition declares none, e.g. for a
+	//! column added to the table later.
+	optional_ptr<const GlueColumn> FindPartitionColumn(const vector<GlueColumn> &table_columns, idx_t index,
+	                                                   bool by_position) const;
+	//! The first data column of the table whose type this partition declares differently (FindPartitionColumn)
+	optional_idx FindColumnTypeMismatch(const vector<GlueColumn> &table_columns, bool by_position) const;
+};
+
+//! A partition as GetPartition returns it: also its parameters
+struct GluePartitionDetails : public GluePartitionInfo {
+	unordered_map<string, string> parameters;
+	//! The Partition object this projection was made from
+	shared_ptr<const GlueFetchedPartition> fetched;
 };
 
 } // namespace duckdb

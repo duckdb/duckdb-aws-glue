@@ -41,7 +41,7 @@ SELECT * FROM duckdb_columns() WHERE database_name = 'my_datalake';
 query I
 SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'fixture_view_plain';
 ----
-CREATE VIEW fixture_view_plain AS SELECT id, amount FROM "default".fixture_view_base WHERE id > 1;
+CREATE VIEW "default".fixture_view_plain AS SELECT id, amount FROM "default".fixture_view_base WHERE id > 1;
 
 # only views written by DuckDB are queried, even when the text would parse
 statement error

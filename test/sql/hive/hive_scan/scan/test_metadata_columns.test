@@ -1,0 +1,166 @@
+# name: test/sql/hive/hive_scan/scan/test_metadata_columns.test
+# description: The metadata columns of Trino's Hive connector: "$path", "$file_size" and "$file_modified_time"
+# group: [scan]
+
+require httpfs
+
+require glue
+
+require avro
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.meta_flat;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.meta_part;
+
+foreach format csv json avro
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.meta_{format};
+
+endloop
+
+#---------------------------------------------------------------------------
+# an unpartitioned table with two data files
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.meta_flat (id INTEGER, name VARCHAR) WITH (format = 'parquet');
+
+statement ok
+INSERT INTO my_datalake.default.meta_flat VALUES (1, 'one'), (2, 'two');
+
+statement ok
+INSERT INTO my_datalake.default.meta_flat SELECT i, repeat('x', i) FROM range(3, 100) t(i);
+
+# the data files with their size and modification time, as the file system reports them
+statement ok
+CREATE TEMP TABLE flat_blobs AS
+SELECT filename, size, last_modified FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_flat/*');
+
+# SELECT * returns only the table's columns, not the metadata columns
+query II
+SELECT * FROM my_datalake.default.meta_flat ORDER BY id LIMIT 1;
+----
+1	one
+
+query III
+SELECT typeof("$path"), typeof("$file_size"), typeof("$file_modified_time") FROM my_datalake.default.meta_flat LIMIT 1;
+----
+VARCHAR	BIGINT	TIMESTAMP WITH TIME ZONE
+
+# each column on its own, without the other metadata columns or any data column
+query II
+SELECT count(*), count(*) FILTER (t."$path" = t.filename) FROM my_datalake.default.meta_flat t;
+----
+99	99
+
+query II
+SELECT count(*), count(*) FILTER (t."$file_size" = b.size)
+FROM my_datalake.default.meta_flat t JOIN flat_blobs b ON t.filename = b.filename;
+----
+99	99
+
+query II
+SELECT count(*), count(*) FILTER (t."$file_modified_time" = b.last_modified)
+FROM my_datalake.default.meta_flat t JOIN flat_blobs b ON t.filename = b.filename;
+----
+99	99
+
+# all of them together
+query II
+SELECT count(*), count(*) FILTER (t."$path" = t.filename AND t."$file_size" = b.size AND
+                                  t."$file_modified_time" = b.last_modified)
+FROM my_datalake.default.meta_flat t JOIN flat_blobs b ON t.filename = b.filename;
+----
+99	99
+
+# filters on them: the rows of the smaller file
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.meta_flat
+WHERE "$path" = (SELECT filename FROM flat_blobs ORDER BY size LIMIT 1);
+----
+[1, 2]
+
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.meta_flat
+WHERE "$file_size" = (SELECT size FROM flat_blobs ORDER BY size LIMIT 1);
+----
+[1, 2]
+
+#---------------------------------------------------------------------------
+# the other formats, each read by its own reader
+#---------------------------------------------------------------------------
+foreach format csv json avro
+
+statement ok
+CREATE TABLE my_datalake.default.meta_{format} (id INTEGER, name VARCHAR) WITH (format = '{format}');
+
+statement ok
+INSERT INTO my_datalake.default.meta_{format} VALUES (1, 'one'), (2, 'two');
+
+query II
+SELECT count(*), count(*) FILTER (t."$path" = t.filename AND t."$file_size" = b.size AND
+                                  t."$file_modified_time" = b.last_modified)
+FROM my_datalake.default.meta_{format} t
+JOIN read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_{format}/*') b ON t.filename = b.filename;
+----
+2	2
+
+statement ok
+DROP TABLE my_datalake.default.meta_{format};
+
+endloop
+
+#---------------------------------------------------------------------------
+# a partitioned table
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.meta_part (id INTEGER, year INTEGER, month INTEGER) PARTITIONED BY (year, month) WITH (format = 'parquet');
+
+statement ok
+INSERT INTO my_datalake.default.meta_part VALUES (1, 2024, 1), (2, 2024, 1), (3, 2025, 2), (4, 2024, NULL);
+
+# the partition columns and the metadata columns together
+query IIII
+SELECT t.id, t.year, t.month, t."$path" = t.filename AND t."$file_size" = b.size AND t."$file_modified_time" = b.last_modified
+FROM my_datalake.default.meta_part t
+JOIN read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_part/**') b ON t.filename = b.filename
+ORDER BY t.id;
+----
+1	2024	1	true
+2	2024	1	true
+3	2025	2	true
+4	2024	NULL	true
+
+# pruned to one partition
+query III
+SELECT id, year, "$path" = filename FROM my_datalake.default.meta_part WHERE year = 2025 AND "$file_size" > 0;
+----
+3	2025	true
+
+#---------------------------------------------------------------------------
+# hive_scan(): the same columns when the scan is bound as a table function
+#---------------------------------------------------------------------------
+query II
+SELECT count(*), count(*) FILTER (t."$path" = t.filename AND t."$file_size" = b.size AND
+                                  t."$file_modified_time" = b.last_modified)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_flat', schema := {id: 'INTEGER', name: 'VARCHAR'}) t
+JOIN flat_blobs b ON t.filename = b.filename;
+----
+99	99
+
+statement ok
+DROP TABLE my_datalake.default.meta_flat;
+
+statement ok
+DROP TABLE my_datalake.default.meta_part;

@@ -1,0 +1,111 @@
+# name: test/sql/hive/dml/insert/insert_undo_faults.test
+# description: an INSERT whose timeout lands while its partitions are registered is undone; a CREATE TABLE AS that fails after another client created its table again keeps that table
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fault proxy (scripts/glue_fault_proxy.py) holds BatchCreatePartition on a fault_slow_partitions* database for a
+# few seconds, and on a fault_recreated_during_write* database drops and creates the table again before failing it
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_slow_partitions_undo CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_recreated_during_write_undo CASCADE;
+
+#---------------------------------------------------------------------------
+# a timeout while the partitions are registered undoes the INSERT, which can then be run again
+#---------------------------------------------------------------------------
+statement ok
+CREATE SCHEMA my_datalake.fault_slow_partitions_undo;
+
+statement ok
+CREATE TABLE my_datalake.fault_slow_partitions_undo.t (id BIGINT, k INTEGER) PARTITIONED BY (k);
+
+statement ok
+SET max_execution_time = 1500;
+
+statement error
+INSERT INTO fault_dl.fault_slow_partitions_undo.t SELECT range, (range % 3)::INT FROM range(30);
+----
+<REGEX>:.*(Interrupt|maximum execution time).*
+
+statement ok
+RESET max_execution_time;
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/fault_slow_partitions_undo/t/**');
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.fault_slow_partitions_undo.t;
+----
+0
+
+statement ok
+INSERT INTO my_datalake.fault_slow_partitions_undo.t SELECT range, (range % 3)::INT FROM range(30);
+
+query II
+SELECT count(*), count(DISTINCT k) FROM my_datalake.fault_slow_partitions_undo.t;
+----
+30	3
+
+#---------------------------------------------------------------------------
+# a CREATE TABLE AS that fails after another client dropped its table and created it again leaves that table alone
+#---------------------------------------------------------------------------
+statement ok
+CREATE SCHEMA my_datalake.fault_recreated_during_write_undo;
+
+statement error
+CREATE TABLE fault_dl.fault_recreated_during_write_undo.t PARTITIONED BY (k) AS SELECT range AS id, (range % 2)::INT AS k FROM range(10);
+----
+<REGEX>:.*InternalServiceException.*
+
+# the statement's own files are gone, the other client's table is still there
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/fault_recreated_during_write_undo/t/**');
+----
+0
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT count(*) FROM my_datalake.fault_recreated_during_write_undo.t;
+----
+0
+
+statement ok
+DROP SCHEMA my_datalake.fault_recreated_during_write_undo CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.fault_slow_partitions_undo CASCADE;

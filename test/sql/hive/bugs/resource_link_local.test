@@ -1,0 +1,124 @@
+# name: test/sql/hive/bugs/resource_link_local.test
+# description: A table read through a database resource link, against the local servers
+# group: [bugs]
+
+#
+# moto cannot model a resource link, so scripts/resource_link_proxy.py (GLUE_LINK_PROXY_ENDPOINT) stands in front of
+# it: it answers table requests on link_db with the target's DatabaseName (target_db), as Glue does, shows a DuckDB
+# view as written for target_db, and answers EntityNotFound for any request naming target_db, which the consumer
+# catalog does not have. The tables and the view are created in moto directly. Before the fix every SELECT fails
+# with "Glue table 'target_db.<t>' no longer exists".
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_LINK_PROXY_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as direct (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS direct.link_db;
+
+statement ok
+DROP TABLE IF EXISTS direct.link_db.t;
+
+statement ok
+DROP TABLE IF EXISTS direct.link_db.tp;
+
+statement ok
+CREATE TABLE direct.link_db.t AS SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, v);
+
+statement ok
+CREATE TABLE direct.link_db.tp (id INTEGER, v VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO direct.link_db.tp VALUES (10, 'x', 'a'), (20, 'y', 'a');
+
+statement ok
+DROP VIEW IF EXISTS direct.link_db.v;
+
+statement ok
+CREATE VIEW direct.link_db.v AS SELECT 42 AS answer;
+
+statement ok
+DETACH direct;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as dl (TYPE glue, ENDPOINT '{GLUE_LINK_PROXY_ENDPOINT}');
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+query II
+SELECT count(*), sum(id) FROM dl.link_db.t;
+----
+2	3
+
+query II
+SELECT count(*), sum(id) FROM dl.link_db.tp WHERE dt = 'a';
+----
+2	30
+
+query I
+SELECT count(*) FROM dl.link_db.tp;
+----
+2
+
+# the partition functions resolve the table through the link too: add, then drop a partition of link_db.tp
+statement ok
+CALL glue_add_partition('dl.link_db.tp', {dt: 'b'});
+
+query I
+SELECT count(*) FROM glue_partitions('dl.link_db.tp');
+----
+2
+
+statement ok
+ALTER TABLE dl.link_db.tp DROP PARTITION (dt = 'b');
+
+query I
+SELECT count(*) FROM glue_partitions('dl.link_db.tp');
+----
+1
+
+# INSERT through the link: a new partition is registered with Glue under the link
+statement ok
+INSERT INTO dl.link_db.tp VALUES (30, 'z', 'c');
+
+query II
+SELECT count(*), sum(id) FROM dl.link_db.tp;
+----
+3	60
+
+query I
+SELECT count(*) FROM glue_partitions('dl.link_db.tp');
+----
+2
+
+statement ok
+INSERT INTO dl.link_db.t VALUES (3, 'c');
+
+query II
+SELECT count(*), sum(id) FROM dl.link_db.t;
+----
+3	6
+
+# a DuckDB view held by the link's target was written for the target, so it is not refused as moved
+query I
+SELECT answer FROM dl.link_db.v;
+----
+42
+
+# a Glue error through the link names the database the user queried, not the target
+statement error
+CALL glue_drop_partition('dl.link_db.tp', {dt: 'zz'});
+----
+Glue table 'link_db.tp'

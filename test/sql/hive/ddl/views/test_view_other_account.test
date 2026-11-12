@@ -1,0 +1,214 @@
+# name: test/sql/hive/ddl/views/test_view_other_account.test
+# description: a Glue view over a table of another account's Glue catalog stores it by that catalog id, and reads it whatever names the catalogs are attached under
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# a second account of the local Glue: make test-local sets these (scripts/glue_second_account.sh)
+require-env GLUE_SECOND_CATALOG_ID
+
+require-env GLUE_SECOND_KEY_ID
+
+require-env GLUE_SECOND_SECRET
+
+require-env GLUE_SECOND_SESSION_TOKEN
+
+# used for Glue only (the scope keeps it off the data, which the default secret reads)
+statement ok
+CREATE SECRET second_account (TYPE S3, KEY_ID '{GLUE_SECOND_KEY_ID}', SECRET '{GLUE_SECOND_SECRET}', SESSION_TOKEN '{GLUE_SECOND_SESSION_TOKEN}', REGION 'us-east-1', SCOPE 's3://glue-second-account-glue-only');
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as own_cat (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}');
+
+statement ok
+attach '{GLUE_SECOND_CATALOG_ID}' as other_cat (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', SECRET second_account, DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/second');
+
+statement ok
+DROP VIEW IF EXISTS own_cat.default.oa_view;
+
+statement ok
+DROP VIEW IF EXISTS own_cat.default.oa_bare;
+
+statement ok
+DROP VIEW IF EXISTS own_cat.default.oa_bad;
+
+statement ok
+DROP VIEW IF EXISTS own_cat.default.oa_loop;
+
+statement ok
+DROP TABLE IF EXISTS own_cat.default.oa_local;
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS other_cat.oa_db;
+
+statement ok
+DROP VIEW IF EXISTS other_cat.oa_db.oa_back;
+
+statement ok
+DROP TABLE IF EXISTS other_cat.oa_db.oa_orders;
+
+statement ok
+CREATE TABLE other_cat.oa_db.oa_orders AS SELECT * FROM (VALUES (1), (2), (3)) t(id);
+
+statement ok
+CREATE TABLE own_cat.default.oa_local AS SELECT * FROM (VALUES (2), (3)) t(id);
+
+# the other account's table by its catalog id; the view's own table as db.t
+statement ok
+CREATE VIEW own_cat.default.oa_view AS SELECT oa_orders.id FROM other_cat.oa_db.oa_orders JOIN own_cat.default.oa_local l ON oa_orders.id = l.id;
+
+query I
+SELECT replace(response.ViewExpandedText, '{GLUE_SECOND_CATALOG_ID}', 'ID2') FROM glue_get_table_response('own_cat.default.oa_view');
+----
+SELECT oa_orders.id FROM ("ID2".oa_db.oa_orders INNER JOIN "default".oa_local AS l ON ((oa_orders.id = l.id)))
+
+# a column, row or star name qualified with the other catalog would bind differently once the catalog is renamed
+statement error
+CREATE VIEW own_cat.default.oa_bad AS SELECT other_cat.oa_db.oa_orders.id FROM other_cat.oa_db.oa_orders;
+----
+whose "other_cat" is also the name of a catalog the view reads: use a table alias with another name
+
+statement error
+CREATE VIEW own_cat.default.oa_bad AS SELECT other_cat.oa_orders FROM other_cat.oa_db.oa_orders;
+----
+whose "other_cat" is also the name of a catalog the view reads
+
+statement error
+CREATE VIEW own_cat.default.oa_bad AS SELECT * EXCLUDE (other_cat.oa_db.oa_orders.id), 1 AS one FROM other_cat.oa_db.oa_orders;
+----
+Glue view references "other_cat.oa_db.oa_orders.id", whose "other_cat" is also the name of a catalog the view reads
+
+statement error
+CREATE VIEW own_cat.default.oa_bad AS SELECT * RENAME (other_cat.oa_db.oa_orders.id AS oid) FROM other_cat.oa_db.oa_orders;
+----
+whose "other_cat" is also the name of a catalog the view reads
+
+query I
+SELECT id FROM own_cat.default.oa_view ORDER BY id;
+----
+2
+3
+
+# a view reading itself through a view of the other account
+statement ok
+CREATE VIEW own_cat.default.oa_loop AS SELECT 1 AS x;
+
+statement ok
+CREATE VIEW other_cat.oa_db.oa_back AS SELECT x FROM own_cat.default.oa_loop;
+
+statement error
+CREATE OR REPLACE VIEW own_cat.default.oa_loop AS SELECT x FROM other_cat.oa_db.oa_back;
+----
+Glue view "default.oa_loop" can not be created: its query reads the view itself
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('own_cat.default.oa_loop');
+----
+SELECT 1 AS x
+
+statement ok
+DROP VIEW other_cat.oa_db.oa_back;
+
+statement ok
+DROP VIEW own_cat.default.oa_loop;
+
+# the view's own "default".oa_local is read in the view's catalog, even with a catalog named "default" attached
+statement ok
+ATTACH ':memory:' AS "default";
+
+statement ok
+CREATE TABLE "default".main.oa_local AS SELECT 3 AS id;
+
+query I
+SELECT id FROM own_cat.default.oa_view ORDER BY id;
+----
+2
+3
+
+statement ok
+DETACH "default";
+
+# catalog.table in two parts names the other catalog too (its default database): stored by id
+statement ok
+attach '{GLUE_SECOND_CATALOG_ID}' as other_short (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', SECRET second_account, DEFAULT_SCHEMA 'oa_db');
+
+statement ok
+CREATE VIEW own_cat.default.oa_bare AS SELECT id FROM other_short.oa_orders;
+
+query I
+SELECT replace(response.ViewExpandedText, '{GLUE_SECOND_CATALOG_ID}', 'ID2') FROM glue_get_table_response('own_cat.default.oa_bare');
+----
+SELECT id FROM "ID2".oa_db.oa_orders
+
+statement ok
+DROP VIEW own_cat.default.oa_bare;
+
+statement ok
+DETACH other_short;
+
+# a bare name found in the other account through the search path is refused: a view's bare names are its own
+statement ok
+USE other_cat.oa_db;
+
+statement error
+CREATE VIEW own_cat.default.oa_bare AS SELECT id FROM oa_orders;
+----
+which is not in the view's Glue catalog but in catalog "other_cat" (through the search path)
+
+statement ok
+USE memory;
+
+# not attached: the error names the ATTACH to run
+statement ok
+DETACH other_cat;
+
+statement error
+SELECT id FROM own_cat.default.oa_view;
+----
+from Glue catalog {GLUE_SECOND_CATALOG_ID}, which is not attached
+
+statement error
+SELECT id FROM own_cat.default.oa_view;
+----
+ATTACH '{GLUE_SECOND_CATALOG_ID}' (TYPE GLUE, REGION 'us-east-1', ENDPOINT '{GLUE_ENDPOINT}') to read it
+
+# the other account attached under another name
+statement ok
+attach '{GLUE_SECOND_CATALOG_ID}' as renamed_other (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', SECRET second_account);
+
+query I
+SELECT id FROM own_cat.default.oa_view ORDER BY id;
+----
+2
+3
+
+# both catalogs under new names
+statement ok
+DETACH own_cat;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as any_name (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT id FROM any_name.default.oa_view ORDER BY id;
+----
+2
+3
+
+statement ok
+DROP VIEW any_name.default.oa_view;
+
+statement ok
+DROP TABLE any_name.default.oa_local;
+
+statement ok
+DROP TABLE renamed_other.oa_db.oa_orders;
+
+statement ok
+DROP SCHEMA renamed_other.oa_db;

@@ -20,6 +20,18 @@ class GlueClient;
 namespace duckdb {
 class GlueTable;
 
+//! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
+enum class TableLookup : uint8_t {
+	//! the schema is already held, or was added meanwhile: the regular lookup runs
+	SKIPPED,
+	//! the table exists, so its schema does too
+	TABLE_FOUND,
+	//! the schema exists, the table does not
+	TABLE_NOT_FOUND,
+	//! the schema does not exist
+	SCHEMA_NOT_FOUND
+};
+
 class GlueCatalog : public Catalog {
 public:
 	explicit GlueCatalog(AttachedDatabase &db_p, AccessMode access_mode, GlueAttachOptions options);
@@ -30,6 +42,8 @@ public:
 	static unique_ptr<SecretEntry> GetStorageSecret(ClientContext &context, const string &secret_name);
 	//! Glue has no transactions: throw on DDL or INSERT inside an explicit (BEGIN) transaction
 	static void ThrowIfInExplicitTransaction(ClientContext &context);
+	//! The same for a glue_* function that changes Glue, naming it in the error
+	static void ThrowIfInExplicitTransaction(ClientContext &context, const char *function);
 
 	void Initialize(bool load_builtin) override;
 	string GetCatalogType() override {
@@ -61,6 +75,9 @@ public:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 	void OnDetach(ClientContext &context) override;
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
+	//! Serves a single-name equality on schema_name with one database lookup instead of listing every database
+	vector<reference<SchemaCatalogEntry>> GetSchemasForScan(ClientContext &context,
+	                                                        const SchemaScanFilters &filters) override;
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();
@@ -91,6 +108,9 @@ public:
 	AccessMode access_mode;
 	GlueAttachOptions options;
 
+	//! the CatalogId Glue reports in the response of GetDatabases call (during attach probe or first usage)
+	string FetchCatalogId(ClientContext &context);
+
 	//! The cached Glue client (managed by GlueAPI): rebuilt whenever the credentials it was built with change
 	mutex client_lock;
 	string client_cache_key;
@@ -104,8 +124,23 @@ private:
 	//! key a database parameter
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);
 
+	//! Looks a table up before its database: finding the table proves the database exists, saving GetDatabase
+	CatalogEntryLookup TryLookupEntryInternal(CatalogTransaction transaction,
+	                                          const EntryLookupInfo &lookup_info) override;
+	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
+	TableLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+	                                       const string &database_name, CatalogEntryLookup &result);
+
+private:
+	//! for reading - the fetched catalog id or account id from ATTACH
+	string KnownCatalogId();
+	friend struct GlueViewNames;
+
 private:
 	GlueSchemaSet schemas;
+	mutex reported_id_lock;
+	//! empty until Glue reports one: not cached as none, the catalog may get a database of its own later
+	string reported_catalog_id;
 };
 
 } // namespace duckdb

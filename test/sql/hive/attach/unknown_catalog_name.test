@@ -1,0 +1,65 @@
+# name: test/sql/hive/attach/unknown_catalog_name.test
+# description: a three-part name whose catalog is not attached does not resolve to a database of the default Glue catalog
+# group: [attach]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ucn_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.ucn_orders (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.ucn_orders VALUES (1);
+
+# the Glue catalog is the default: DuckDB reads "x".db.t with an unknown catalog x as the schema path [x, db] in it,
+# which used to resolve to database db (and read the table). DuckDB looks schemas up with RETURN_NULL here and reports
+# its own "does not exist" message.
+statement ok
+USE my_datalake.default;
+
+statement error
+SELECT id FROM "999999999999"."default".ucn_orders;
+----
+schema "999999999999.default" does not exist
+
+statement error
+SELECT id FROM not_attached."default".ucn_orders;
+----
+schema "not_attached.default" does not exist
+
+# the names that do resolve still do
+query I
+SELECT id FROM my_datalake."default".ucn_orders;
+----
+1
+
+query I
+SELECT id FROM "default".ucn_orders;
+----
+1
+
+query I
+SELECT id FROM ucn_orders;
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+DROP TABLE my_datalake.default.ucn_orders;

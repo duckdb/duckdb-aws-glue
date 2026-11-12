@@ -53,11 +53,6 @@ ALTER TABLE my_datalake.default.tsprec_ok ADD COLUMN ns TIMESTAMP_NS;
 ----
 can not be converted to a Glue type
 
-statement error
-CREATE VIEW my_datalake.default.tsprec_bad AS SELECT TIMESTAMP_NS '2008-09-15 03:04:05.123456789' AS ts;
-----
-can not be converted to a Glue type
-
 # an explicit TIMESTAMP column stores the value rounded to microseconds
 statement ok
 INSERT INTO my_datalake.default.tsprec_ok VALUES (1, TIMESTAMP_NS '2008-09-15 03:04:05.123456789');

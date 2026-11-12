@@ -1,0 +1,527 @@
+# name: test/sql/hive/ddl/views/test_view_catalog_names.test
+# description: a Glue view stores the tables of its own catalog as db.t and those of other Glue catalogs by catalog id, so it reads the same whatever name the catalog is attached under
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require json
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as writer_cat (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_nested;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_cte_scope;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_colref;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_recursive;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_no_id;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_noprobe;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_other_alias;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_cte;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_session;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_scalar;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_second_alias;
+
+statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_bad;
+
+statement ok
+DROP TABLE IF EXISTS writer_cat.default.an_orders;
+
+statement ok
+CREATE TABLE writer_cat.default.an_orders (id INTEGER);
+
+statement ok
+INSERT INTO writer_cat.default.an_orders VALUES (1), (2), (3);
+
+statement ok
+USE writer_cat.default;
+
+# ViewOriginalText keeps the names as written; ViewExpandedText names every table of the view's own catalog as
+# database.table, with no catalog alias and no account id
+statement ok
+CREATE VIEW an_view AS SELECT id FROM an_orders WHERE id > 1;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view');
+----
+SELECT id FROM an_orders WHERE (id > 1)	SELECT id FROM "default".an_orders WHERE (id > 1)
+
+# a table named through the view's own catalog alias: core drops the alias
+statement ok
+CREATE VIEW an_view_other_alias AS SELECT id FROM writer_cat.default.an_orders;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_other_alias');
+----
+SELECT id FROM "default".an_orders	SELECT id FROM "default".an_orders
+
+# the view's own alias in two parts (catalog.table): core drops it too
+statement ok
+CREATE VIEW an_view_session AS SELECT id FROM writer_cat.an_orders;
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_session');
+----
+SELECT id FROM "default".an_orders
+
+statement ok
+DROP VIEW an_view_session;
+
+# another alias of the same Glue catalog (same catalog id) is the view's own catalog too
+statement ok
+attach '{GLUE_CATALOG_ID}' as second_alias (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+CREATE VIEW an_view_second_alias AS SELECT id FROM second_alias.default.an_orders;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_second_alias');
+----
+SELECT id FROM second_alias."default".an_orders	SELECT id FROM "default".an_orders
+
+statement error
+CREATE VIEW an_view_bad AS SELECT second_alias.default.an_orders.id FROM second_alias.default.an_orders;
+----
+whose "second_alias" is also the name of a catalog the view reads
+
+# the view's own catalog name too, where core leaves it (a row reference)
+statement error
+CREATE VIEW an_view_bad AS SELECT writer_cat.an_orders AS r FROM writer_cat.default.an_orders;
+----
+whose "writer_cat" is also the name of a catalog the view reads
+
+# a CTE that shadows a table name stays a CTE reference
+statement ok
+CREATE VIEW an_view_cte AS WITH an_orders AS (SELECT 42 AS id) SELECT id FROM an_orders;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_cte');
+----
+WITH an_orders AS (SELECT 42 AS id) SELECT id FROM an_orders	WITH an_orders AS (SELECT 42 AS id) SELECT id FROM an_orders
+
+# CTE scoping: the CTE an_orders is visible only inside the subquery; the outer an_orders is the table
+statement ok
+CREATE VIEW an_view_cte_scope AS SELECT c.id AS cte_id, o.id FROM (WITH an_orders AS (SELECT 42 AS id) SELECT id FROM an_orders) c, an_orders o;
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_cte_scope');
+----
+SELECT c.id AS cte_id, o.id FROM (WITH an_orders AS (SELECT 42 AS id) SELECT id FROM an_orders) AS c , "default".an_orders AS o
+
+# a recursive CTE references itself
+statement ok
+CREATE VIEW an_view_recursive AS WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 3) SELECT n FROM r;
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_recursive');
+----
+WITH RECURSIVE r (n) AS ((SELECT 1) UNION ALL (SELECT (n + 1) FROM r WHERE (n < 3))) SELECT n FROM r
+
+# an unaliased expression is named after its text, which the rewrite changes: the view keeps its original name
+statement ok
+CREATE VIEW an_view_scalar AS SELECT (SELECT max(id) FROM an_orders);
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_scalar');
+----
+SELECT (SELECT max(id) FROM "default".an_orders)
+
+query I
+SELECT * FROM an_view_scalar;
+----
+3
+
+# a temporary table shadows the view's table when DuckDB binds the view: refused, as it is not in the Glue catalog
+statement ok
+CREATE TEMP TABLE an_orders AS SELECT 'temporary' AS s;
+
+statement error
+CREATE VIEW an_view_session AS SELECT * FROM an_orders;
+----
+which is not in the view's Glue catalog but in catalog "temp" (through the search path)
+
+# catalog.table, two parts: DuckDB binds it to that catalog
+statement ok
+CREATE TEMP TABLE an_temp AS SELECT 7 AS id;
+
+statement error
+CREATE VIEW an_view_session AS SELECT id FROM temp.an_temp;
+----
+in catalog "temp" of type duckdb, which is not in experimental_glue_view_external_catalog_types
+
+statement ok
+DROP TABLE temp.an_orders;
+
+statement ok
+DROP TABLE temp.an_temp;
+
+# table functions are sources outside the Glue catalog
+statement error
+CREATE VIEW an_view_function AS SELECT * FROM range(3);
+----
+Glue views can not read from table functions
+
+statement error
+CREATE VIEW an_view_function AS SELECT * FROM glue_get_table_response('writer_cat.default.an_orders');
+----
+Glue views can not read from table functions
+
+# the same catalog id in another region is another catalog
+statement ok
+attach '{GLUE_CATALOG_ID}' as west_cat (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', REGION 'us-west-2', DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/west');
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS west_cat.an_west_db;
+
+statement ok
+CREATE TABLE IF NOT EXISTS west_cat.an_west_db.an_west_t (id INTEGER);
+
+statement error
+CREATE VIEW an_view_west AS SELECT id FROM west_cat.an_west_db.an_west_t;
+----
+a Glue view can only reference tables of Glue catalogs in its own region
+
+# a bare name found in another Glue catalog through the search path is refused
+statement ok
+USE west_cat.an_west_db;
+
+statement error
+CREATE VIEW writer_cat.default.an_view_session AS SELECT id FROM an_west_t;
+----
+which is not in the view's Glue catalog but in catalog "west_cat" (through the search path)
+
+statement ok
+USE writer_cat.default;
+
+statement ok
+DROP TABLE west_cat.an_west_db.an_west_t;
+
+statement ok
+DROP SCHEMA west_cat.an_west_db;
+
+# a column reference that repeats the catalog qualifier (catalog.schema.table.column) loses it with the table
+statement ok
+CREATE VIEW an_view_colref AS SELECT writer_cat.default.an_orders.id FROM writer_cat.default.an_orders WHERE writer_cat.default.an_orders.id > 2;
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_colref');
+----
+SELECT "default".an_orders.id FROM "default".an_orders WHERE ("default".an_orders.id > 2)
+
+# a view over a view
+statement ok
+CREATE VIEW an_view_nested AS SELECT id FROM an_view_other_alias WHERE id < 3;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_nested');
+----
+SELECT id FROM an_view_other_alias WHERE (id < 3)	SELECT id FROM "default".an_view_other_alias WHERE (id < 3)
+
+# a bare name that DuckDB finds outside the view's catalog, through the session search path, is refused
+statement ok
+CREATE TABLE memory.main.an_only_local AS SELECT 1 AS id;
+
+statement ok
+USE memory;
+
+statement error
+CREATE VIEW writer_cat.default.an_view_session AS SELECT id FROM an_only_local;
+----
+which is not in the view's Glue catalog but in catalog "memory" (through the search path)
+
+statement ok
+USE writer_cat.default;
+
+# a reader that attaches the catalog under any other name reads the views (it executes ViewExpandedText)
+statement ok
+USE memory;
+
+statement ok
+DETACH writer_cat;
+
+statement ok
+DETACH second_alias;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as any_name (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT id FROM any_name.default.an_view ORDER BY id;
+----
+2
+3
+
+query I
+SELECT id FROM any_name.default.an_view_other_alias ORDER BY id;
+----
+1
+2
+3
+
+query I
+SELECT id FROM any_name.default.an_view_cte;
+----
+42
+
+query I
+SELECT id FROM any_name.default.an_view_nested ORDER BY id;
+----
+1
+2
+
+query II
+SELECT cte_id, id FROM any_name.default.an_view_cte_scope ORDER BY id;
+----
+42	1
+42	2
+42	3
+
+query I
+SELECT id FROM any_name.default.an_view_colref;
+----
+3
+
+query I
+SELECT n FROM any_name.default.an_view_recursive ORDER BY n;
+----
+1
+2
+3
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE any_name.default.an_view_other_alias);
+----
+id	INTEGER
+
+# the writer's alias, now naming a different catalog in the reader's session, is not what the view binds to
+statement ok
+ATTACH ':memory:' AS second_alias;
+
+statement ok
+CREATE SCHEMA second_alias."default";
+
+statement ok
+CREATE TABLE second_alias."default".an_orders AS SELECT 99 AS id;
+
+query I
+SELECT id FROM any_name.default.an_view_other_alias ORDER BY id;
+----
+1
+2
+3
+
+statement ok
+DETACH second_alias;
+
+# the catalog attached under its own catalog id reads them too
+statement ok
+DETACH any_name;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as "{GLUE_CATALOG_ID}" (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT id FROM "{GLUE_CATALOG_ID}".default.an_view_nested ORDER BY id;
+----
+1
+2
+
+statement ok
+DETACH "{GLUE_CATALOG_ID}";
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as any_name (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+# only tables in Glue catalogs can be stored
+statement ok
+CREATE TABLE memory.main.an_local AS SELECT 1 AS id;
+
+statement error
+CREATE VIEW any_name.default.an_view_local AS SELECT id FROM memory.main.an_local;
+----
+in catalog "memory" of type duckdb, which is not in experimental_glue_view_external_catalog_types
+
+# a catalog attached as ':' reads the views and writes its own tables as db.t
+statement ok
+DETACH any_name;
+
+statement ok
+attach ':' as no_id (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT id FROM no_id.default.an_view ORDER BY id;
+----
+2
+3
+
+statement ok
+CREATE VIEW no_id.default.an_view_no_id AS SELECT id FROM no_id.default.an_orders WHERE id = 1;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('no_id.default.an_view_no_id');
+----
+SELECT id FROM "default".an_orders WHERE (id = 1)	SELECT id FROM "default".an_orders WHERE (id = 1)
+
+query I
+SELECT id FROM no_id.default.an_view_no_id;
+----
+1
+
+statement ok
+DROP VIEW no_id.default.an_view_no_id;
+
+statement ok
+DETACH no_id;
+
+# with VERIFY_CONNECTION false a ':' reader reads the views too: they name no catalog
+statement ok
+attach ':' as reader_noprobe (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', VERIFY_CONNECTION false);
+
+query I
+SELECT id FROM reader_noprobe.default.an_view ORDER BY id;
+----
+2
+3
+
+statement ok
+DETACH reader_noprobe;
+
+# with VERIFY_CONNECTION false a ':' catalog writes its own tables as db.t too: no catalog id is needed
+statement ok
+attach ':' as cat_noprobe (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', VERIFY_CONNECTION false);
+
+statement ok
+CREATE VIEW cat_noprobe.default.an_view_noprobe AS SELECT id FROM an_orders;
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('cat_noprobe.default.an_view_noprobe');
+----
+SELECT id FROM "default".an_orders
+
+statement ok
+DROP VIEW cat_noprobe.default.an_view_noprobe;
+
+statement ok
+DETACH cat_noprobe;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as any_name (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}');
+
+# a database.table name is read in the view's own catalog, even when a catalog of that name is attached
+statement ok
+ATTACH ':memory:' AS "default";
+
+statement ok
+CREATE TABLE "default".main.an_orders AS SELECT 99 AS id;
+
+statement error
+CREATE VIEW any_name.default.an_view_session AS SELECT id FROM "default".an_orders;
+----
+in catalog "default" of type duckdb, which is not in experimental_glue_view_external_catalog_types
+
+query I
+SELECT id FROM any_name.default.an_view ORDER BY id;
+----
+2
+3
+
+statement ok
+DETACH "default";
+
+# a database.table name binds only in the view's own catalog: when the database is gone it fails, even if the
+# reader's current catalog has that database.table
+statement ok
+CREATE SCHEMA IF NOT EXISTS any_name.an_gone_db;
+
+statement ok
+CREATE TABLE IF NOT EXISTS any_name.an_gone_db.an_gone AS SELECT 1 AS id;
+
+statement ok
+CREATE VIEW any_name.default.an_view_gone AS SELECT id FROM any_name.an_gone_db.an_gone;
+
+statement ok
+DROP TABLE any_name.an_gone_db.an_gone;
+
+statement ok
+DROP SCHEMA any_name.an_gone_db;
+
+statement ok
+CREATE SCHEMA memory.an_gone_db;
+
+statement ok
+CREATE TABLE memory.an_gone_db.an_gone AS SELECT 99 AS id;
+
+statement ok
+USE memory;
+
+statement error
+SELECT id FROM any_name.default.an_view_gone;
+----
+schema "an_gone_db" does not exist
+
+statement ok
+DROP VIEW any_name.default.an_view_gone;
+
+statement ok
+DROP VIEW any_name.default.an_view_nested;
+
+statement ok
+DROP VIEW any_name.default.an_view_cte_scope;
+
+statement ok
+DROP VIEW any_name.default.an_view_colref;
+
+statement ok
+DROP VIEW any_name.default.an_view_recursive;
+
+statement ok
+DROP VIEW any_name.default.an_view;
+
+statement ok
+DROP VIEW any_name.default.an_view_other_alias;
+
+statement ok
+DROP VIEW any_name.default.an_view_cte;
+
+statement ok
+DROP VIEW any_name.default.an_view_scalar;
+
+statement ok
+DROP VIEW any_name.default.an_view_second_alias;
+
+statement ok
+DROP TABLE any_name.default.an_orders;

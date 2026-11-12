@@ -6,6 +6,7 @@ add_library_unity(
   glue_database_api.cpp
   glue_http_client.cpp
   glue_partition_api.cpp
+  glue_retry_strategy.cpp
   glue_table_api.cpp)
 target_link_libraries(glue_api ${AWSSDK_LINK_LIBRARIES})
 

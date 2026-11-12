@@ -20,19 +20,21 @@ public:
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
-	//! filename: the location of the data file a row was read from, as for read_parquet and hive_scan
+	//! filename: the location of the data file a row was read from, as for read_parquet and hive_scan, and the
+	//! metadata columns of Trino's Hive connector ("$path", "$file_size", ...)
 	virtual_column_map_t GetVirtualColumns() const override;
 	//! None: the files of a Hive table have no row identifier
 	vector<column_t> GetRowIdColumns() const override;
 
-	//! Re-fetch the table definition from Glue
-	GlueTableInfo RefreshTableInfo(ClientContext &context) const;
+	//! Called by duckdb_tables().sql / ToSQL(). On a Hive table we can round-trip, the sql column
+	//! renders as a full CREATE TABLE ... WITH (...). Otherwise it renders the "Not supported:
+	//! ..." reason inline, so a bulk catalog scan never breaks on a single bad table.
+	unique_ptr<CreateInfo> GetInfo() const override;
 
 private:
 	//! Scan a Hive table with read_parquet over the files of the partitions Glue lists (or the table location for an
 	//! unpartitioned table), using the HiveMultiFileReader for Glue's schema and partition values
-	TableFunction GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
-	                                  const GlueTableInfo &latest_info);
+	TableFunction GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data);
 
 public:
 	//! The table definition as returned by Glue when the entry was created

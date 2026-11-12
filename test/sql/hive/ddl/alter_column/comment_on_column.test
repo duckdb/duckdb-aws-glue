@@ -73,10 +73,29 @@ COMMENT ON COLUMN my_datalake.default.comment_col.nope IS 'x';
 ----
 nope
 
-statement error
-COMMENT ON COLUMN my_datalake.default.comment_col.dt IS 'x';
+# COMMENT ON COLUMN also works on partition keys
+statement ok
+COMMENT ON COLUMN my_datalake.default.comment_col.dt IS 'the partition date';
+
+query II
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' AND column_name = 'dt';
 ----
-Comments on the partition keys of Glue tables are not supported yet
+dt	the partition date
+
+# the comment lives on Glue's PartitionKeys (not Columns)
+query I
+SELECT partition_keys FROM glue_get_table_response('my_datalake.default.comment_col');
+----
+[{'name': dt, 'type': string, 'comment': the partition date}]
+
+# NULL clears a partition-key comment
+statement ok
+COMMENT ON COLUMN my_datalake.default.comment_col.dt IS NULL;
+
+query II
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' AND column_name = 'dt';
+----
+dt	NULL
 
 statement ok
 CREATE VIEW my_datalake.default.comment_col_view AS SELECT 1 AS a;

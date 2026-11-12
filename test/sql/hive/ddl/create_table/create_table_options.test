@@ -170,14 +170,28 @@ parquet	false	Jane D.
 statement ok
 DROP TABLE my_datalake.default.ddl_opts_props;
 
-#---------------------------------------------------------------------------
-# not supported: COMMENT, ROW FORMAT, STORED AS, WITH SERDEPROPERTIES
-#---------------------------------------------------------------------------
-# table comments are not written to Glue
-statement error
-COMMENT ON TABLE my_datalake.default.ddl_opts IS 'planet data';
-----
+# WITH (comment = '...') writes to Table.Description (so duckdb_tables().comment shows it) and
+# is mirrored in Parameters.comment so either read location sees the same value.
+statement ok
+CREATE TABLE my_datalake.default.ddl_opts_comment (id INTEGER, name VARCHAR)
+WITH (comment = 'customer dim');
 
+query I
+SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ddl_opts_comment';
+----
+customer dim
+
+query I
+SELECT parameters['comment'] FROM glue_get_table_response('my_datalake.default.ddl_opts_comment');
+----
+customer dim
+
+statement ok
+DROP TABLE my_datalake.default.ddl_opts_comment;
+
+#---------------------------------------------------------------------------
+# not supported: ROW FORMAT, STORED AS, WITH SERDEPROPERTIES
+#---------------------------------------------------------------------------
 # DuckDB's SORTED BY is rejected, the sort order of a bucketed table is the SortColumns option
 statement error
 CREATE TABLE my_datalake.default.ddl_opts_sorted (id INTEGER) SORTED BY (id);

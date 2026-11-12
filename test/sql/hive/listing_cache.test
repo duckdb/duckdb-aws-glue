@@ -1,0 +1,319 @@
+# name: test/sql/hive/listing_cache.test
+# description: glue_cache_listings keeps a Glue table's S3 listing for later statements of the connection
+# group: [hive]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.list_a;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.list_b;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.list_parts;
+
+statement ok
+CREATE TABLE my_datalake.default.list_a AS SELECT range AS id FROM range(100);
+
+statement ok
+CREATE TABLE my_datalake.default.list_b AS SELECT range AS id FROM range(10);
+
+statement ok
+CREATE TABLE my_datalake.default.list_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.list_parts VALUES (1, 'a'), (2, 'b'), (3, 'c');
+
+statement ok
+CREATE MACRO s3_listings(tbl) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+    WHERE request.url LIKE '%list-type=2%' AND request.url LIKE '%' || tbl || '%'
+);
+
+# the url query string (list-type, prefix) is redacted by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# within one statement every scan and the bind's cardinality sample share one listing already (per-query cache)
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT (SELECT count(*) FROM my_datalake.default.list_a) + (SELECT count(*) FROM my_datalake.default.list_a x, my_datalake.default.list_a y WHERE x.id = y.id);
+----
+200
+
+query I
+SELECT s3_listings('list_a');
+----
+1
+
+# without glue_cache_listings the next statement lists again
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.list_a;
+----
+100
+
+query I
+SELECT s3_listings('list_a');
+----
+1
+
+statement ok
+SET glue_cache_listings = true;
+
+# the listing cache lives as long as the metadata cache: connection scope for the per-connection sections below
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+# the first statement lists once, later statements of the connection are served from it
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.list_a;
+----
+100
+
+query I
+SELECT s3_listings('list_a');
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.list_a x, my_datalake.default.list_a y WHERE x.id = y.id;
+----
+100
+
+query I
+SELECT s3_listings('list_a');
+----
+0
+
+# a write through this connection clears it: the new file is listed
+statement ok
+INSERT INTO my_datalake.default.list_a SELECT range AS id FROM range(5);
+
+query I
+SELECT count(*) FROM my_datalake.default.list_a;
+----
+105
+
+# a partitioned table: every partition directory read is listed once across the statements
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.list_parts WHERE dt = 'b';
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.list_parts WHERE dt IN ('a', 'b');
+----
+2
+
+query II
+SELECT count(*), count(DISTINCT request.url) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%' AND request.url LIKE '%list_parts%';
+----
+2	2
+
+# a write from another connection is not seen: the listing is served until this connection's cache clears
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+10
+
+statement ok con2
+INSERT INTO my_datalake.default.list_b VALUES (10);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+10
+
+query I
+SELECT s3_listings('list_b');
+----
+0
+
+# a rollback clears the cache: the next statement lists again and sees the other connection's file
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+10
+
+statement ok
+ROLLBACK;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+11
+
+query I
+SELECT s3_listings('list_b');
+----
+1
+
+# with glue_metadata_cache_scope = 'transaction' the listing does not outlive the transaction
+statement ok
+SET glue_metadata_cache_scope = 'transaction';
+
+statement ok
+SELECT count(*) FROM my_datalake.default.list_b;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+11
+
+query I
+SELECT s3_listings('list_b');
+----
+1
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+# hive_scan bypasses the cache even while it is on: its root has no catalog, so no write through the
+# extension could ever clear a cached listing - both statements list
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/list_a', format := 'parquet',
+    schema := {id: 'BIGINT'});
+----
+105
+
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/list_a', format := 'parquet',
+    schema := {id: 'BIGINT'});
+----
+105
+
+query I
+SELECT s3_listings('list_a');
+----
+2
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+11
+
+statement ok con2
+INSERT INTO my_datalake.default.list_b VALUES (11);
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+11
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+12
+
+query I
+SELECT s3_listings('list_b');
+----
+1
+
+statement ok
+SET glue_cache_listings = false;
+
+statement ok con2
+INSERT INTO my_datalake.default.list_b VALUES (12);
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+13
+
+statement ok
+SET glue_cache_listings = true;
+
+query I
+SELECT count(*) FROM my_datalake.default.list_b;
+----
+13
+
+# disabled again: every statement lists again
+statement ok
+SET glue_cache_listings = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# ids 0-4 are in both files of list_a: 95 + 5 * 4
+query I
+SELECT count(*) FROM my_datalake.default.list_a x, my_datalake.default.list_a y WHERE x.id = y.id;
+----
+115
+
+query I
+SELECT count(*) FROM my_datalake.default.list_a;
+----
+105
+
+query I
+SELECT s3_listings('list_a');
+----
+2
+
+statement ok
+DROP TABLE my_datalake.default.list_a;
+
+statement ok
+DROP TABLE my_datalake.default.list_b;
+
+statement ok
+DROP TABLE my_datalake.default.list_parts;

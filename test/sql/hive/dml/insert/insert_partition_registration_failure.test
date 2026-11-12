@@ -1,0 +1,117 @@
+# name: test/sql/hive/dml/insert/insert_partition_registration_failure.test
+# description: an INSERT whose partitions Glue refuses to register is rolled back, so running it again adds its rows once
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.reg_fail;
+
+statement ok
+CREATE TABLE my_datalake.default.reg_fail (id INTEGER, p INTEGER) PARTITIONED BY (p);
+
+# rows the table already holds, in partitions the INSERTs below do not write to
+statement ok
+INSERT INTO my_datalake.default.reg_fail SELECT i, 1000 + i FROM range(10) t(i);
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/reg_fail/**');
+----
+10
+
+#---------------------------------------------------------------------------
+# Glue refuses the 151st of 250 partitions: the files are deleted, the 150 partitions registered before stay, empty
+#---------------------------------------------------------------------------
+statement ok
+SET glue_debug_fail_partition_registration = 'InvalidInputException:150';
+
+statement error
+INSERT INTO my_datalake.default.reg_fail SELECT i, i FROM range(250) t(i);
+----
+<REGEX>:.*INSERT into Hive table 'default.reg_fail' was rolled back: Glue BatchCreatePartition 'default.reg_fail' failed for partition \[.*\]: InvalidInputException: injected.*so it can be run again.*
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.reg_fail;
+----
+10	45
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.reg_fail');
+----
+160
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/reg_fail/**');
+----
+10
+
+# refused in the first batch: nothing was registered
+statement ok
+SET glue_debug_fail_partition_registration = 'InvalidInputException:0';
+
+statement error
+INSERT INTO my_datalake.default.reg_fail VALUES (2000, 2000);
+----
+was rolled back
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.reg_fail');
+----
+160
+
+#---------------------------------------------------------------------------
+# a transient error passes when the partitions are sent again
+#---------------------------------------------------------------------------
+statement ok
+SET glue_debug_fail_partition_registration = 'ThrottlingException:150';
+
+statement ok
+INSERT INTO my_datalake.default.reg_fail SELECT i, i FROM range(250) t(i);
+
+# running it again adds its rows once, also to the partitions the failed attempt left registered
+query II
+SELECT count(*), count(DISTINCT p) FROM my_datalake.default.reg_fail;
+----
+260	260
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.reg_fail');
+----
+260
+
+# a malformed setting is refused when it is set, not after a write has already written its files
+statement error
+SET glue_debug_fail_partition_registration = 'nonsense';
+----
+glue_debug_fail_partition_registration 'nonsense' is not '<error code>:<index>'
+
+statement error
+SET glue_debug_fail_partition_registration = 'InvalidInputException:abc';
+----
+glue_debug_fail_partition_registration 'InvalidInputException:abc' is not '<error code>:<index>'
+
+# the previous, valid value is still in place
+statement ok
+INSERT INTO my_datalake.default.reg_fail VALUES (3000, 3000);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.reg_fail');
+----
+261
+
+statement ok
+SET glue_debug_fail_partition_registration = '';
+
+statement ok
+DROP TABLE my_datalake.default.reg_fail;

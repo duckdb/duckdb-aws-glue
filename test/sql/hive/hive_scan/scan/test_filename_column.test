@@ -160,6 +160,30 @@ SELECT count(*), count(*) FILTER (filename LIKE '%/_hidden.parquet') FROM my_dat
 ----
 6	0
 
+# nor are an EMR directory marker (<name>_$folder$; given content here so that its name, not its size, is what skips
+# it) and a zero-byte object, neither of which is a parquet file
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/sub_$folder$' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT 1 AS id WHERE false) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/part-00007' (FORMAT csv, HEADER false);
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*') WHERE file LIKE '%_$folder$' OR file LIKE '%part-00007';
+----
+2
+
+# the marker has content and the placeholder has none, so each is skipped by its own rule
+query II
+SELECT size > 0, (SELECT size FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/part-00007')) FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/sub_$folder$');
+----
+true	0
+
+query II
+SELECT count(*), count(*) FILTER (filename LIKE '%_$folder$' OR filename LIKE '%part-00007') FROM my_datalake.default.path_flat;
+----
+6	0
+
 #---------------------------------------------------------------------------
 # the same for a csv table
 #---------------------------------------------------------------------------

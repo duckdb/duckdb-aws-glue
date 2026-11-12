@@ -1,0 +1,55 @@
+# name: test/sql/hive/dml/insert/custom_locations/insert_table_location_with_partition_key.test
+# description: INSERT registers the partition values of the directories it writes, not a <key>=<value> in the table location
+# group: [custom_locations]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# the table location becomes .../dt=old/region=eu/location_keys/orders
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/dt=old/region=eu'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.location_keys;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.location_keys.orders;
+
+statement ok
+CREATE TABLE my_datalake.location_keys.orders (id INTEGER, dt VARCHAR, region VARCHAR) PARTITIONED BY (dt, region);
+
+statement ok
+INSERT INTO my_datalake.location_keys.orders VALUES (1, 'new', 'us');
+
+statement ok
+INSERT INTO my_datalake.location_keys.orders VALUES (2, 'newer', 'us'), (3, 'new', 'ap');
+
+# appends to an existing partition
+statement ok
+INSERT INTO my_datalake.location_keys.orders VALUES (4, 'new', 'us');
+
+query III
+SELECT dt, region, location.replace('{DEFAULT_S3_LOCATION}/{TEST_DIR}/', '')
+FROM glue_partitions('my_datalake.location_keys.orders') ORDER BY ALL;
+----
+new	ap	dt=old/region=eu/location_keys/orders/dt=new/region=ap
+new	us	dt=old/region=eu/location_keys/orders/dt=new/region=us
+newer	us	dt=old/region=eu/location_keys/orders/dt=newer/region=us
+
+query III
+SELECT id, dt, region FROM my_datalake.location_keys.orders ORDER BY id;
+----
+1	new	us
+2	newer	us
+3	new	ap
+4	new	us
+
+statement ok
+DROP TABLE my_datalake.location_keys.orders;

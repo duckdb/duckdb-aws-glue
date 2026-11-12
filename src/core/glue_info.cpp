@@ -1,4 +1,6 @@
 #include "core/glue_info.hpp"
+
+#include "core/glue_types.hpp"
 #include "core/helpers.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -56,6 +58,15 @@ HiveFileFormat HiveFileFormatFromString(const string &format) {
 bool GlueTableInfo::IsBucketed() const {
 	// NumberOfBuckets is -1 or 0 for unbucketed tables but can also be unset on bucketed ones
 	return !bucket_columns.empty();
+}
+
+bool GlueTableInfo::IsPartitionProjected() const {
+	if (partition_keys.empty()) {
+		return false;
+	}
+	auto enabled = GetParameter("projection.enabled");
+	StringUtil::Trim(enabled);
+	return StringUtil::CIEquals(enabled, "true");
 }
 
 string GlueColumn::DescribeSortOrder() const {
@@ -125,7 +136,7 @@ HiveSerDe GlueTableInfo::GetSerDe() const {
 	    "Hive table '%s.%s' uses SerDe '%s', only parquet (ParquetHiveSerDe), csv "
 	    "(LazySimpleSerDe, OpenCSVSerde), json (JsonSerDe) and avro (AvroSerDe) tables can be "
 	    "read and written; use glue_get_table_response() to inspect the table definition",
-	    database_name, name, serde_library);
+	    schema_name, name, serde_library);
 }
 
 HiveFileFormat GlueTableInfo::GetFileFormat() const {
@@ -151,8 +162,8 @@ string GlueTableInfo::GetOpenCSVCharacter(const string &key, const string &fallb
 	}
 	string character;
 	if (!TryFirstCharacter(value, character)) {
-		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected text", database_name,
-		                            name, key, value);
+		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected text", schema_name, name,
+		                            key, value);
 	}
 	return character;
 }
@@ -168,7 +179,7 @@ static string LazySimpleSeparator(const GlueTableInfo &table, const string &valu
 	if (separator == 0 || separator == '\n' || separator == '\r' || separator >= 0x80) {
 		throw NotImplementedException("Hive table '%s.%s' has the field delimiter '%s', a byte DuckDB can not split "
 		                              "fields on; only ASCII delimiters other than NUL and line breaks are supported",
-		                              table.database_name, table.name, value);
+		                              table.schema_name, table.name, value);
 	}
 	return string(1, static_cast<char>(separator));
 }
@@ -200,7 +211,7 @@ idx_t GlueTableInfo::GetCountProperty(const string &key) const {
 	int64_t count;
 	if (!TryParseInteger(value, 0, NumericLimits<int32_t>::Maximum(), count)) {
 		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected a non-negative number",
-		                            database_name, name, key, value);
+		                            schema_name, name, key, value);
 	}
 	return NumericCast<idx_t>(count);
 }
@@ -212,7 +223,7 @@ idx_t GlueTableInfo::GetHeaderLineCount() const {
 void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 	D_ASSERT(IsTextFileFormat(format));
 	auto refuse = [&](const string &what) {
-		throw NotImplementedException("Hive table '%s.%s' %s, which DuckDB can not read or write", database_name, name,
+		throw NotImplementedException("Hive table '%s.%s' %s, which DuckDB can not read or write", schema_name, name,
 		                              what);
 	};
 	if (GetCountProperty("skip.footer.line.count") > 0) {
@@ -237,8 +248,14 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		return;
 	}
 	string value;
-	if (TryGetProperty("escape.delim", value)) {
-		refuse("has 'escape.delim' set");
+	if (GetEscapeCharacter().size() > 1) {
+		refuse("has an 'escape.delim' of more than one byte");
+	}
+	if (GetEscapeCharacter() == GetFieldDelimiter()) {
+		refuse("has its field delimiter as 'escape.delim'");
+	}
+	if (TryGetProperty("serialization.escape.crlf", value) && StringUtil::CIEquals(value, "true")) {
+		refuse("has 'serialization.escape.crlf' set");
 	}
 	if (TryGetProperty("serialization.encoding", value) && !StringUtil::CIEquals(value, "UTF-8") &&
 	    !StringUtil::CIEquals(value, "UTF8")) {
@@ -253,8 +270,13 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 	}
 }
 
+string GlueTableInfo::GetCodecParameter(const string &key) const {
+	auto codec = GetParameter(key);
+	return codec.empty() ? GetParameter("write_compression") : codec;
+}
+
 FileCompressionType GlueTableInfo::GetTextCompression() const {
-	auto codec = GetParameter("write.compression");
+	auto codec = GetCodecParameter("write.compression");
 	if (codec.empty()) {
 		codec = GetParameter("compressionType");
 	}
@@ -266,7 +288,7 @@ FileCompressionType GlueTableInfo::GetTextCompression() const {
 	    compression != FileCompressionType::ZSTD) {
 		throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB writes "
 		                              "only gzip and zstd compressed csv and json files",
-		                              database_name, name, compression.ToString());
+		                              schema_name, name, compression.ToString());
 	}
 	return compression;
 }
@@ -274,18 +296,18 @@ FileCompressionType GlueTableInfo::GetTextCompression() const {
 string GlueTableInfo::GetCodec(HiveFileFormat format) const {
 	switch (format) {
 	case HiveFileFormat::PARQUET: {
-		auto codec = StringUtil::Lower(GetParameter("parquet.compression"));
+		auto codec = StringUtil::Lower(GetCodecParameter("parquet.compression"));
 		return codec == "none" ? "uncompressed" : codec;
 	}
 	case HiveFileFormat::AVRO: {
-		auto codec = StringUtil::Lower(GetParameter("avro.output.codec"));
+		auto codec = StringUtil::Lower(GetCodecParameter("avro.output.codec"));
 		if (codec == "none" || codec == "uncompressed") {
 			return "null";
 		}
 		if (!codec.empty() && codec != "snappy" && codec != "deflate" && codec != "null") {
 			throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB "
 			                              "writes only snappy and deflate compressed avro files",
-			                              database_name, name, codec);
+			                              schema_name, name, codec);
 		}
 		return codec;
 	}
@@ -308,7 +330,14 @@ string GlueTableInfo::GetQuoteCharacter() const {
 }
 
 string GlueTableInfo::GetEscapeCharacter() const {
-	return GetSerDe() == HiveSerDe::OPEN_CSV ? GetOpenCSVCharacter("escapeChar", GetQuoteCharacter()) : string();
+	if (GetSerDe() == HiveSerDe::OPEN_CSV) {
+		return GetOpenCSVCharacter("escapeChar", GetQuoteCharacter());
+	}
+	string escape;
+	if (TryGetProperty("escape.delim", escape)) {
+		return escape;
+	}
+	return string();
 }
 
 HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
@@ -320,6 +349,19 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	// OpenCSVSerde has no NULL: "\n" matches no unquoted field
 	options.null_string = GetSerDe() == HiveSerDe::OPEN_CSV ? "\n" : GetNullFormat();
 	options.serde_fields = true;
+	string null_for_invalid_data;
+	options.null_for_invalid_data =
+	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
+	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
+	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
+	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
+	// without escapeChar OpenCSVSerde reads with a '\' escape, which read_csv, given the quote character, would keep;
+	// an explicit escapeChar '"', which this extension writes, is read as it is
+	string escape_char;
+	auto escape_set = TryGetProperty("escapeChar", escape_char) && !escape_char.empty();
+	if (GetSerDe() == HiveSerDe::OPEN_CSV && !escape_set && options.delimiter != "\\" && options.quote != "\\") {
+		options.field_escape = "\\";
+	}
 	return options;
 }
 
@@ -342,8 +384,38 @@ GlueTableFormat GlueTableInfo::GetFormat() const {
 	return GlueTableFormat::Detect(info);
 }
 
+bool GlueTableInfo::IsSameVersion(const GlueTableInfo &other) const {
+	// Glue's CreateTime has whole seconds: a table replaced by a view within one second keeps version and CreateTime
+	return !version_id.empty() && version_id == other.version_id && create_time_ms == other.create_time_ms &&
+	       glue_table_type == other.glue_table_type;
+}
+
 string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
+}
+
+optional_ptr<const GlueColumn> GluePartitionInfo::FindPartitionColumn(const vector<GlueColumn> &table_columns,
+                                                                      idx_t index, bool by_position) const {
+	if (by_position) {
+		return index < partition_columns.size() ? &partition_columns[index] : nullptr;
+	}
+	for (auto &column : partition_columns) {
+		if (StringUtil::CIEquals(column.name, table_columns[index].name)) {
+			return &column;
+		}
+	}
+	return nullptr;
+}
+
+optional_idx GluePartitionInfo::FindColumnTypeMismatch(const vector<GlueColumn> &table_columns,
+                                                       bool by_position) const {
+	for (idx_t i = 0; i < table_columns.size(); i++) {
+		auto partition_column = FindPartitionColumn(table_columns, i, by_position);
+		if (partition_column && !GlueTypes::SameColumnType(table_columns[i].type, partition_column->type)) {
+			return i;
+		}
+	}
+	return optional_idx();
 }
 
 } // namespace duckdb

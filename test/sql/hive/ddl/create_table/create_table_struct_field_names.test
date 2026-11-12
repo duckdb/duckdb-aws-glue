@@ -109,11 +109,6 @@ CREATE TABLE my_datalake.default.struct_names_bad AS SELECT {'a:b': 1} AS s;
 ----
 can not be stored in a Glue type
 
-statement error
-CREATE VIEW my_datalake.default.struct_names_bad AS SELECT {'a:b': 1} AS s;
-----
-can not be stored in a Glue type
-
 query I
 SELECT count(*) FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'struct_names';
 ----

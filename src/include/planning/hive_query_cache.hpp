@@ -14,8 +14,6 @@ struct HiveTableSample;
 //! What Glue said about a table the running query scans
 struct GlueTableEntry {
 	annotated_mutex lock;
-	//! Null until the first scan of the table asks Glue
-	shared_ptr<const GlueTableInfo> table_info DUCKDB_GUARDED_BY(lock);
 	//! Null until the first scan of a partitioned table asks Glue for them
 	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
 	//! The partitions a GetPartitions Expression matched, by expression: the scans with the same filters share one
@@ -30,9 +28,16 @@ struct HiveTableSampleEntry {
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-//! What the running query learned about the tables it scans, dropped when the query ends: the Glue definition and
-//! partitions of a table (asked for once however often the query scans it), the recursive listings of directories
-//! (shared by the estimate and every scan listing the same directory) and the table samples
+//! A directory's recursive listing, fetched a page at a time as it is read
+struct HiveDirectoryListingEntry {
+	annotated_mutex lock;
+	//! Null until some scan first asks for this directory
+	shared_ptr<MultiFileList> listing DUCKDB_GUARDED_BY(lock);
+};
+
+//! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
+//! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
+//! every scan listing the same directory) and the table samples
 class HiveQueryCache : public ClientContextState {
 public:
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);
@@ -45,19 +50,26 @@ public:
 	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
-	//! The recursive listing of 'directory', fetched page by page as it is read
-	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory);
+	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
+	//! listing is kept beyond the query (glue_cache_listings)
+	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
+	                                              bool cache_in_connection = false);
+	//! The id of the next scan bound in this query, starting at 1
+	idx_t NextScanId();
 
 private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
-	unordered_map<string, shared_ptr<MultiFileList>> directory_listings DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
+	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;
 };
 
-//! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table. With
-//! an 'expression' in Glue's partition filter syntax, only the partitions it matches, fetched once per expression
+//! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table
+//! With an 'expression' in Glue's partition filter syntax, only the partitions it matches, fetched once per expression
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info,
                                                                const string &expression = string());
+//! Drop the connection's cached directory listings
+void ClearHiveListingCache(ClientContext &context);
 
 } // namespace duckdb

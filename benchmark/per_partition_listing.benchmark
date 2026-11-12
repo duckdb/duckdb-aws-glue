@@ -1,0 +1,66 @@
+# name: benchmark/per_partition_listing.benchmark
+# description: read 50 of 1100 partitions, with S3 requests delayed by 20 ms, in the local Glue (moto) + S3: listing the 50 partitions at the same time takes fewer rounds than the two pages of the table location
+# group: [file_pruning_benchmarks]
+
+name Read 50 of 1100 partitions
+group file_pruning_benchmarks
+subgroup per_partition_listing
+
+require parquet
+
+require httpfs
+
+require glue
+
+cache listing_50_of_1100.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE TABLE IF NOT EXISTS my_datalake.default.listing_50_of_1100 (
+    id BIGINT,
+    value DOUBLE,
+    dt VARCHAR
+) PARTITIONED BY (dt);
+INSERT INTO my_datalake.default.listing_50_of_1100
+SELECT
+    d * 100 + r                                                  AS id,
+    random() * 1000                                              AS value,
+    strftime(DATE '2020-01-01' + d::INTEGER, '%Y-%m-%d')         AS dt
+FROM range(0, 1100) AS t(d)
+CROSS JOIN range(0, 100) AS u(r)
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.default.listing_50_of_1100);
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+
+run
+SET enable_external_file_cache = false;
+SET debug_fs_delay_mean_ms = 20;
+SELECT count(*), sum(value) > 0 FROM my_datalake.default.listing_50_of_1100
+WHERE dt BETWEEN '2021-01-01' AND '2021-02-19';

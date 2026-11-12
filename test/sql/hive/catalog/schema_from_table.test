@@ -1,0 +1,190 @@
+# name: test/sql/hive/catalog/schema_from_table.test
+# description: A table in a database not loaded yet is asked from Glue first, which also shows the database exists
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.sft_table;
+
+statement ok
+CREATE TABLE my_datalake.default.sft_table (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.sft_table SELECT i FROM generate_series(1, 10) t(i);
+
+# the Glue operation is a request header, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# a new attach has no database loaded: the table is the only thing asked for
+statement ok
+attach '{GLUE_CATALOG_ID}' as sft_one (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM sft_one.default.sft_table;
+----
+10
+
+query II
+SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] IS NOT NULL GROUP BY 1 ORDER BY 1;
+----
+AWSGlue.GetTable	1
+
+# the database is a schema of the catalog from then on, without asking for it
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM sft_one.default.sft_table;
+----
+10
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetDatabase';
+----
+0
+
+# a missing table and a missing database fail as before: GetDatabase tells them apart. The binder looks the table up
+# twice; for a missing database both lookups ask for the table first
+statement ok
+attach '{GLUE_CATALOG_ID}' as sft_two (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT * FROM sft_two.default.sft_missing;
+----
+<REGEX>:Catalog Error: Table with name sft_missing does not exist.*
+
+query II
+SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] IN ('AWSGlue.GetTable', 'AWSGlue.GetDatabase') GROUP BY 1 ORDER BY 1;
+----
+AWSGlue.GetDatabase	1
+AWSGlue.GetTable	2
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT * FROM sft_two.sft_no_such_db.sft_table;
+----
+<REGEX>:Catalog Error: Table with name "sft_no_such_db.sft_table" does not exist because schema "sft_no_such_db" does not exist.*
+
+query II
+SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] IN ('AWSGlue.GetTable', 'AWSGlue.GetDatabase') GROUP BY 1 ORDER BY 1;
+----
+AWSGlue.GetDatabase	2
+AWSGlue.GetTable	2
+
+# a database made a schema from its name alone is asked for once a new table needs its LocationUri
+statement ok
+DROP TABLE IF EXISTS my_datalake.sft_located.sft_first;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.sft_located.sft_second;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.sft_located.sft_third;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.sft_located;
+
+statement ok
+CREATE SCHEMA my_datalake.sft_located WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sft_located_db');
+
+statement ok
+CREATE TABLE my_datalake.sft_located.sft_first (id INTEGER);
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as sft_three (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT count(*) FROM sft_three.sft_located.sft_first;
+----
+0
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE TABLE sft_three.sft_located.sft_second (id INTEGER);
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetDatabase';
+----
+1
+
+query I
+SELECT location LIKE '%/sft_located_db/sft_second' FROM glue_get_table_response('my_datalake.sft_located.sft_second');
+----
+true
+
+# a listing of the databases fills in a database made a schema from its name alone
+statement ok
+attach '{GLUE_CATALOG_ID}' as sft_four (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT count(*) FROM sft_four.sft_located.sft_first;
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'sft_four' AND schema_name = 'sft_located';
+----
+1
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.sft_located.sft_third;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE TABLE sft_four.sft_located.sft_third (id INTEGER);
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetDatabase';
+----
+0
+
+query I
+SELECT location LIKE '%/sft_located_db/sft_third' FROM glue_get_table_response('my_datalake.sft_located.sft_third');
+----
+true
+
+statement ok
+DROP TABLE my_datalake.sft_located.sft_third;
+
+statement ok
+DROP TABLE my_datalake.sft_located.sft_second;
+
+statement ok
+DROP TABLE my_datalake.sft_located.sft_first;
+
+statement ok
+DROP SCHEMA my_datalake.sft_located;
+
+statement ok
+DROP TABLE my_datalake.default.sft_table;

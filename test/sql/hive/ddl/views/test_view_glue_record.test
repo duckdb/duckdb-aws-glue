@@ -39,12 +39,12 @@ SELECT response.TableType, response.ViewOriginalText, response.ViewExpandedText,
        response.Parameters.duckdb_view, response.Parameters.duckdb_view_version, response.Parameters.duckdb_view_default_database
 FROM glue_get_table_response('my_datalake.default.gr_view');
 ----
-VIRTUAL_VIEW	SELECT id, (amount * 2) AS twice FROM gr_orders WHERE (id > 1)	SELECT id, (amount * 2) AS twice FROM gr_orders WHERE (id > 1)	true	1	default
+VIRTUAL_VIEW	SELECT id, (amount * 2) AS twice FROM gr_orders WHERE (id > 1)	SELECT id, (amount * 2) AS twice FROM "default".gr_orders WHERE (id > 1)	true	1	default
 
 query I
 SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response('my_datalake.default.gr_view');
 ----
-[{'Name': id, 'Type': int}, {'Name': twice, 'Type': double}]
+[{'Name': id, 'Type': INTEGER}, {'Name': twice, 'Type': DOUBLE}]
 
 query I
 SELECT response.StorageDescriptor.Location IS NULL FROM glue_get_table_response('my_datalake.default.gr_view');
@@ -54,23 +54,42 @@ true
 statement ok
 CREATE OR REPLACE VIEW my_datalake.default.gr_view AS SELECT id FROM gr_orders;
 
-query II
-SELECT response.ViewOriginalText, response.StorageDescriptor.Columns::VARCHAR
+query III
+SELECT response.ViewOriginalText, response.ViewExpandedText, response.StorageDescriptor.Columns::VARCHAR
 FROM glue_get_table_response('my_datalake.default.gr_view');
 ----
-SELECT id FROM gr_orders	[{'Name': id, 'Type': int}]
+SELECT id FROM gr_orders	SELECT id FROM "default".gr_orders	[{'Name': id, 'Type': INTEGER}]
 
-# no columns are stored for a view that is not bound at creation
+# a type without a Glue type: SUM(INTEGER) is a HUGEINT
 statement ok
-CREATE VIEW my_datalake.default.gr_defer WITH (DEFER_BINDING) AS SELECT id FROM gr_missing;
+CREATE OR REPLACE VIEW my_datalake.default.gr_view AS SELECT sum(id) AS total FROM gr_orders;
 
 query I
-SELECT response.StorageDescriptor.Columns IS NULL FROM glue_get_table_response('my_datalake.default.gr_defer');
+SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response('my_datalake.default.gr_view');
 ----
-true
+[{'Name': total, 'Type': HUGEINT}]
 
-statement ok
-DROP VIEW my_datalake.default.gr_defer;
+# nothing is written for a refused view
+statement error
+CREATE VIEW my_datalake.default.gr_defer WITH (DEFER_BINDING) AS SELECT id FROM gr_orders;
+----
+Glue views can not be created WITH (DEFER_BINDING) yet
+
+statement error
+SELECT * FROM glue_get_table_response('my_datalake.default.gr_defer');
+----
+gr_defer
+
+# a DuckDB view stored without columns (seeded by scripts/docker-compose.yml) is listed unbound and still reads
+query I
+SELECT is_bound FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'fixture_nocols_view';
+----
+false
+
+query I
+SELECT * FROM my_datalake.default.fixture_nocols_view;
+----
+1
 
 statement ok
 DROP VIEW my_datalake.default.gr_view;

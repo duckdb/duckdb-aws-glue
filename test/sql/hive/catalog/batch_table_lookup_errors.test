@@ -1,0 +1,170 @@
+# name: test/sql/hive/catalog/batch_table_lookup_errors.test
+# description: A GetTables page refused for lack of permission stops bulk lookups for the attach, another Glue error only degrades the lookup, and a listing still reads a refusal as no tables
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach schema fault_access_denied_btl fault_invalid_input_btl
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.{schema};
+
+loop i 1 6
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.{schema}.t{i};
+
+statement ok
+CREATE TABLE my_datalake.{schema}.t{i} AS SELECT {i} AS id;
+
+endloop
+
+endloop
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok con2
+attach '{GLUE_CATALOG_ID}' as denied_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok con2
+SET redact_http_logs = false;
+
+statement ok con2
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT count(*) FROM (
+    SELECT id FROM denied_dl.fault_access_denied_btl.t1
+    UNION ALL SELECT id FROM denied_dl.fault_access_denied_btl.t2
+    UNION ALL SELECT id FROM denied_dl.fault_access_denied_btl.t3
+);
+----
+3
+
+query II con2
+SELECT glue_calls('GetTables'), glue_calls('GetTable');
+----
+1	3
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT count(*) FROM (
+    SELECT id FROM denied_dl.fault_access_denied_btl.t4
+    UNION ALL SELECT id FROM denied_dl.fault_access_denied_btl.t5
+);
+----
+2
+
+query II con2
+SELECT glue_calls('GetTables'), glue_calls('GetTable');
+----
+0	2
+
+statement ok con2
+DETACH denied_dl;
+
+statement ok con3
+attach '{GLUE_CATALOG_ID}' as invalid_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok con3
+SET redact_http_logs = false;
+
+statement ok con3
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok con3
+CALL truncate_duckdb_logs();
+
+query I con3
+SELECT count(*) FROM (
+    SELECT id FROM invalid_dl.fault_invalid_input_btl.t1
+    UNION ALL SELECT id FROM invalid_dl.fault_invalid_input_btl.t2
+    UNION ALL SELECT id FROM invalid_dl.fault_invalid_input_btl.t3
+);
+----
+3
+
+query II con3
+SELECT glue_calls('GetTables'), glue_calls('GetTable');
+----
+2	3
+
+statement ok con3
+CALL truncate_duckdb_logs();
+
+query I con3
+SELECT count(*) FROM (
+    SELECT id FROM invalid_dl.fault_invalid_input_btl.t4
+    UNION ALL SELECT id FROM invalid_dl.fault_invalid_input_btl.t5
+);
+----
+2
+
+query II con3
+SELECT glue_calls('GetTables'), glue_calls('GetTable');
+----
+2	2
+
+statement ok con3
+DETACH invalid_dl;
+
+loop i 1 6
+
+statement ok
+DROP TABLE my_datalake.fault_invalid_input_btl.t{i};
+
+endloop
+
+statement ok
+DROP SCHEMA my_datalake.fault_invalid_input_btl;
+
+statement ok con4
+attach '{GLUE_CATALOG_ID}' as listing_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I con4
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'listing_dl' AND schema_name = 'fault_access_denied_btl';
+----
+0
+
+loop i 1 6
+
+statement ok
+DROP TABLE my_datalake.fault_access_denied_btl.t{i};
+
+endloop
+
+statement ok
+DROP SCHEMA my_datalake.fault_access_denied_btl;

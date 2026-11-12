@@ -75,13 +75,32 @@ cv_simple	true	2	true
 query I
 SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_simple';
 ----
-CREATE VIEW cv_simple AS SELECT id, amount FROM cv_orders WHERE (id > 1);
+CREATE VIEW "default".cv_simple AS SELECT id, amount FROM cv_orders WHERE (id > 1);
 
 query II
 SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.cv_simple);
 ----
 id	INTEGER
 amount	DOUBLE
+
+# the view's schema is in the stored SQL even when the schema name isn't a reserved word, so re-running
+# the SQL from any session context lands the view in its original schema
+statement ok
+CREATE SCHEMA my_datalake.cv_schema;
+
+statement ok
+CREATE VIEW my_datalake.cv_schema.cv_in_schema AS SELECT id FROM my_datalake.default.cv_orders;
+
+query I
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_in_schema';
+----
+CREATE VIEW cv_schema.cv_in_schema AS SELECT id FROM "default".cv_orders;
+
+statement ok
+DROP VIEW my_datalake.cv_schema.cv_in_schema;
+
+statement ok
+DROP SCHEMA my_datalake.cv_schema;
 
 query I
 SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'cv_simple';
@@ -124,7 +143,8 @@ CREATE TABLE IF NOT EXISTS my_datalake.default.cv_simple AS SELECT 1 AS x;
 ----
 Existing object cv_simple is of type View, trying to create type Table
 
-# a column alias list is carried by the stored columns, not by the SQL
+# a column alias list reaches both the stored columns and the SQL (via the duckdb_view_column_alias_list parameter),
+# so re-running the SQL creates a view with the same column names
 statement ok
 CREATE VIEW my_datalake.default.cv_aliased(k, a) AS SELECT id, amount FROM cv_orders;
 
@@ -137,7 +157,7 @@ a	DOUBLE
 query I
 SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_aliased';
 ----
-CREATE VIEW cv_aliased AS SELECT id, amount FROM cv_orders;
+CREATE VIEW "default".cv_aliased (k, a) AS SELECT id, amount FROM cv_orders;
 
 # an alias list over * or a set operation works the same way
 statement ok
@@ -146,7 +166,7 @@ CREATE VIEW my_datalake.default.cv_star(x, y) AS SELECT * FROM cv_orders;
 query I
 SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_star';
 ----
-CREATE VIEW cv_star AS SELECT * FROM cv_orders;
+CREATE VIEW "default".cv_star (x, y, dt) AS SELECT * FROM cv_orders;
 
 query II
 SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.cv_star);
@@ -166,7 +186,7 @@ CREATE VIEW my_datalake.default.cv_union(n) AS SELECT id FROM cv_orders UNION AL
 query I
 SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_union';
 ----
-CREATE VIEW cv_union AS (SELECT id FROM cv_orders) UNION ALL (SELECT (id + 10) FROM cv_orders);
+CREATE VIEW "default".cv_union (n) AS (SELECT id FROM cv_orders) UNION ALL (SELECT (id + 10) FROM cv_orders);
 
 query I
 SELECT count(*) FROM my_datalake.default.cv_union WHERE n > 5;
@@ -196,21 +216,46 @@ CREATE VIEW my_datalake.default.cv_mixed AS WITH t AS (SELECT id FROM cv_orders)
 query I
 SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_mixed';
 ----
-CREATE VIEW cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM (t INNER JOIN "default".cv_orders AS o ON ((t.id = o.id))) WHERE (o.dt = '2024-01-02');
+CREATE VIEW "default".cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM (t INNER JOIN "default".cv_orders AS o ON ((t.id = o.id))) WHERE (o.dt = '2024-01-02');
 
 query I
 SELECT * FROM my_datalake.default.cv_mixed;
 ----
 3
 
-# DEFER_BINDING: created unbound, bound on first use
-statement ok
+statement error
 CREATE VIEW my_datalake.default.cv_defer WITH (DEFER_BINDING) AS SELECT id FROM cv_later;
-
-query II
-SELECT view_name, is_bound FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_defer';
 ----
-cv_defer	false
+Glue views can not be created WITH (DEFER_BINDING) yet
+
+statement error
+CREATE OR REPLACE VIEW my_datalake.default.cv_simple WITH (DEFER_BINDING) AS SELECT id FROM cv_orders;
+----
+Glue views can not be created WITH (DEFER_BINDING) yet
+
+# DuckDB does not bind IF NOT EXISTS of an existing view
+statement ok
+CREATE VIEW IF NOT EXISTS my_datalake.default.cv_simple WITH (DEFER_BINDING) AS SELECT id FROM cv_later;
+
+query I
+SELECT * FROM my_datalake.default.cv_simple;
+----
+3
+
+# bound on use: the view reads its table as it is then
+statement ok
+CREATE TABLE my_datalake.default.cv_later (id INTEGER);
+
+statement ok
+CREATE VIEW my_datalake.default.cv_defer AS SELECT id FROM cv_later;
+
+statement ok
+DROP TABLE my_datalake.default.cv_later;
+
+statement error
+SELECT * FROM my_datalake.default.cv_defer;
+----
+Table with name cv_later does not exist
 
 statement ok
 CREATE TABLE my_datalake.default.cv_later (id INTEGER);
@@ -229,18 +274,20 @@ CREATE SECURE VIEW my_datalake.default.cv_secure AS SELECT id FROM cv_orders;
 query I
 SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_secure';
 ----
-CREATE SECURE VIEW cv_secure AS SELECT id FROM cv_orders;
+CREATE SECURE VIEW "default".cv_secure AS SELECT id FROM cv_orders;
 
 statement ok
 CREATE VIEW my_datalake.default.cv_recursive AS SELECT 1 AS x;
 
-statement ok
-CREATE OR REPLACE VIEW my_datalake.default.cv_recursive WITH (DEFER_BINDING) AS SELECT x FROM cv_recursive;
-
 statement error
+CREATE OR REPLACE VIEW my_datalake.default.cv_recursive AS SELECT x FROM cv_recursive;
+----
+Glue view "default.cv_recursive" can not be created: its query reads the view itself
+
+query I
 SELECT * FROM my_datalake.default.cv_recursive;
 ----
-recursive
+1
 
 query I
 SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'cv_%';

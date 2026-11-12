@@ -134,6 +134,11 @@ CALL glue_drop_partition('ro_datalake.default.ro_parts', {dt: 'keep'});
 ----
 Cannot execute Glue DeletePartition on database "ro_datalake" which is attached in read-only mode!
 
+statement error
+CALL glue_repair_table('ro_datalake.default.ro_parts');
+----
+Cannot execute Glue BatchCreatePartition on database "ro_datalake" which is attached in read-only mode!
+
 query II
 SELECT dt, location LIKE '%/moved' FROM glue_partitions('rw_datalake.default.ro_parts');
 ----

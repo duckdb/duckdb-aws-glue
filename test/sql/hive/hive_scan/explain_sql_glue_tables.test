@@ -1,0 +1,321 @@
+# name: test/sql/hive/hive_scan/explain_sql_glue_tables.test
+# description: EXPLAIN (SQL) shows the scan of a Glue table as the standard reader calls that read its files, converting the fields of a text table as its SerDe does, and as the table when no reader call reads the files the way the scan does
+# group: [hive_scan]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table es_events es_text es_opencsv es_lines es_records es_bytes
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+#---------------------------------------------------------------------------
+# parquet: nested columns, and partition keys of other types than string
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.es_events (id INTEGER, s STRUCT(a INTEGER, b VARCHAR), tags VARCHAR[], dt DATE, n INTEGER)
+PARTITIONED BY (dt, n);
+
+statement ok
+INSERT INTO my_datalake.default.es_events VALUES
+    (1, {'a': 1, 'b': 'x'}, ['p', 'q'], DATE '2016-05-14', 1),
+    (2, {'a': 2, 'b': NULL}, [], DATE '2016-05-14', 2),
+    (3, NULL, NULL, DATE '2016-05-15', NULL);
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_events;
+----
+sql	<REGEX>:.*SELECT\s+id,\s+s,\s+tags,\s+CAST\('2016-05-14' AS DATE\) AS dt,\s+CAST\('1' AS INTEGER\) AS n\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/default/es_events/dt=2016-05-14/n=1/[^']*'\) AS VARCHAR \[\]\),.*
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_events;
+----
+sql	<REGEX>:.*SELECT\s+id,\s+s,\s+tags,\s+CAST\('2016-05-15' AS DATE\) AS dt,\s+CAST\(NULL AS INTEGER\) AS n\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/default/es_events/dt=2016-05-15/n=__HIVE_DEFAULT_PARTITION__/[^']*'\) AS VARCHAR \[\]\),.*
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_events;
+----
+sql	<REGEX>:.*\("schema" = CAST\("system"\.main\."map"\("system"\.main\.list_value\('id', 's', 'tags'\), .*'STRUCT\(a INTEGER, b VARCHAR\)'.*'VARCHAR\[\]'.*
+
+# both keys prune, and both filters are restated over the one read left
+query II
+EXPLAIN (SQL) SELECT id FROM my_datalake.default.es_events WHERE dt = DATE '2016-05-14' AND n = 2;
+----
+sql	<REGEX>:.*FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/dt=2016-05-14/n=2/[^']*'\).*WHERE \(\(r\d+\.column3 = CAST\('2016-05-14' AS DATE\)\) AND \(r\d+\.column4 = CAST\(2 AS INTEGER\)\)\).*
+
+query II
+EXPLAIN (SQL) SELECT id FROM my_datalake.default.es_events WHERE dt = DATE '2016-05-14' AND n = 2;
+----
+sql	<!REGEX>:.*(n=1|2016-05-15|UNION).*
+
+#---------------------------------------------------------------------------
+# text tables: every field is read as text and converted the way the SerDe converts it
+#---------------------------------------------------------------------------
+# LazySimpleSerDe: a value that does not parse is NULL (TRY_CAST)
+statement ok
+CREATE TABLE my_datalake.default.es_text (id INTEGER, name VARCHAR, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt)
+WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.es_text VALUES (1, 'a', 1.5, '2016-05-14'), (2, NULL, NULL, '2016-05-14');
+
+statement ok
+COPY (SELECT 'x,b,oops' AS line) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/es_text/dt=2016-05-14/invalid.csv'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_text;
+----
+sql	<REGEX>:.*SELECT\s+TRY_CAST\(__internal_barrier\(id\) AS INTEGER\) AS id,\s+"name",\s+TRY_CAST\(__internal_barrier\(amount\) AS DOUBLE\) AS amount,\s+'2016-05-14' AS dt\s+FROM "system"\.main\.read_csv\(.*\(delim = CAST\(',' AS VARCHAR\)\),.*\(null_padding = CAST\(TRUE AS BOOLEAN\)\),\s*\(nullstr = CAST\('\\N' AS VARCHAR\)\),.*\(strict_mode = CAST\(FALSE AS BOOLEAN\)\).*
+
+# OpenCSVSerde: a value that does not parse fails the query (CAST), and a boolean is true when it is 'true' in any case
+statement ok
+CREATE TABLE my_datalake.default.es_opencsv (id INTEGER, name VARCHAR, flag BOOLEAN, dt VARCHAR) PARTITIONED BY (dt)
+WITH (format = 'csv', quote = '"');
+
+statement ok
+INSERT INTO my_datalake.default.es_opencsv VALUES (1, 'a,b', true, '2016-05-14'), (2, 'c', false, '2016-05-14');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('"3","d","TRUE"'), ('"4","e","yes"')) t(line))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/es_opencsv/dt=2016-05-14/more.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_opencsv;
+----
+sql	<REGEX>:.*SELECT\s+CAST\(__internal_barrier\(id\) AS INTEGER\) AS id,\s+"name",\s+\(lower\(__internal_barrier\(flag\)\) = 'true'\) AS flag,\s+'2016-05-14' AS dt\s+FROM "system"\.main\.read_csv\(.*\("quote" = CAST\('"' AS VARCHAR\)\).*
+
+# one thread per file, as the planning session has it
+statement ok
+SET hive_csv_parallel = false;
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_opencsv;
+----
+sql	<REGEX>:.*FROM "system"\.main\.read_csv\(.*\("?parallel"? = CAST\(FALSE AS BOOLEAN\)\).*
+
+statement ok
+RESET hive_csv_parallel;
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_opencsv;
+----
+sql	<!REGEX>:.*parallel.*
+
+# JsonSerDe
+statement ok
+CREATE TABLE my_datalake.default.es_lines (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'json');
+
+statement ok
+INSERT INTO my_datalake.default.es_lines VALUES (1, 'a', '2016-05-14'), (2, NULL, '2016-05-15');
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_lines;
+----
+sql	<REGEX>:.*SELECT\s+id,\s+"name",\s+'2016-05-14' AS dt\s+FROM "system"\.main\.read_json\(.*\(format = CAST\('newline_delimited' AS VARCHAR\)\),\s*\(hive_partitioning = CAST\(FALSE AS BOOLEAN\)\)\).*
+
+# AvroSerDe
+statement ok
+CREATE TABLE my_datalake.default.es_records (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'avro');
+
+statement ok
+INSERT INTO my_datalake.default.es_records VALUES (1, 10.5, '2016-05-14'), (2, 20.5, '2016-05-15');
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_records;
+----
+sql	<REGEX>:.*SELECT\s+id,\s+amount,\s+'2016-05-15' AS dt\s+FROM "system"\.main\.read_avro\(.*\(hive_partitioning = CAST\(FALSE AS BOOLEAN\)\),\s*\("schema" = .*
+
+#---------------------------------------------------------------------------
+# the SQL reads what the scan reads
+#---------------------------------------------------------------------------
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+query IIIII rowsort
+SELECT * FROM my_datalake.default.es_events;
+----
+1	{'a': 1, 'b': x}	[p, q]	2016-05-14	1
+2	{'a': 2, 'b': NULL}	[]	2016-05-14	2
+3	NULL	NULL	2016-05-15	NULL
+
+query II rowsort
+SELECT id, s.b FROM my_datalake.default.es_events WHERE dt = DATE '2016-05-14' AND n = 1;
+----
+1	x
+
+query I
+SELECT id FROM my_datalake.default.es_events WHERE n IS NULL;
+----
+3
+
+query IIII rowsort
+SELECT * FROM my_datalake.default.es_text;
+----
+1	a	1.5	2016-05-14
+2	NULL	NULL	2016-05-14
+NULL	b	NULL	2016-05-14
+
+query II rowsort
+SELECT id, name FROM my_datalake.default.es_text WHERE amount > 1;
+----
+1	a
+
+query III rowsort
+SELECT id, name, flag FROM my_datalake.default.es_opencsv;
+----
+1	a,b	true
+2	c	false
+3	d	true
+4	e	false
+
+query I rowsort
+SELECT id FROM my_datalake.default.es_opencsv WHERE flag;
+----
+1
+3
+
+query III rowsort
+SELECT * FROM my_datalake.default.es_lines;
+----
+1	a	2016-05-14
+2	NULL	2016-05-15
+
+query III rowsort
+SELECT * FROM my_datalake.default.es_records WHERE dt = '2016-05-15';
+----
+2	20.5	2016-05-15
+
+query II rowsort
+SELECT e.id, r.amount FROM my_datalake.default.es_events e JOIN my_datalake.default.es_records r ON e.id = r.id;
+----
+1	10.5
+2	20.5
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+# a value an OpenCSVSerde table can not convert fails the query, unless use.null.for.invalid.data makes it NULL
+statement ok
+COPY (SELECT '"x","f","true"' AS line)
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/es_opencsv/dt=2016-05-14/invalid.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+statement error
+SELECT id FROM my_datalake.default.es_opencsv;
+----
+<REGEX>:.*Could not convert string 'x' to (INT32|INTEGER).*
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+statement ok
+ALTER TABLE my_datalake.default.es_opencsv SET ('use.null.for.invalid.data' = 'true');
+
+query II
+EXPLAIN (SQL) SELECT * FROM my_datalake.default.es_opencsv;
+----
+sql	<REGEX>:.*SELECT\s+TRY_CAST\(__internal_barrier\(id\) AS INTEGER\) AS id,\s+.*
+
+# a line of a JsonSerDe table that is not JSON fails the read
+statement ok
+COPY (SELECT 'not json' AS line)
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/es_lines/dt=2016-05-15/malformed.json' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+query II rowsort
+SELECT id, name FROM my_datalake.default.es_opencsv WHERE flag;
+----
+1	a,b
+3	d
+NULL	f
+
+statement error
+SELECT * FROM my_datalake.default.es_lines;
+----
+<REGEX>:.*Malformed JSON.*
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+#---------------------------------------------------------------------------
+# no reader call reads the files the way the scan does: the table is read by name, and pruning is restated over it
+#---------------------------------------------------------------------------
+# a binary column: the string columns are decoded file by file
+statement ok
+CREATE TABLE my_datalake.default.es_bytes (id INTEGER, b BLOB, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.es_bytes VALUES (1, '\xC3\xBC'::BLOB, '2016-05-14'), (2, '\x00'::BLOB, '2016-05-15');
+
+query II
+EXPLAIN (SQL) SELECT id, b FROM my_datalake.default.es_bytes WHERE dt = '2016-05-15';
+----
+sql	<REGEX>:.*FROM my_datalake\."?default"?\.es_bytes AS r\d+\(column0, column1, column2\)\s+WHERE \(r\d+\.column2 = CAST\('2016-05-15' AS VARCHAR\)\).*
+
+query II
+EXPLAIN (SQL) SELECT id, b FROM my_datalake.default.es_bytes WHERE dt = '2016-05-15';
+----
+sql	<!REGEX>:.*read_parquet.*
+
+# a virtual column of the scan
+query II
+EXPLAIN (SQL) SELECT id, "$path" FROM my_datalake.default.es_events WHERE n = 1;
+----
+sql	<REGEX>:.*r\d+\."\$path".*FROM my_datalake\."?default"?\.es_events AS r\d+\(column0, column1, column2, column3, column4\)\s+WHERE \(r\d+\.column4 = CAST\(1 AS INTEGER\)\).*
+
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+query II
+SELECT id, b FROM my_datalake.default.es_bytes WHERE dt = '2016-05-15';
+----
+2	\x00
+
+query II
+SELECT id, "$path" LIKE '%/es_events/dt=2016-05-14/n=1/%' FROM my_datalake.default.es_events WHERE n = 1;
+----
+1	true
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+foreach table es_events es_text es_opencsv es_lines es_records es_bytes
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

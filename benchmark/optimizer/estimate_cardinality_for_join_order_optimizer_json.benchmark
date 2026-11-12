@@ -3,7 +3,7 @@
 # group: [optimizer]
 
 # The json variant of estimate_cardinality_for_join_order_optimizer.benchmark, where the estimate comes from the
-# lines of a prefix of one file rather than a parquet footer. fact has 10,000,000 rows in 2 partitions, dim 4,000 rows
+# lines of a prefix of one file rather than a parquet footer. fact has 40,000,000 rows in 2 partitions, dim 4,000 rows
 # in 50. Without an estimate for either table the hash join builds on the narrower side, and dim carries its name
 # column, so it builds on fact. Only the cardinality sampled from the data builds on dim.
 
@@ -16,7 +16,7 @@ require httpfs
 
 require glue
 
-cache glue_join_build_side_json.duckdb
+cache glue_join_build_side_json_40m.duckdb
 
 load
 CREATE SECRET (
@@ -33,15 +33,15 @@ ATTACH '123456789012' AS my_datalake (
     ENDPOINT 'http://localhost:5555',
     DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
 );
-CREATE SCHEMA IF NOT EXISTS my_datalake.bench_join_build_side_json;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_join_build_side_json.fact (id BIGINT, k BIGINT, v DOUBLE, part BIGINT) PARTITIONED BY (part) WITH (format = 'json');
-INSERT INTO my_datalake.bench_join_build_side_json.fact
-SELECT i AS id, i % 1000000 AS k, (i % 997)::DOUBLE AS v, i % 2 AS part FROM range(0, 10000000) t(i)
-WHERE NOT EXISTS (SELECT 1 FROM my_datalake.bench_join_build_side_json.fact);
-CREATE TABLE IF NOT EXISTS my_datalake.bench_join_build_side_json.dim (k BIGINT, name VARCHAR, part BIGINT) PARTITIONED BY (part) WITH (format = 'json');
-INSERT INTO my_datalake.bench_join_build_side_json.dim
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_join_build_side_json_40m;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_build_side_json_40m.fact (id BIGINT, k BIGINT, v DOUBLE, part BIGINT) PARTITIONED BY (part) WITH (format = 'json');
+INSERT INTO my_datalake.bench_join_build_side_json_40m.fact
+SELECT i AS id, i % 1000000 AS k, (i % 997)::DOUBLE AS v, i % 2 AS part FROM range(0, 40000000) t(i)
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.bench_join_build_side_json_40m.fact);
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_build_side_json_40m.dim (k BIGINT, name VARCHAR, part BIGINT) PARTITIONED BY (part) WITH (format = 'json');
+INSERT INTO my_datalake.bench_join_build_side_json_40m.dim
 SELECT i * 250 AS k, 'name_' || i AS name, i % 50 AS part FROM range(0, 4000) t(i)
-WHERE NOT EXISTS (SELECT 1 FROM my_datalake.bench_join_build_side_json.dim);
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.bench_join_build_side_json_40m.dim);
 
 reload
 CREATE SECRET (
@@ -62,8 +62,8 @@ SET enable_external_file_cache=false;
 
 run
 SELECT count(*), max(d.name)
-FROM my_datalake.bench_join_build_side_json.dim d
-JOIN my_datalake.bench_join_build_side_json.fact f ON f.k = d.k;
+FROM my_datalake.bench_join_build_side_json_40m.dim d
+JOIN my_datalake.bench_join_build_side_json_40m.fact f ON f.k = d.k;
 
 result II
-40000	name_999
+160000	name_999

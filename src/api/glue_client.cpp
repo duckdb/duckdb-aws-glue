@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_retry_strategy.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -10,6 +11,8 @@
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/client/ClientConfiguration.h>
+#include <aws/core/client/RetryStrategy.h>
 #include <aws/glue/model/GetDatabasesRequest.h>
 
 #include <sys/stat.h>
@@ -67,8 +70,19 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	// The HTTP transport is chosen when the SDK client is built, so a changed setting needs a new client
 	auto via_duckdb = GlueNetworkCallsViaDuckDB(DatabaseInstance::GetDatabase(context));
 	auto &endpoint = catalog.options.endpoint;
+	// The glue_max_retries flag: a custom retry limit for Glue API calls. -1 (the default) keeps the SDK's own
+	// retry policy; 0 means no retries (single attempt); 1-10 sets that many retries, capped at 10.
+	int64_t glue_max_retries = -1;
+	Value glue_max_retries_setting;
+	if (context.TryGetCurrentSetting("glue_max_retries", glue_max_retries_setting) &&
+	    !glue_max_retries_setting.IsNull()) {
+		glue_max_retries = glue_max_retries_setting.GetValue<int64_t>();
+		if (glue_max_retries > 10) {
+			glue_max_retries = 10;
+		}
+	}
 	auto cache_key = key_id + "\x1f" + session_token + "\x1f" + region + "\x1f" + endpoint + "\x1f" +
-	                 (via_duckdb ? "duckdb" : "sdk");
+	                 (via_duckdb ? "duckdb" : "sdk") + "\x1f" + to_string(glue_max_retries);
 
 	lock_guard<mutex> guard(catalog.client_lock);
 	if (catalog.glue_client && catalog.client_cache_key == cache_key) {
@@ -100,6 +114,18 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	auto &db_config = DBConfig::GetConfig(context);
 	config.userAgent = db_config.UserAgent();
 
+	// Override the SDK's default retry policy only when glue_max_retries is set (>= 0); -1 leaves the default in
+	// place. StandardRetryStrategy counts total attempts, so N retries is N + 1 attempts (0 retries = 1 attempt).
+	if (glue_max_retries >= 0) {
+		config.retryStrategy =
+		    std::make_shared<Aws::Client::StandardRetryStrategy>(static_cast<long>(glue_max_retries + 1));
+	}
+	// Null unless glue_max_retries is set: the configuration leaves it to the client, which creates it this way
+	if (!config.retryStrategy) {
+		config.retryStrategy = config.configFactories.retryStrategyCreateFn();
+	}
+	config.retryStrategy = std::make_shared<GlueLoggingRetryStrategy>(std::move(config.retryStrategy));
+
 	Aws::Auth::AWSCredentials credentials(key_id, secret, session_token);
 	auto provider = std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(credentials);
 	catalog.glue_client = std::make_shared<Aws::Glue::GlueClient>(provider, nullptr, config);
@@ -110,17 +136,32 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 //===--------------------------------------------------------------------===//
 // Read API
 //===--------------------------------------------------------------------===//
-void GlueAPI::VerifyConnection(ClientContext &context, GlueCatalog &catalog) {
+string GlueAPI::GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::GetDatabasesRequest request;
-	SetCatalogId(request, catalog);
-	request.SetMaxResults(1);
-	auto outcome = client->GetDatabases(request);
-	if (!outcome.IsSuccess()) {
-		ThrowGlueError(outcome, StringUtil::Format("GetDatabases (catalog '%s', region '%s')", catalog.options.path,
-		                                           catalog.options.region));
-	}
+	// the catalog id of the first database that is not a resource link (a link's target is another catalog)
+	Aws::String next_token;
+	do {
+		Aws::Glue::Model::GetDatabasesRequest request;
+		SetCatalogId(request, catalog);
+		request.SetMaxResults(20);
+		if (!next_token.empty()) {
+			request.SetNextToken(next_token);
+		}
+		auto outcome = client->GetDatabases(request);
+		if (!outcome.IsSuccess()) {
+			ThrowGlueError(outcome, StringUtil::Format("GetDatabases (catalog '%s', region '%s')", catalog.options.path,
+			                                           catalog.options.region));
+		}
+		for (auto &database : outcome.GetResult().GetDatabaseList()) {
+			auto info = ToDatabaseInfo(database);
+			if (!info.is_resource_link && !info.catalog_id.empty()) {
+				return info.catalog_id;
+			}
+		}
+		next_token = outcome.GetResult().GetNextToken();
+	} while (!next_token.empty());
+	return string();
 }
 
 } // namespace duckdb

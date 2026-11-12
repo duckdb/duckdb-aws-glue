@@ -86,6 +86,19 @@ COPY (SELECT 99 AS id, 99.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/defa
 statement ok
 COPY (SELECT 98 AS id, 98.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-15/.hive-staging/data.parquet';
 
+# so are a directory marker (with content, so its name is what skips it) and a zero-byte object inside a partition,
+# neither of which is a parquet file
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-14/sub_$folder$' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT 1 AS id WHERE false) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-15/part-00007' (FORMAT csv, HEADER false);
+
+# a directory whose name ends in _$folder$ is not a marker: the files below it are read, from the table root and from the
+# partition alike
+statement ok
+COPY (SELECT 5 AS id, 50.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-14/odd_$folder$/data.parquet';
+
 foreach threshold 1 10
 
 statement ok
@@ -94,7 +107,12 @@ SET hive_partition_listing_threshold = {threshold};
 query II
 SELECT count(*), sum(id) FROM my_datalake.default.nested_orders;
 ----
-4	10
+5	15
+
+query I
+SELECT count(*) FROM my_datalake.default.nested_orders WHERE dt = '2016-05-14';
+----
+3
 
 endloop
 

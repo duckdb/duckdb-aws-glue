@@ -1,0 +1,67 @@
+# name: benchmark/pushdown/join_filter_partition_pruning_csv.benchmark
+# description: join a partitioned csv Hive table with a filtered csv dimension in the local Glue (moto) + S3 (MinIO)
+# group: [pushdown]
+
+# fact has 1,000,000 rows in 100 partitions of dk, dim one row per dk. The join filter that grp = 7 produces on dk
+# prunes fact to 5 partitions; without it the csv scan reads all 100 files. The load skips tables that already exist.
+
+name Join filter prunes csv Hive table partitions
+group pushdown
+subgroup text
+
+require httpfs
+
+require glue
+
+cache glue_pushdown_join_filter_csv.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_pushdown_text;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_pushdown_text.fact_csv (id BIGINT, v DOUBLE, dk BIGINT) PARTITIONED BY (dk) WITH (format = 'csv');
+INSERT INTO my_datalake.bench_pushdown_text.fact_csv
+SELECT i AS id, (i % 997)::DOUBLE AS v, i % 100 AS dk FROM range(0, 1000000) t(i)
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.bench_pushdown_text.fact_csv);
+CREATE TABLE IF NOT EXISTS my_datalake.bench_pushdown_text.dim_csv (dk BIGINT, grp BIGINT) WITH (format = 'csv');
+INSERT INTO my_datalake.bench_pushdown_text.dim_csv
+SELECT i AS dk, i // 5 AS grp FROM range(0, 100) t(i)
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.bench_pushdown_text.dim_csv);
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+SET enable_external_file_cache=false;
+SET debug_fs_delay_mean_ms=20;
+
+run
+SET enable_external_file_cache=false;
+SET debug_fs_delay_mean_ms=20;
+SELECT count(*), sum(f.id) FROM my_datalake.bench_pushdown_text.fact_csv f JOIN my_datalake.bench_pushdown_text.dim_csv d ON f.dk = d.dk WHERE d.grp = 7;
+
+result II
+50000	24999350000

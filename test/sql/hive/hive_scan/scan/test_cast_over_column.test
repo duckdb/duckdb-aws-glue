@@ -1,0 +1,54 @@
+# name: test/sql/hive/hive_scan/scan/test_cast_over_column.test
+# description: a cast right above a csv hive_scan() applies to the column as the scan reads it
+# group: [scan]
+
+require glue
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, '7'), (2, 'x')) t(id, s)) TO '{TEST_DIR}/cast_p1' (FORMAT csv, HEADER false, PER_THREAD_OUTPUT true);
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, '9')) t(id, s)) TO '{TEST_DIR}/cast_p2' (FORMAT csv, HEADER false, PER_THREAD_OUTPUT true);
+
+query III
+SELECT id, s, k FROM hive_scan('{TEST_DIR}/cast', format := 'csv', schema := {id: 'INTEGER', s: 'VARCHAR', k: 'INTEGER'},
+    partitions := [{k: '007', location: '{TEST_DIR}/cast_p1'}, {k: NULL, location: '{TEST_DIR}/cast_p2'}])
+ORDER BY id;
+----
+1	7	7
+2	x	7
+3	9	NULL
+
+query I
+SELECT TRY_CAST(s AS INTEGER) AS n FROM hive_scan('{TEST_DIR}/cast', format := 'csv', schema := {id: 'INTEGER', s: 'VARCHAR', k: 'INTEGER'},
+    partitions := [{k: '007', location: '{TEST_DIR}/cast_p1'}, {k: NULL, location: '{TEST_DIR}/cast_p2'}])
+ORDER BY n NULLS LAST;
+----
+7
+9
+NULL
+
+statement error
+SELECT CAST(s AS INTEGER) FROM hive_scan('{TEST_DIR}/cast', format := 'csv', schema := {id: 'INTEGER', s: 'VARCHAR', k: 'INTEGER'},
+    partitions := [{k: '007', location: '{TEST_DIR}/cast_p1'}, {k: NULL, location: '{TEST_DIR}/cast_p2'}]);
+----
+<REGEX>:.*Could not convert string 'x' to INT32.*
+
+query I
+SELECT CAST(id AS VARCHAR) AS v FROM hive_scan('{TEST_DIR}/cast', format := 'csv', schema := {id: 'INTEGER', s: 'VARCHAR', k: 'INTEGER'},
+    partitions := [{k: '007', location: '{TEST_DIR}/cast_p1'}, {k: NULL, location: '{TEST_DIR}/cast_p2'}])
+ORDER BY v;
+----
+1
+2
+3
+
+# a partition key is the partition's value read as the key's type (7 for '007'), which the query then casts
+query I
+SELECT CAST(k AS VARCHAR) AS v FROM hive_scan('{TEST_DIR}/cast', format := 'csv', schema := {id: 'INTEGER', s: 'VARCHAR', k: 'INTEGER'},
+    partitions := [{k: '007', location: '{TEST_DIR}/cast_p1'}, {k: NULL, location: '{TEST_DIR}/cast_p2'}])
+ORDER BY v NULLS LAST;
+----
+7
+7
+NULL

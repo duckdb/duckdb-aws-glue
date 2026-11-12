@@ -19,7 +19,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
-foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_zstd
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_zstd compr_wc_parquet compr_wc_json compr_wc_avro compr_wc_override
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -393,7 +393,49 @@ INSERT INTO my_datalake.default.compr_avro_zstd VALUES (1);
 ----
 Can not write to Hive table 'default.compr_avro_zstd': it records zstandard compression, DuckDB writes only snappy and deflate compressed avro files
 
-foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_zstd
+#---------------------------------------------------------------------------
+# write_compression, for a table without its format's codec parameter
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.compr_wc_parquet (id INTEGER) WITH ('write_compression' = 'ZSTD');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_wc_json (id INTEGER) WITH (format = 'json', 'write_compression' = 'GZIP');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_wc_avro (id INTEGER) WITH (format = 'avro', 'write_compression' = 'SNAPPY');
+
+# the format's own parameter wins
+statement ok
+CREATE TABLE my_datalake.default.compr_wc_override (id INTEGER) WITH ('parquet.compression' = 'GZIP', 'write_compression' = 'ZSTD');
+
+foreach table compr_wc_parquet compr_wc_json compr_wc_avro compr_wc_override
+
+statement ok
+INSERT INTO my_datalake.default.{table} SELECT range FROM range(100);
+
+query I
+SELECT sum(id) FROM my_datalake.default.{table};
+----
+4950
+
+endloop
+
+query II
+SELECT regexp_extract(file, 'compr_wc_([a-z]+)/', 1) AS t, string_agg(DISTINCT regexp_extract(file, '[0-9a-f-]{36}(\..*)$', 1))
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_wc_*/*') GROUP BY t ORDER BY t;
+----
+avro	.avro
+json	.json.gz
+override	.gz.parquet
+parquet	.zstd.parquet
+
+query I
+SELECT contains(hex(content), hex('snappy'::BLOB)) FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_wc_avro/*');
+----
+true
+
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_zstd compr_wc_parquet compr_wc_json compr_wc_avro compr_wc_override
 
 statement ok
 DROP TABLE my_datalake.default.{table};

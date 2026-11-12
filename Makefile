@@ -26,13 +26,19 @@ glue-fixture-down:
 # hides ~/.aws), which off EC2 hangs for minutes per client
 # test-local goes through DuckDB's test runner (Python 3.10+), serially (the tests share the Glue database 'default'),
 # and reruns a failing batch: a read right after a write occasionally comes back empty. Tests run in batches because
-# every process first installs the loadable extensions from build/$(TEST_BUILD)/repository
+# every process first installs the loadable extensions from build/$(TEST_BUILD)/repository. The credentials of a second
+# Glue account come from scripts/glue_second_account.sh
 PYTHON ?= python3
 TEST_BATCH_SIZE ?= 10
 TEST_BUILD ?= relassert
 test-local:
-	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 $(PYTHON) duckdb/scripts/ci/run_tests.py ./build/$(TEST_BUILD)/test/unittest --test-config test/configs/local_glue.json --workers 1 --batch-size $(TEST_BATCH_SIZE) --retry 2 'test/sql/*'
+	env $$(scripts/glue_second_account.sh) AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 $(PYTHON) duckdb/scripts/ci/run_tests.py ./build/$(TEST_BUILD)/test/unittest --test-config test/configs/local_glue.json --workers 1 --batch-size $(TEST_BATCH_SIZE) --retry 2 'test/sql/*'
 # CLOUD_TEST_CONFIG: a copy of cloud_glue.json pointing at another account, as .github/workflows/CloudGlueTests.yml does
 CLOUD_TEST_CONFIG ?= test/configs/cloud_glue.json
 test-cloud:
 	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-config $(CLOUD_TEST_CONFIG) 'test/sql/*'
+# The C++ tests of test/unittest, whose binary a normal build skips. Its Glue table tests only run against a local
+# GLUE_ENDPOINT, so they need `make glue-fixture` first
+test-cpp:
+	cmake --build build/$(TEST_BUILD) --target unittest_glue
+	GLUE_ENDPOINT=http://localhost:5555 AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest_glue

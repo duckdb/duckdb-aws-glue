@@ -1,5 +1,7 @@
 #include "planning/hive_query_cache.hpp"
 
+#include "core/hive_location.hpp"
+
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -11,6 +13,59 @@
 namespace duckdb {
 
 static constexpr const char *HIVE_QUERY_CACHE = "glue_hive_query_cache";
+static constexpr const char *HIVE_LISTING_CACHE = "glue_listing_cache";
+
+namespace {
+
+//! The directory listings of Glue tables, kept across statements under glue_cache_listings
+class HiveListingCache : public ClientContextState {
+public:
+	shared_ptr<MultiFileList> GetListing(ClientContext &context, const string &directory) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &listing = listings[directory];
+		if (!listing) {
+			auto &fs = FileSystem::GetFileSystem(context);
+			listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
+		}
+		return listing;
+	}
+
+	void Clear() {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		listings.clear();
+	}
+
+	void QueryEnd(ClientContext &context) override {
+		Value enabled;
+		if (!context.TryGetCurrentSetting("glue_cache_listings", enabled) || enabled.IsNull() ||
+		    !BooleanValue::Get(enabled)) {
+			Clear();
+		}
+	}
+
+	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
+		if (!GlueTransactionCache::ConnectionScoped(context)) {
+			Clear();
+		}
+	}
+
+	void TransactionRollback(MetaTransaction &transaction, ClientContext &context) override {
+		Clear();
+	}
+
+private:
+	annotated_mutex lock;
+	unordered_map<string, shared_ptr<MultiFileList>> listings DUCKDB_GUARDED_BY(lock);
+};
+
+} // namespace
+
+void ClearHiveListingCache(ClientContext &context) {
+	auto cache = context.registered_state->Get<HiveListingCache>(HIVE_LISTING_CACHE);
+	if (cache) {
+		cache->Clear();
+	}
+}
 
 shared_ptr<HiveQueryCache> HiveQueryCache::Get(ClientContext &context) {
 	return context.registered_state->GetOrCreate<HiveQueryCache>(HIVE_QUERY_CACHE);
@@ -25,6 +80,12 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 	glue_tables.clear();
 	samples.clear();
 	directory_listings.clear();
+	scan_count = 0;
+}
+
+idx_t HiveQueryCache::NextScanId() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return ++scan_count;
 }
 
 shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
@@ -45,16 +106,31 @@ shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) 
 	return entry;
 }
 
-shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory) {
+shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
+                                                              bool cache_in_connection) {
 	auto key = directory;
 	StringUtil::RTrim(key, "/");
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &listing = directory_listings[key];
-	if (!listing) {
-		auto &fs = FileSystem::GetFileSystem(context);
-		listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
+	if (cache_in_connection) {
+		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
+		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, key);
 	}
-	return listing;
+	shared_ptr<HiveDirectoryListingEntry> entry;
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &slot = directory_listings[key];
+		if (!slot) {
+			slot = make_shared_ptr<HiveDirectoryListingEntry>();
+		}
+		entry = slot;
+	}
+	// lock per directory: GlobFileList fetches the first page right away, and listings of other directories must not
+	// wait behind it
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->listing) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, key));
+	}
+	return entry->listing;
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info,

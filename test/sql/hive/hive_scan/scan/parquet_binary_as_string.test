@@ -1,0 +1,374 @@
+# name: test/sql/hive/hive_scan/scan/parquet_binary_as_string.test
+# description: A parquet BYTE_ARRAY column without a STRING annotation reads as text when Glue declares the column string, and as bytes when it declares it binary, with and without a binary column in the table
+# group: [scan]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_as_text;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_as_binary;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_invalid;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_mixed;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_nested;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_both;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_both_invalid;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_nested_binary;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_nested_list;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bytes_nested_map;
+
+# a BLOB column is written as BYTE_ARRAY without a logical type
+statement ok
+COPY (SELECT * FROM (VALUES (1, encode('plain')), (2, encode('ü€😀')), (3, encode('tab' || chr(9) || 'here')), (4, encode('line' || chr(10) || 'break')), (5, NULL)) t(id, c) ORDER BY id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_text/data.parquet' (FORMAT PARQUET);
+
+query I
+SELECT typeof(c) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_text/data.parquet') LIMIT 1;
+----
+BLOB
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_as_text (id INTEGER, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_text');
+
+# the table has no binary column, so the reader itself reads the bytes as text (binary_as_string), not as an
+# escaped rendering of them
+query IIII
+SELECT id, replace(replace(c, chr(9), '<TAB>'), chr(10), '<LF>'), length(c), typeof(c) FROM my_datalake.default.bytes_as_text ORDER BY id;
+----
+1	plain	5	VARCHAR
+2	ü€😀	3	VARCHAR
+3	tab<TAB>here	8	VARCHAR
+4	line<LF>break	10	VARCHAR
+5	NULL	NULL	VARCHAR
+
+# the session's binary_as_string does not decide: the Glue type does
+statement ok
+SET binary_as_string = false;
+
+query II
+SELECT id, c FROM my_datalake.default.bytes_as_text WHERE id = 2;
+----
+2	ü€😀
+
+statement ok
+RESET binary_as_string;
+
+# filters and functions see the decoded text
+query I
+SELECT id FROM my_datalake.default.bytes_as_text WHERE c = 'ü€😀';
+----
+2
+
+query I
+SELECT id FROM my_datalake.default.bytes_as_text WHERE c > 'q' ORDER BY id;
+----
+2
+3
+
+query I
+SELECT id FROM my_datalake.default.bytes_as_text WHERE c IN ('plain', 'line' || chr(10) || 'break') ORDER BY id;
+----
+1
+4
+
+query I
+SELECT upper(c) FROM my_datalake.default.bytes_as_text WHERE id = 1;
+----
+PLAIN
+
+# a scan that reads no column (count(*) passes only a virtual column id) and one that mixes a virtual column in
+query I
+SELECT count(*) FROM my_datalake.default.bytes_as_text;
+----
+5
+
+query II
+SELECT c, filename LIKE '%bytes_as_text%' FROM my_datalake.default.bytes_as_text WHERE id = 2;
+----
+ü€😀	true
+
+# a column Glue declares binary keeps the bytes
+statement ok
+COPY (SELECT * FROM (VALUES (1, '\xC3\xBC'::BLOB), (2, '\x00\xFF'::BLOB)) t(id, b) ORDER BY id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_binary/data.parquet' (FORMAT PARQUET);
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_as_binary (id INTEGER, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_binary');
+
+query III
+SELECT id, b, typeof(b) FROM my_datalake.default.bytes_as_binary ORDER BY id;
+----
+1	\xC3\xBC	BLOB
+2	\x00\xFF	BLOB
+
+# the session's binary_as_string does not decide: the Glue type does
+statement ok
+SET binary_as_string = true;
+
+query III
+SELECT id, b, typeof(b) FROM my_datalake.default.bytes_as_binary ORDER BY id;
+----
+1	\xC3\xBC	BLOB
+2	\x00\xFF	BLOB
+
+statement ok
+RESET binary_as_string;
+
+# bytes that are not UTF-8 in a string column are an error, not an escaped value, also when the filter is evaluated
+# inside the reader
+statement ok
+COPY (SELECT 1 AS id, '\xFF\xFE'::BLOB AS c) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid/data.parquet' (FORMAT PARQUET);
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_invalid (id INTEGER, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid');
+
+statement error
+SELECT c FROM my_datalake.default.bytes_invalid;
+----
+Invalid string encoding found in Parquet file "{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid/data.parquet": value "\xFF\xFE" is not valid UTF8!
+
+statement error
+SELECT id FROM my_datalake.default.bytes_invalid WHERE c = 'x';
+----
+Invalid string encoding found in Parquet file "{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid/data.parquet": value "\xFF\xFE" is not valid UTF8!
+
+# a table with a binary column reads the bytes as bytes (binary_as_string = false) and decodes the ones of a string
+# column: the same text, through the reader's filter too, and the binary column keeps its bytes
+statement ok
+COPY (SELECT * FROM (VALUES (1, encode('plain'), '\x00\xFF'::BLOB), (2, encode('ü€😀'), '\xC3\xBC'::BLOB), (3, encode('tab' || chr(9) || 'here'), NULL), (4, NULL, NULL), (5, encode('\x41'), NULL)) t(id, c, b) ORDER BY id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both/data.parquet' (FORMAT PARQUET);
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_both (id INTEGER, c VARCHAR, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both');
+
+query IIIIII
+SELECT id, replace(c, chr(9), '<TAB>'), length(c), typeof(c), b, typeof(b) FROM my_datalake.default.bytes_both ORDER BY id;
+----
+1	plain	5	VARCHAR	\x00\xFF	BLOB
+2	ü€😀	3	VARCHAR	\xC3\xBC	BLOB
+3	tab<TAB>here	8	VARCHAR	NULL	BLOB
+4	NULL	NULL	VARCHAR	NULL	BLOB
+5	\x41	4	VARCHAR	NULL	BLOB
+
+# the filter compares the text, not the bytes: the four characters \x41 are not the byte 0x41 ('A')
+query I
+SELECT id FROM my_datalake.default.bytes_both WHERE c = 'ü€😀';
+----
+2
+
+query I
+SELECT id FROM my_datalake.default.bytes_both WHERE c = '\x41';
+----
+5
+
+query I
+SELECT id FROM my_datalake.default.bytes_both WHERE c = 'A';
+----
+
+query I
+SELECT id FROM my_datalake.default.bytes_both WHERE c > 'q' ORDER BY id;
+----
+2
+3
+
+query I
+SELECT id FROM my_datalake.default.bytes_both WHERE c < 'a' ORDER BY id;
+----
+5
+
+query I
+SELECT id FROM my_datalake.default.bytes_both WHERE c IN ('plain', 'ü€😀') ORDER BY id;
+----
+1
+2
+
+query II
+SELECT count(*), count(c) FROM my_datalake.default.bytes_both;
+----
+5	4
+
+statement ok
+SET binary_as_string = true;
+
+query III
+SELECT id, c, b FROM my_datalake.default.bytes_both WHERE id = 2;
+----
+2	ü€😀	\xC3\xBC
+
+statement ok
+RESET binary_as_string;
+
+# bytes that are not UTF-8 in the string column of such a table fail in decode, on the projection and on the filter
+statement ok
+COPY (SELECT 1 AS id, '\xFF\xFE'::BLOB AS c, '\x00'::BLOB AS b) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both_invalid/data.parquet' (FORMAT PARQUET);
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_both_invalid (id INTEGER, c VARCHAR, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both_invalid');
+
+statement error
+SELECT c FROM my_datalake.default.bytes_both_invalid;
+----
+Failure in decode: could not convert blob to UTF8 string, the blob contained invalid UTF8 characters.
+
+statement error
+SELECT id FROM my_datalake.default.bytes_both_invalid WHERE c = 'x';
+----
+Failure in decode: could not convert blob to UTF8 string, the blob contained invalid UTF8 characters.
+
+query I
+SELECT b FROM my_datalake.default.bytes_both_invalid;
+----
+\x00
+
+# a file holding an annotated string column next to an unannotated one: both read as text, and as the same text
+statement ok
+COPY (SELECT 1 AS id, 'ü€😀' AS s, encode('ü€😀') AS c) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_mixed/data.parquet' (FORMAT PARQUET);
+
+query II
+SELECT typeof(s), typeof(c) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_mixed/data.parquet');
+----
+VARCHAR	BLOB
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_mixed (id INTEGER, s VARCHAR, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_mixed');
+
+query III
+SELECT id, s, c FROM my_datalake.default.bytes_mixed WHERE s = c;
+----
+1	ü€😀	ü€😀
+
+# hive_scan without a catalog follows the schema it is given the same way
+query I
+SELECT c FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_mixed', schema := {id: 'INTEGER', s: 'VARCHAR', c: 'VARCHAR'}) WHERE c = 'ü€😀';
+----
+ü€😀
+
+query I
+SELECT c FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_mixed', schema := {id: 'INTEGER', s: 'VARCHAR', c: 'BLOB'});
+----
+\xC3\xBC\xE2\x82\xAC\xF0\x9F\x98\x80
+
+# a schema type that is an alias of VARCHAR (JSON): without a binary column the reader reads the bytes as text and
+# the text is converted to JSON; with one the column keeps the reader's own BLOB -> JSON conversion, which renders the
+# bytes as an escaped JSON string
+require json
+
+statement ok
+COPY (SELECT 1 AS id, '{"a": 1}'::BLOB AS c) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_json/data.parquet';
+
+query II
+SELECT c, typeof(c) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_json', schema := {id: 'INTEGER', c: 'JSON'});
+----
+{"a": 1}	JSON
+
+statement ok
+COPY (SELECT 1 AS id, '{"a": 1}'::BLOB AS c, '\x00'::BLOB AS b) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_json_binary/data.parquet';
+
+query III
+SELECT c, typeof(c), b FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_json_binary', schema := {id: 'INTEGER', c: 'JSON', b: 'BLOB'});
+----
+"{\\x22a\\x22: 1}"	JSON	\x00
+
+# the same bytes inside a struct: without a binary column the reader reads them as text too
+statement ok
+COPY (SELECT 1 AS id, {'s': encode('ü'), 'n': 1} AS st) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested/data.parquet' (FORMAT PARQUET);
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_nested (id INTEGER, st STRUCT(s VARCHAR, n INTEGER)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested');
+
+query I
+SELECT st.s FROM my_datalake.default.bytes_nested;
+----
+ü
+
+# with a binary column (here nested in the same struct) they are converted by the reader's nested cast and keep the
+# escaped form (documented), while the binary field keeps its bytes
+statement ok
+COPY (SELECT 1 AS id, {'s': encode('ü'), 'b': '\xC3\xBC'::BLOB} AS st) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_binary/data.parquet' (FORMAT PARQUET);
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_nested_binary (id INTEGER, st STRUCT(s VARCHAR, b BLOB)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_binary');
+
+query III
+SELECT st.s, st.b, typeof(st.b) FROM my_datalake.default.bytes_nested_binary;
+----
+\xC3\xBC	\xC3\xBC	BLOB
+
+statement ok
+DROP TABLE my_datalake.default.bytes_as_text;
+
+statement ok
+DROP TABLE my_datalake.default.bytes_as_binary;
+
+statement ok
+DROP TABLE my_datalake.default.bytes_invalid;
+
+statement ok
+DROP TABLE my_datalake.default.bytes_mixed;
+
+statement ok
+DROP TABLE my_datalake.default.bytes_nested;
+
+statement ok
+DROP TABLE my_datalake.default.bytes_both;
+
+statement ok
+DROP TABLE my_datalake.default.bytes_both_invalid;
+
+# a binary element of an array or map column counts as a binary column too: the string column is decoded, the bytes
+# in the array and the map are kept (non-ASCII bytes: read as text they would fail the nested cast back to BLOB)
+statement ok
+COPY (SELECT 1 AS id, encode('ü') AS c, ['\xC3\xBC'::BLOB, NULL] AS bl) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_list/data.parquet' (FORMAT PARQUET);
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_nested_list (id INTEGER, c VARCHAR, bl BLOB[]) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_list');
+
+query III
+SELECT c, bl, typeof(bl) FROM my_datalake.default.bytes_nested_list;
+----
+ü	['\\xC3\\xBC', NULL]	BLOB[]
+
+statement ok
+COPY (SELECT 1 AS id, encode('ü') AS c, MAP {'k': '\xC3\xBC'::BLOB} AS m) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_map/data.parquet' (FORMAT PARQUET);
+
+statement ok
+CREATE TABLE my_datalake.default.bytes_nested_map (id INTEGER, c VARCHAR, m MAP(VARCHAR, BLOB)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_map');
+
+query III
+SELECT c, m, typeof(m) FROM my_datalake.default.bytes_nested_map;
+----
+ü	{k='\\xC3\\xBC'}	MAP(VARCHAR, BLOB)
+
+statement ok
+DROP TABLE my_datalake.default.bytes_nested_binary;
+
+statement ok
+DROP TABLE my_datalake.default.bytes_nested_list;
+
+statement ok
+DROP TABLE my_datalake.default.bytes_nested_map;

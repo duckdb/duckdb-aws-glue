@@ -105,7 +105,7 @@ SELECT id, name, name IS NULL, amount FROM my_datalake.default.fixture_text_null
 2	\N	false	3.5
 
 #---------------------------------------------------------------------------
-# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse is NULL
+# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse fails the query
 #---------------------------------------------------------------------------
 statement ok
 COPY (SELECT * FROM (VALUES
@@ -124,11 +124,22 @@ COPY (SELECT * FROM (VALUES
     ('1,a,oops')
 ) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
-# as in Hive, where every OpenCSVSerde column is a string, a value that does not parse as its column type is NULL
-query I
+# a value that does not parse fails the query unless use.null.for.invalid.data is true
+statement error
 SELECT amount FROM my_datalake.default.fixture_text_opencsv;
 ----
-NULL
+<REGEX>:.*Could not convert string 'oops' to DOUBLE.*
+
+# use.null.for.invalid.data as a SerDe property
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,a,oops')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv_null_invalid/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query III
+SELECT id, name, amount FROM my_datalake.default.fixture_text_opencsv_null_invalid;
+----
+1	a	NULL
 
 # as OpenCSVSerde does: missing trailing fields are NULL and fields beyond the last column are ignored
 statement ok
@@ -195,7 +206,7 @@ has 'skip.footer.line.count' set, which DuckDB can not read or write
 #---------------------------------------------------------------------------
 # tables this extension writes; a table property overrides the SerDe property of the same name
 #---------------------------------------------------------------------------
-foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
+foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_opencsv_escape formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -280,6 +291,150 @@ SELECT id, name, name IS NULL FROM my_datalake.default.formats_csv_opencsv ORDER
 1	a,b	false
 2	(empty)	false
 3	(empty)	false
+
+statement ok
+COPY (SELECT '"x","d"' AS line) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv/invalid.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT id FROM my_datalake.default.formats_csv_opencsv WHERE name = 'd';
+----
+<REGEX>:.*Could not convert string 'x' to (INT32|INTEGER).*
+
+# with use.null.for.invalid.data, a value that does not parse as its column type is NULL
+statement ok
+ALTER TABLE my_datalake.default.formats_csv_opencsv SET ('use.null.for.invalid.data' = 'true');
+
+query II
+SELECT id, name FROM my_datalake.default.formats_csv_opencsv ORDER BY id NULLS LAST;
+----
+1	a,b
+2	(empty)
+3	(empty)
+NULL	d
+
+statement ok
+ALTER TABLE my_datalake.default.formats_csv_opencsv SET ('use.null.for.invalid.data' = 'false');
+
+statement error
+SELECT id FROM my_datalake.default.formats_csv_opencsv WHERE name = 'd';
+----
+<REGEX>:.*Could not convert string 'x' to (INT32|INTEGER).*
+
+# an OpenCSVSerde boolean is true when the field is 'true' in any case and false otherwise; a missing field is NULL
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_opencsv_bool (id INTEGER, flag BOOLEAN) WITH (format = 'csv', quote = '"');
+
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('"1","true"'),
+    ('"2","TRUE"'),
+    ('"3","false"'),
+    ('"4",""'),
+    ('"5","True."'),
+    ('"6","abc"'),
+    ('"7","1"'),
+    ('"8","yes"'),
+    ('"9"')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv_bool/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, flag FROM my_datalake.default.formats_csv_opencsv_bool ORDER BY id;
+----
+1	true
+2	true
+3	false
+4	false
+5	false
+6	false
+7	false
+8	false
+9	NULL
+
+# use.null.for.invalid.data does not change it: no boolean field is invalid
+statement ok
+ALTER TABLE my_datalake.default.formats_csv_opencsv_bool SET ('use.null.for.invalid.data' = 'true');
+
+query II
+SELECT id, flag FROM my_datalake.default.formats_csv_opencsv_bool WHERE id IN (4, 5) ORDER BY id;
+----
+4	false
+5	false
+
+# OpenCSVSerde without escapeChar reads with a '\' escape: an escape is dropped, and the escape or quote character after
+# it is kept, in a quoted field or not and before a field is converted to its column's type; outside quotes it does not
+# escape the separator
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,\'),
+    ('2,a\x'),
+    ('3,a\\b'),
+    ('4,"a\\b"'),
+    ('5,"a\x"'),
+    ('6,a\"b'),
+    ('7,"x"'),
+    ('8,y,1\2'),
+    ('9,a\,7')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv_escape/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query III
+SELECT id, val, n FROM my_datalake.default.fixture_text_opencsv_escape ORDER BY id;
+----
+1	(empty)	NULL
+2	ax	NULL
+3	a\b	NULL
+4	a\b	NULL
+5	ax	NULL
+6	a"b	NULL
+7	x	NULL
+8	y	12
+9	a	7
+
+# the scan's reader call drops the escape the same way, only from a field that holds one
+query II
+EXPLAIN (SQL) SELECT id, val FROM my_datalake.default.fixture_text_opencsv_escape;
+----
+sql	<REGEX>:.*CAST\(\s*CASE\s+WHEN\s+\(contains\(__internal_barrier\(id\), '\\'\)\)\s+THEN\s+\(regexp_replace\(__internal_barrier\(id\), '[^']*', '\\1', 'g'\)\)\s+ELSE\s+__internal_barrier\(id\)\s+END\s+AS\s+INTEGER\)\s+AS\s+id,\s+CASE\s+WHEN\s+\(contains\("?val"?, '\\'\)\)\s+THEN\s+\(regexp_replace\("?val"?, '[^']*', '\\1', 'g'\)\)\s+ELSE\s+"?val"?\s+END\s+AS\s+"?val"?.*
+
+# a written backslash is doubled, so that it reads back as one; the fixture's files are kept between runs, so this run's
+# rows are told apart by their tag
+statement ok
+INSERT INTO my_datalake.default.fixture_text_opencsv_escape_write VALUES ('{TEST_DIR}', 1, 'a\b'), ('{TEST_DIR}', 2, '\'), ('{TEST_DIR}', 3, 'x\"y'), ('{TEST_DIR}', 4, '\\');
+
+query I
+SELECT replace(line, '{TEST_DIR}', 'tag') FROM (SELECT unnest(string_split(content, chr(10))) AS line FROM read_text('{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv_escape_write/*')) WHERE contains(line, '{TEST_DIR}') ORDER BY 1;
+----
+"tag","1","a\\b"
+"tag","2","\\"
+"tag","3","x\\""y"
+"tag","4","\\\\"
+
+query II
+SELECT id, val FROM my_datalake.default.fixture_text_opencsv_escape_write WHERE tag = '{TEST_DIR}' ORDER BY id;
+----
+1	a\b
+2	\
+3	x\"y
+4	\\
+
+# a table this extension creates records escapeChar '"', which is read as it is: a '\' is an ordinary character, and it
+# is written as it is
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_opencsv_escape (id INTEGER, val VARCHAR) WITH (format = 'csv', quote = '"');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_opencsv_escape VALUES (1, 'C:\dir'), (2, 'a\\b'), (3, '\');
+
+query I
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv_escape/*.csv');
+----
+"1","C:\dir"<nl>"2","a\\b"<nl>"3","\"<nl>
+
+query II
+SELECT id, val FROM my_datalake.default.formats_csv_opencsv_escape ORDER BY id;
+----
+1	C:\dir
+2	a\\b
+3	\
 
 # a separator of more than one byte can be read, but not written
 statement ok
@@ -384,17 +539,29 @@ statement ok
 DROP TABLE my_datalake.default.formats_csv_bad;
 
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'escape.delim' = '\');
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'escape.delim' = ',');
 
 statement error
 SELECT * FROM my_datalake.default.formats_csv_bad;
 ----
-has 'escape.delim' set, which DuckDB can not read or write
+has its field delimiter as 'escape.delim', which DuckDB can not read or write
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_bad;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'escape.delim' = '\',
+    'serialization.escape.crlf' = 'true');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_bad;
+----
+has 'serialization.escape.crlf' set, which DuckDB can not read or write
 
 statement error
 INSERT INTO my_datalake.default.formats_csv_bad VALUES (1);
 ----
-has 'escape.delim' set, which DuckDB can not read or write
+has 'serialization.escape.crlf' set, which DuckDB can not read or write
 
 statement ok
 DROP TABLE my_datalake.default.formats_csv_bad;
@@ -507,7 +674,7 @@ DROP TABLE my_datalake.default.formats_json_lines;
 
 endloop
 
-foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_header_ctas
+foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_opencsv_escape formats_csv_header_ctas
 
 statement ok
 DROP TABLE my_datalake.default.{table};

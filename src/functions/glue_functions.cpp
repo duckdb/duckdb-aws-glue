@@ -44,8 +44,7 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 	auto fetched = make_shared_ptr<const GlueTableInfo>(std::move(info));
 	cache.GetTable(database_name, table_name, [&fetched]() { return fetched; });
 
-	auto column_type = LogicalType::LIST(LogicalType::STRUCT(
-	    {{"name", LogicalType::VARCHAR}, {"type", LogicalType::VARCHAR}, {"comment", LogicalType::VARCHAR}}));
+	auto column_type = GlueColumnsType();
 	auto map_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
 	names = {"database_name", "table_name",     "table_type", "glue_table_type",  "location", "serde_library",
 	         "columns",       "partition_keys", "parameters", "serde_parameters", "response"};
@@ -67,27 +66,6 @@ unique_ptr<GlobalTableFunctionState> GlueGetTableResponseInit(ClientContext &con
 	return make_uniq<GlueGetTableResponseState>();
 }
 
-Value ColumnsToValue(const vector<GlueColumn> &columns, const LogicalType &list_type) {
-	vector<Value> entries;
-	for (auto &column : columns) {
-		entries.push_back(
-		    Value::STRUCT({{"name", Value(column.name)},
-		                   {"type", Value(column.type)},
-		                   {"comment", column.comment.empty() ? Value(LogicalType::VARCHAR) : Value(column.comment)}}));
-	}
-	return Value::LIST(ListType::GetChildType(list_type), std::move(entries));
-}
-
-Value MapToValue(const unordered_map<string, string> &map) {
-	vector<Value> keys;
-	vector<Value> values;
-	for (auto &entry : map) {
-		keys.emplace_back(entry.first);
-		values.emplace_back(entry.second);
-	}
-	return Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values));
-}
-
 void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &state = data.global_state->Cast<GlueGetTableResponseState>();
 	if (state.done) {
@@ -97,16 +75,16 @@ void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, 
 	auto &bind_data = data.bind_data->Cast<GlueGetTableResponseBindData>();
 	auto &table = bind_data.table;
 
-	output.data[0].Append(Value(table.database_name));
+	output.data[0].Append(Value(table.schema_name));
 	output.data[1].Append(Value(table.name));
 	output.data[2].Append(Value(table.GetFormat().ToString()));
 	output.data[3].Append(Value(table.glue_table_type));
 	output.data[4].Append(Value(table.location));
 	output.data[5].Append(Value(table.serde_library));
-	output.data[6].Append(ColumnsToValue(table.columns, output.data[6].GetType()));
-	output.data[7].Append(ColumnsToValue(table.partition_keys, output.data[7].GetType()));
-	output.data[8].Append(MapToValue(table.parameters));
-	output.data[9].Append(MapToValue(table.serde_parameters));
+	output.data[6].Append(GlueColumnsToValue(table.columns));
+	output.data[7].Append(GlueColumnsToValue(table.partition_keys));
+	output.data[8].Append(GlueParametersToValue(table.parameters));
+	output.data[9].Append(GlueParametersToValue(table.serde_parameters));
 
 	// The complete Glue Table object: JSON as serialized by the AWS SDK, cast to VARIANT
 	Vector json(LogicalType::JSON(), 1);
@@ -171,7 +149,7 @@ void GlueGetDatabaseResponseScan(ClientContext &context, TableFunctionInput &dat
 	output.data[0].Append(Value(database.name));
 	output.data[1].Append(optional_string(database.description));
 	output.data[2].Append(optional_string(database.location_uri));
-	output.data[3].Append(MapToValue(database.parameters));
+	output.data[3].Append(GlueParametersToValue(database.parameters));
 
 	// The complete Glue Database object: JSON as serialized by the AWS SDK, cast to VARIANT
 	Vector json(LogicalType::JSON(), 1);
@@ -182,6 +160,32 @@ void GlueGetDatabaseResponseScan(ClientContext &context, TableFunctionInput &dat
 }
 
 } // namespace
+
+LogicalType GlueColumnsType() {
+	return LogicalType::LIST(LogicalType::STRUCT(
+	    {{"name", LogicalType::VARCHAR}, {"type", LogicalType::VARCHAR}, {"comment", LogicalType::VARCHAR}}));
+}
+
+Value GlueColumnsToValue(const vector<GlueColumn> &columns) {
+	vector<Value> entries;
+	for (auto &column : columns) {
+		entries.push_back(
+		    Value::STRUCT({{"name", Value(column.name)},
+		                   {"type", Value(column.type)},
+		                   {"comment", column.comment.empty() ? Value(LogicalType::VARCHAR) : Value(column.comment)}}));
+	}
+	return Value::LIST(ListType::GetChildType(GlueColumnsType()), std::move(entries));
+}
+
+Value GlueParametersToValue(const unordered_map<string, string> &parameters) {
+	vector<Value> keys;
+	vector<Value> values;
+	for (auto &entry : parameters) {
+		keys.emplace_back(entry.first);
+		values.emplace_back(entry.second);
+	}
+	return Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values));
+}
 
 QualifiedName ResolveGlueTableName(ClientContext &context, const string &function_name, const string &table_name) {
 	auto qualified = QualifiedName::Parse(table_name);

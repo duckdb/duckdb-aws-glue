@@ -13,7 +13,8 @@ on:
 
 jobs:
   local-glue-tests:
-    runs-on: ubuntu-latest
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
 
     env:
       GEN: ninja
@@ -48,16 +49,21 @@ jobs:
           save: ${{ github.ref == 'refs/heads/main' }}
 
       # relassert without debug info: on Linux -g makes each loadable extension ~1.5 GB, and the test runner
-      # installs and loads avro, httpfs and glue from build/*/repository for every test database (~25s per test)
+      # installs and loads avro, httpfs and glue from build/*/repository for every test database (~25s per test).
+      # Link two at a time, as debug builds do: four sanitized links at once can exhaust the runner's memory and shut
+      # it down.
       - name: Build
         uses: duckdb/duckdb-ci/build-duckdb@main
         with:
           build-type: release
-          build: make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1
+          build: make release EXT_RELEASE_FLAGS="-DFORCE_ASSERT=1 -DDUCKDB_RELEASE_LINK_JOBS=2"
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
       - name: Run tests
         run: make test-local TEST_BUILD=release
+
+      - name: Run C++ tests
+        run: make test-cpp TEST_BUILD=release
 
       - name: Server logs
         if: always()

@@ -1,9 +1,12 @@
 #include "core/glue_types.hpp"
 
+#include "catalog/glue_schema_entry.hpp"
+
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/decimal.hpp"
+#include "duckdb/function/cast/cast_function_set.hpp"
 
 namespace duckdb {
 
@@ -288,18 +291,22 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	}
 }
 
+bool GlueTypes::PartitionValueIsNull(const string &str_value, const LogicalType &type) {
+	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+		return true;
+	}
+	// for a non-string column these are the spellings a NULL arrives as
+	return type.id() != LogicalTypeId::VARCHAR && (StringUtil::CIEquals(str_value, "NULL") || str_value.empty());
+}
+
 Value GlueTypes::PartitionValue(ClientContext &context, const string &key, const string &str_value,
                                 const LogicalType &type) {
-	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+	if (PartitionValueIsNull(str_value, type)) {
 		return Value(type);
 	}
 	if (type.id() == LogicalTypeId::VARCHAR) {
 		// verbatim: what Glue holds IS the value
 		return Value(str_value);
-	}
-	// for a non-string column these are the spellings a NULL arrives as
-	if (StringUtil::CIEquals(str_value, "NULL") || str_value.empty()) {
-		return Value(type);
 	}
 	Value value(str_value);
 	auto cast = value.TryCastAs(context, type);
@@ -308,6 +315,31 @@ Value GlueTypes::PartitionValue(ClientContext &context, const string &key, const
 		                            StringUtil::Upper(key), type.ToString());
 	}
 	return std::move(*cast);
+}
+
+bool GlueTypes::CanReadPartitionTypeAs(ClientContext &context, const LogicalType &from, const LogicalType &to) {
+	if (from.IsNested() || to.IsNested() || GlueSchemaEntry::IsAllowedHiveTypeChange(from, to)) {
+		return true;
+	}
+	if (from.id() == LogicalTypeId::DECIMAL && to.id() == LogicalTypeId::DECIMAL) {
+		return true;
+	}
+	return CastFunctionSet::ImplicitCastCost(context, from, to) >= 0;
+}
+
+static string NormalizedHiveType(const string &type) {
+	auto result = StringUtil::Lower(type);
+	result.erase(std::remove_if(result.begin(), result.end(), StringUtil::CharacterIsSpace), result.end());
+	return result;
+}
+
+bool GlueTypes::SameColumnType(const string &a, const string &b) {
+	try {
+		return ToLogicalType(a) == ToLogicalType(b);
+	} catch (std::exception &) {
+		// a type the parser can not read is compared as text
+		return NormalizedHiveType(a) == NormalizedHiveType(b);
+	}
 }
 
 } // namespace duckdb

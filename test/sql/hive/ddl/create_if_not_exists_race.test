@@ -1,0 +1,162 @@
+# name: test/sql/hive/ddl/create_if_not_exists_race.test
+# description: When another client creates the same Glue database, table or view between the existence check and the create call, IF NOT EXISTS is a no-op and a plain CREATE reports the object as existing
+# group: [ddl]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fault proxy creates every fault_already_exists* database and table that is asked for and then answers
+# AlreadyExistsException, as Glue does to the client that lost a race to create the same object. What it creates
+# differs from what was asked for (a database description, one more table column, a view reading SELECT 2 AS one),
+# so keeping the other client's object and replacing it with our own can be told apart
+statement ok
+attach '{GLUE_CATALOG_ID}' as raced_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_already_exists_race CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_already_exists_race_err CASCADE;
+
+# ---- schema
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS raced_dl.fault_already_exists_race;
+
+# the database the other client created is kept as it is
+query I
+SELECT description FROM glue_get_database_response('raced_dl.fault_already_exists_race');
+----
+created by another client
+
+statement error
+CREATE SCHEMA raced_dl.fault_already_exists_race_err;
+----
+Schema with name "fault_already_exists_race_err" already exists in Glue catalog "raced_dl"
+
+# ---- table
+
+statement ok
+CREATE TABLE IF NOT EXISTS raced_dl.fault_already_exists_race.t (id INTEGER);
+
+# the entry is the table the other client created, not the one asked for
+query I
+SELECT list(column_name) FROM (DESCRIBE raced_dl.fault_already_exists_race.t);
+----
+[id, created_by_another_client]
+
+query I
+SELECT count(*) FROM raced_dl.fault_already_exists_race.t;
+----
+0
+
+statement error
+CREATE TABLE raced_dl.fault_already_exists_race.t_err (id INTEGER);
+----
+Table with name "t_err" already exists in Glue database "fault_already_exists_race"
+
+# ---- view
+
+statement ok
+CREATE VIEW IF NOT EXISTS raced_dl.fault_already_exists_race.v AS SELECT 1 AS one;
+
+# IF NOT EXISTS keeps the view the other client created
+query I
+SELECT one FROM raced_dl.fault_already_exists_race.v;
+----
+2
+
+statement error
+CREATE VIEW raced_dl.fault_already_exists_race.v_err AS SELECT 1 AS one;
+----
+View with name "v_err" already exists in Glue database "fault_already_exists_race"
+
+# OR REPLACE replaces the view the other client created, as it would have had the lookup found it
+statement ok
+CREATE OR REPLACE VIEW raced_dl.fault_already_exists_race.v_repl AS SELECT 1 AS one;
+
+query I
+SELECT one FROM raced_dl.fault_already_exists_race.v_repl;
+----
+1
+
+query I
+SELECT response.ViewOriginalText FROM glue_get_table_response('my_datalake.fault_already_exists_race.v_repl');
+----
+SELECT 1 AS one
+
+# ---- CREATE TABLE AS creates the table when execution starts; losing the race there is reported as the table
+# having appeared since planning, not as a plain "already exists"
+
+statement error
+CREATE TABLE IF NOT EXISTS raced_dl.fault_already_exists_race.c AS SELECT 1 AS id;
+----
+Table with name "c" appeared between planning and execution; retry CREATE TABLE IF NOT EXISTS
+
+# ---- the objects the other client created are all there. The listings below enumerate every attached catalog, so
+# the raced attach goes first: through the proxy a fault_* database another test left behind would fail them
+
+statement ok
+DETACH raced_dl;
+
+query I
+SELECT list_sort(list(table_name)) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = 'fault_already_exists_race';
+----
+[c, t, t_err]
+
+query I
+SELECT list_sort(list(view_name)) FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = 'fault_already_exists_race';
+----
+[v, v_err, v_repl]
+
+# ---- the same race for real: connections racing to create one database, none of them may fail
+
+concurrentloop threadid 0 4
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.create_race_loop_{threadid};
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.create_race_loop;
+
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.create_race_loop.t (id INTEGER);
+
+endloop
+
+query I
+SELECT count(*) FROM my_datalake.create_race_loop.t;
+----
+0
+
+statement ok
+DROP SCHEMA my_datalake.create_race_loop CASCADE;
+
+foreach threadid 0 1 2 3
+
+statement ok
+DROP SCHEMA my_datalake.create_race_loop_{threadid};
+
+endloop
+
+statement ok
+DROP SCHEMA my_datalake.fault_already_exists_race CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.fault_already_exists_race_err;

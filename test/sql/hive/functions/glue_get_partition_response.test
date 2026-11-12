@@ -1,0 +1,133 @@
+# name: test/sql/hive/functions/glue_get_partition_response.test
+# description: glue_get_partition_response returns the Glue GetPartition response for one partition of a Hive table
+# group: [functions]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.partition_response_orders;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.partition_response_flat;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.partition_response_view;
+
+statement ok
+CREATE TABLE my_datalake.default.partition_response_orders (id INTEGER, name VARCHAR, dt VARCHAR, region VARCHAR)
+PARTITIONED BY (dt, region) WITH (format = 'parquet');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.partition_response_orders', {dt: '2024-01-01', region: 'eu'});
+
+statement ok
+CALL glue_add_partition('my_datalake.default.partition_response_orders', {dt: '2024-01-02', region: 'us'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere');
+
+query IIII
+SELECT database_name, table_name, partition_values, location
+FROM glue_get_partition_response('my_datalake.default.partition_response_orders', {dt: '2024-01-01', region: 'eu'});
+----
+default	partition_response_orders	[2024-01-01, eu]	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/partition_response_orders/dt=2024-01-01/region=eu
+
+# the keys in any order and case, the location the partition was given
+query II
+SELECT partition_values, location
+FROM glue_get_partition_response('my_datalake.default.partition_response_orders', {REGION: 'us', dt: '2024-01-02'});
+----
+[2024-01-02, us]	{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere
+
+# the partition's own storage descriptor
+query II
+SELECT serde_library, [c.name FOR c IN columns]
+FROM glue_get_partition_response('my_datalake.default.partition_response_orders', {dt: '2024-01-01', region: 'eu'});
+----
+org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe	[id, name]
+
+# the complete Glue Partition object
+query III
+SELECT response.Values[2]::VARCHAR, response.StorageDescriptor.Location::VARCHAR = location, response.TableName::VARCHAR
+FROM glue_get_partition_response('my_datalake.default.partition_response_orders', {dt: '2024-01-01', region: 'eu'});
+----
+eu	true	partition_response_orders
+
+# a partially qualified name is resolved like in a query
+statement ok
+USE my_datalake.default;
+
+query I
+SELECT partition_values FROM glue_get_partition_response('partition_response_orders', {dt: '2024-01-01', region: 'eu'});
+----
+[2024-01-01, eu]
+
+statement ok
+USE memory.main;
+
+#---------------------------------------------------------------------------
+# errors
+#---------------------------------------------------------------------------
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.default.partition_response_orders', {dt: '1999-01-01', region: 'eu'});
+----
+Partition [1999-01-01, eu] does not exist in Glue table 'default.partition_response_orders'
+
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.default.partition_response_orders', {dt: '2024-01-01'});
+----
+the partition must name every partition key of table 'default.partition_response_orders' (dt, region), 'region' is missing
+
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.default.partition_response_orders', {dt: '2024-01-01', region: 'eu', day: 1});
+----
+'day' is not a partition key of table 'default.partition_response_orders'
+
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.default.partition_response_orders', '2024-01-01');
+----
+glue_get_partition_response expects the partition as a struct of the partition keys
+
+statement ok
+CREATE TABLE my_datalake.default.partition_response_flat (id INTEGER) WITH (format = 'parquet');
+
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.default.partition_response_flat', {dt: '2024-01-01'});
+----
+Table 'default.partition_response_flat' is not partitioned
+
+statement ok
+CREATE VIEW my_datalake.default.partition_response_view AS SELECT 1 AS one;
+
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.default.partition_response_view', {dt: '2024-01-01'});
+----
+Glue view 'default.partition_response_view' has no partitions
+
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.default.fixture_delta_symlink', {dt: '2024-01-01'});
+----
+glue_get_partition_response only works on Hive tables
+
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.default.partition_response_missing', {dt: '2024-01-01'});
+----
+does not exist
+
+statement ok
+DROP VIEW my_datalake.default.partition_response_view;
+
+statement ok
+DROP TABLE my_datalake.default.partition_response_flat;
+
+statement ok
+DROP TABLE my_datalake.default.partition_response_orders;

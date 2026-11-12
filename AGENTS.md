@@ -15,7 +15,10 @@ testing, benchmarks). Keep it in sync when behavior changes.
 ## Build
 
 Extension template build (`extension-ci-tools`); the `duckdb` and `extension-ci-tools` submodules must be checked out.
-vcpkg is required (AWS SDK, openssl, curl, ...):
+vcpkg is required (AWS SDK, openssl, curl, ...). `vcpkg.json` takes `aws-sdk-cpp` and `aws-checksums` from the
+`vcpkg-duckdb-ports` registry and overlays `vcpkg_ports/aws-c-io`, whose patch stubs out sockets and TLS under
+emscripten so the SDK builds for wasm (there every request goes through DuckDB's HTTP layer; `CMakeLists.txt` names
+the vcpkg archives the wasm side module links):
 
 ```sh
 VCPKG_TOOLCHAIN_PATH='<vcpkg>/scripts/buildsystems/vcpkg.cmake' GEN=ninja make relassert   # what tests use
@@ -54,13 +57,19 @@ AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 \
   otherwise hangs for minutes on the EC2 metadata service. For cloud runs also export
   `AWS_PROFILE`, `AWS_CONFIG_FILE=$HOME/.aws/config` and `AWS_SHARED_CREDENTIALS_FILE=$HOME/.aws/credentials`.
 - Tests write under `{DEFAULT_S3_LOCATION}/{TEST_DIR}` so runs don't collide. `DROP TABLE`/`DROP SCHEMA` leave S3
-  files behind, and Glue has no transactions — nothing rolls back.
+  files behind, and Glue has no transactions — only a failed INSERT/CTAS cleans up after itself.
 - **Only run the tests the user asks for.** Several tests drop tables or whole Glue databases (e.g. `default`); against
   the cloud config that destroys real data. Check what a test drops before running it.
 - `test/configs/*.json` own the init SQL, env and skip policy. When something fails for one config only, skip the
   narrowest path there with a concrete reason instead of weakening the test; remove the skip when support lands.
   Validate config edits with `jq empty test/configs/*.json`.
-- Test targets don't build first: rebuild before running tests.
+- Test targets don't build first: rebuild before running tests (`make test-cpp` builds its own binary).
+
+C++ tests: `test/unittest/` holds Catch tests of `src/include/functions/hive_reader_call.hpp`, which no SQL reaches, in
+their own binary `unittest_glue` (extensions linked statically; a normal build skips it). `make test-cpp` builds and
+runs it. Its Glue table test only runs when `GLUE_ENDPOINT` names localhost (the target sets it), since it creates and
+drops tables. What `BindHiveScan` passes the reader and what `InitializeReader` does to a column has to show in
+`HiveScanGetReaderCall`: the tests compare the rows of its call with the scan's.
 
 Test format is DuckDB's sqllogictest (`statement ok|error`, `query I...`, `----`, `<REGEX>:` for error patterns,
 `require-env`). Slow tests use `.test_slow`. Do not add `PRAGMA enable_verification`. Test error paths, not just the
@@ -93,7 +102,13 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
 - **Writing** `src/planning/glue_hive_insert.cpp`: INSERT and CTAS plan a `PhysicalCopyToFile` in the table's format
   with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. The copy is
   `GlueHiveCopy` (`src/execution/hive_copy.cpp`); for CTAS it carries the bound CREATE TABLE and creates the Glue table
-  when the sink starts, before any output is initialized, as `PhysicalInsert` does.
+  when the sink starts, before any output is initialized, as `PhysicalInsert` does. Each write gets a write id that
+  prefixes its file names; the copy adds it to the `GlueTransaction` (with the created table) and
+  `GlueHiveInsert::Finalize` completes it once the partitions are registered. A write still registered when the
+  transaction ends belongs to a failed statement: `GlueTransaction::Rollback` undoes it (`UndoHiveWrite`,
+  `src/execution/hive_write_undo.cpp`), deleting its files (by prefix) and the table a CTAS created, unless another
+  writer's data files are there or the table was created again since. A failed partition registration deletes its
+  files itself, in Finalize (the partitions it registered stay, empty).
 - **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition
@@ -120,7 +135,8 @@ Follow DuckDB's style (`duckdb/AGENTS.md`):
 
 ## Change checklist
 
-- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/SeaweedFS).
+- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/SeaweedFS),
+  and `make test-cpp` when it touches `BindHiveScan`, `InitializeReader` or `hive_reader_call.hpp`.
 - Build change: read both the root `Makefile` and `extension-ci-tools/makefiles/duckdb_extension.Makefile`.
 - Documentation-only change: check commands statically; don't start containers or run tests.
 

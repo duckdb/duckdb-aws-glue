@@ -231,6 +231,50 @@ SELECT id, name FROM my_datalake.default.formats_csv_dquote ORDER BY id;
 1	x|y
 2	say "hi"
 
+# a file another writer left with a line break inside a quoted field, next to a short row (padded with NULL): the
+# combination the parallel scanner refuses. The writer refuses such values, so the file is written directly
+statement ok
+COPY (SELECT '3|"two' || chr(10) || 'lines"' AS l UNION ALL SELECT '4|after' UNION ALL SELECT '5')
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_dquote/external.csv' (FORMAT csv, HEADER false, QUOTE '');
+
+query I
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_dquote/external.csv');
+----
+3|"two<nl>lines"<nl>4|after<nl>5<nl>
+
+# by default the scan fails as read_csv does
+statement error
+SELECT * FROM my_datalake.default.formats_csv_dquote ORDER BY id;
+----
+<REGEX>:.*parallel scanner does not support null_padding in conjunction with quoted new lines.*
+
+# one thread per file: the field is read as CSV defines it, one value, one row (Hive and Athena v3 split the record
+# at the line break and return two broken rows; not reproduced here)
+statement ok
+SET hive_csv_parallel = false;
+
+query IIII
+SELECT id, replace(name, chr(10), '<nl>'), length(name), name IS NULL FROM my_datalake.default.formats_csv_dquote ORDER BY id;
+----
+1	x|y	3	false
+2	say "hi"	8	false
+3	two<nl>lines	9	false
+4	after	5	false
+5	NULL	NULL	true
+
+query I
+SELECT count(*) FROM my_datalake.default.formats_csv_dquote;
+----
+5
+
+statement ok
+RESET hive_csv_parallel;
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_dquote ORDER BY id;
+----
+<REGEX>:.*parallel scanner does not support null_padding in conjunction with quoted new lines.*
+
 #---------------------------------------------------------------------------
 # errors: Hive SerDes take single characters
 #---------------------------------------------------------------------------

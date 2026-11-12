@@ -1,8 +1,8 @@
 # Regression run of the benchmarks under benchmark/ (modelled on duckdb-iceberg's Regression.yml): one job builds the
-# benchmark runner for the PR and for its merge base with the base branch, then a job per table format compares the
-# timings of both with duckdb/scripts/regression/test_runner.py. The benchmarks read from the local Glue (moto) + S3 of
-# scripts/docker-compose.yml, so no AWS credentials are needed. On main only the first build runs, to save the ccache and
-# vcpkg caches that PR branches restore from.
+# benchmark runner for the PR and for its merge base with the base branch, then two jobs (parquet and csv/json tables) compare
+# the timings of both with duckdb/scripts/regression/test_runner.py. The benchmarks read from the local Glue (moto) + S3
+# of scripts/docker-compose.yml, so no AWS credentials are needed. On main only the first build runs, to save the ccache
+# and vcpkg caches that PR branches restore from.
 
 name: Regression
 on:
@@ -50,7 +50,8 @@ jobs:
   build-benchmark-runners:
     name: Build Benchmark Runners
     needs: check-draft
-    runs-on: ubuntu-latest
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
     env:
       GEN: ninja
       CC: clang-20
@@ -147,31 +148,25 @@ jobs:
             base/build/release/repository
 
   regression-test-benchmark-runner:
-    name: Regression Tests (${{ matrix.format }})
+    name: Regression Tests (${{ matrix.name }})
     needs: build-benchmark-runners
     if: github.ref != 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
+      # Two jobs of ~3 minutes each, so only the join-heavy TPC-H and TPC-DS queries: every query costs 10-30s against
+      # moto. parquet runs TPC-DS at SF1, csv TPC-H at SF0.1 and TPC-DS at SF0.01.
       matrix:
-        format: [parquet, csv, json, avro]
-        # parquet runs at SF1, the other formats at SF0.1 (TPC-H) and SF0.01 (TPC-DS)
         include:
-          - format: parquet
-            # q85: the base build takes ~75s (bad join order); fast with the estimates of this branch, so it can run
-            # once those are in the base too
-            tpcds_fail: '|85'
-          - format: avro
-            # avro tables are not sampled for their row count: 24s and 38s at SF0.01, with bad join orders
-            tpcds_fail: '|64|72'
+          - name: parquet
+            benchmarks: '^benchmark/([^/]+|pushdown/join_filter_partition_pruning(_two_keys)?|optimizer/(common_subplan|estimate_cardinality_for_join_order_optimizer)|tpcds/sf1/parquet/q64)\.benchmark$'
+          - name: csv/json
+            benchmarks: '^benchmark/((optimizer/estimate_cardinality_for_join_order_optimizer|pushdown/join_filter_partition_pruning)_(csv|json)|tpch/sf0\.1/csv/q(09|18|21)|tpcds/sf0\.01/csv/q(14|64|72|78))\.benchmark$'
     env:
       # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
       AWS_EC2_METADATA_DISABLED: "true"
-      # Skipped in every format: the queries that take under 0.6s on parquet at SF1 (TPC-H q06 and TPC-DS q96 among
-      # them, both mostly a filtered scan of one table). tpch_fail/tpcds_fail add the queries that time out or come close
-      # (30s at 2 threads) for a format.
-      TPCH_SKIP: '02|06|11|14|15|16|20|22'
-      TPCDS_SKIP: '01|03|06|12|15|19|20|21|22|30|34|36|39|41|42|43|45|52|53|55|57|59|62|63|73|81|84|89|96|98|99'
+      BENCHMARKS: ${{ matrix.benchmarks }}
 
     steps:
       - uses: actions/checkout@v5
@@ -204,29 +199,11 @@ jobs:
 
       # The benchmark files of the PR checkout are run by both runners (the benchmark runner resolves the paths
       # against the working directory, which test_runner.py isolates per runner).
-      - name: Regression Test Hive Benchmarks
-        if: matrix.format == 'parquet'
+      - name: Regression Test benchmarks
         run: |
           mkdir -p .github/regression
-          ls benchmark/*.benchmark > .github/regression/hive_benchmarks.csv
-          ls benchmark/pushdown/*.benchmark >> .github/regression/hive_benchmarks.csv
-          ls benchmark/optimizer/*.benchmark >> .github/regression/hive_benchmarks.csv
-          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/hive_benchmarks.csv --verbose --threads 2 --samples 5
-
-      # A step of its own so a TPC-H failure is visible on its own; it also runs when the step above fails
-      - name: Tpch benchmarks
-        if: ${{ !cancelled() }}
-        run: |
-          mkdir -p .github/regression
-          ls benchmark/tpch/*/${{ matrix.format }}/*.benchmark | grep -vE '/sf10/|/sf0\.01/parquet/' | grep -vE "/q(${TPCH_SKIP}${{ matrix.tpch_fail }})\.benchmark$" > .github/regression/tpch_benchmarks.csv
-          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/tpch_benchmarks.csv --verbose --threads 2 --samples 5
-
-      - name: Tpcds benchmarks
-        if: ${{ !cancelled() }}
-        run: |
-          mkdir -p .github/regression
-          ls benchmark/tpcds/*/${{ matrix.format }}/*.benchmark | grep -vE '/sf10/|/sf0\.01/parquet/' | grep -vE "/q(${TPCDS_SKIP}${{ matrix.tpcds_fail }})\.benchmark$" > .github/regression/tpcds_benchmarks.csv
-          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/tpcds_benchmarks.csv --verbose --threads 2 --samples 5
+          find benchmark -name '*.benchmark' | sort | grep -E "${BENCHMARKS}" > .github/regression/benchmarks.csv
+          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/benchmarks.csv --verbose --threads 2 --samples 5
 
       - name: Server logs
         if: always()

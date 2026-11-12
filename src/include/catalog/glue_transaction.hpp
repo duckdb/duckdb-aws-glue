@@ -1,17 +1,21 @@
 #pragma once
 
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
+#include "execution/glue_hive_write.hpp"
 
 #include <functional>
 
 namespace duckdb {
 class GlueCatalog;
+class GlueSchemaEntry;
 
 enum class GlueTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -20,10 +24,13 @@ class GlueTransactionCache {
 public:
 	//! The current transaction's cache, or null when no catalog transaction is active (ATTACH, bare mutations)
 	static optional_ptr<GlueTransactionCache> Of(ClientContext &context, Catalog &catalog);
+	//! Clears the connection's directory listings too
 	static void Invalidate(ClientContext &context, Catalog &catalog);
 	//! DETACH erases the catalog's entry from the detaching connection's cache state; the attach-identity
 	//! keying remains the safety net for connection states a DETACH cannot reach
 	static void OnDetach(ClientContext &context, Catalog &catalog);
+	//! Whether glue_metadata_cache_scope is 'connection'
+	static bool ConnectionScoped(ClientContext &context);
 	//! Clear the cache when the enclosing Glue mutation returns or throws
 	struct InvalidateOnExit {
 		InvalidateOnExit(ClientContext &context, Catalog &catalog) : context(context), catalog(catalog) {
@@ -58,8 +65,15 @@ public:
 		tables.clear();
 		partitions.clear();
 	}
+	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
+	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
+	idx_t Id() const {
+		return id;
+	}
 
 private:
+	static idx_t NextId();
+
 	//! One cached value and the lock that guards loading it. The lock is per entry so the Glue calls for
 	//! different tables do not wait on each other (resolving N tables runs their fetches in parallel).
 	template <class T>
@@ -94,6 +108,7 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
+	const idx_t id = NextId();
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
@@ -143,7 +158,9 @@ private:
 };
 
 //! Glue has no transactional semantics in this extension: every DDL statement is executed against the Glue API
-//! immediately. The transaction exists because every attached database needs one, and carries the metadata cache.
+//! immediately. The transaction exists because every attached database needs one, and carries the metadata cache. It
+//! also keeps the Hive writes of the running statement: a write that is still there when the transaction ends belongs
+//! to a statement that failed, and is undone (UndoHiveWrite).
 class GlueTransaction : public Transaction {
 public:
 	GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &manager, ClientContext &context);
@@ -155,6 +172,14 @@ public:
 
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
 
+	//! A Hive write starts: it is undone when the transaction ends before CompleteHiveWrite. Writes are refused in
+	//! explicit transactions, so a transaction holds at most one
+	void AddHiveWrite(GlueHiveWrite write);
+	//! The write, or null when it was not added or has completed; the pointer stays valid until then
+	optional_ptr<GlueHiveWrite> FindHiveWrite(const string &write_id);
+	//! The write's files are written and its partitions registered, nothing to undo
+	void CompleteHiveWrite(const string &write_id);
+
 public:
 	GlueCatalog &glue_catalog;
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
@@ -162,7 +187,12 @@ public:
 	shared_ptr<GlueTransactionCache> cache;
 
 private:
+	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone
+	void UndoHiveWrite();
+
 	GlueTransactionState transaction_state;
+	annotated_mutex hive_write_lock;
+	unique_ptr<GlueHiveWrite> hive_write DUCKDB_GUARDED_BY(hive_write_lock);
 };
 
 } // namespace duckdb

@@ -1,7 +1,11 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_view.hpp"
+#include "catalog/glue_view_names.hpp"
+#include "catalog/scan_filter_equality.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/catalog/dependency_list.hpp"
+#include "duckdb/catalog/entry_scan_filters.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -26,11 +30,14 @@
 #include "catalog/glue_view.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 
 namespace duckdb {
 
-GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p)
-    : SchemaCatalogEntry(catalog, info), database_info(std::move(database_info_p)), tables(*this) {
+GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p,
+                                 bool schema_info_loaded)
+    : SchemaCatalogEntry(catalog, info), tables(*this), database_info(std::move(database_info_p)),
+      schema_info_loaded(schema_info_loaded) {
 }
 
 GlueSchemaEntry::~GlueSchemaEntry() {
@@ -79,19 +86,30 @@ bool GlueSchemaEntry::IsBucketingOption(const string &key) {
 	       StringUtil::CIEquals(key, "SortColumns");
 }
 
+static string LookupSpelling(const case_insensitive_map_t<string> &spellings, const string &key) {
+	auto entry = spellings.find(key);
+	return entry == spellings.end() ? string() : entry->second;
+}
+
 //! The Glue option another spelling of a bucketing option stands for, empty if the key is none of them
 static string BucketingOptionFor(const string &key) {
-	static const pair<const char *, const char *> SPELLINGS[] = {
+	static const case_insensitive_map_t<string> SPELLINGS = {
 	    {"bucket_columns", "BucketColumns"}, {"bucketed_by", "BucketColumns"},
 	    {"clustered_by", "BucketColumns"},   {"number_of_buckets", "NumberOfBuckets"},
 	    {"bucket_count", "NumberOfBuckets"}, {"sort_columns", "SortColumns"},
 	    {"sorted_by", "SortColumns"}};
-	for (auto &spelling : SPELLINGS) {
-		if (StringUtil::CIEquals(key, spelling.first)) {
-			return spelling.second;
-		}
-	}
-	return string();
+	return LookupSpelling(SPELLINGS, key);
+}
+
+//! The spelling to use for another engine's CREATE TABLE option, empty if the key is none of them
+static string OtherEngineOptionFor(const string &key) {
+	static constexpr const char *PARTITIONED_BY_CLAUSE = "a PARTITIONED BY (...) clause";
+	static const case_insensitive_map_t<string> SPELLINGS = {
+	    {"partitioned_by", PARTITIONED_BY_CLAUSE},  {"partitioning", PARTITIONED_BY_CLAUSE},
+	    {"partition_by", PARTITIONED_BY_CLAUSE},    {"partition_columns", PARTITIONED_BY_CLAUSE},
+	    {"partition_keys", PARTITIONED_BY_CLAUSE},  {"PartitionKeys", PARTITIONED_BY_CLAUSE},
+	    {"external_location", "option 'location'"}, {"field_delimiter", "option 'delimiter'"}};
+	return LookupSpelling(SPELLINGS, key);
 }
 
 static void CheckBucketedTablesEnabled(ClientContext &context, const string &key) {
@@ -265,6 +283,9 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 		} else if (StringUtil::CIEquals(key, "location")) {
 			result.location = string_value;
 			StringUtil::RTrim(result.location, "/");
+		} else if (StringUtil::CIEquals(key, "comment")) {
+			// Stored as Glue's Table.Description
+			result.description = string_value;
 		} else if (StringUtil::CIEquals(key, "delimiter") || StringUtil::CIEquals(key, "quote") ||
 		           StringUtil::CIEquals(key, "escape")) {
 			// the csv dialect: Hive SerDes take single characters
@@ -279,6 +300,8 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			} else {
 				result.csv_escape = string_value;
 			}
+		} else if (StringUtil::CIEquals(key, "overwrite")) {
+			result.overwrite = value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else if (StringUtil::CIEquals(key, "header")) {
 			// csv files with a header line: Hive's "TBLPROPERTIES ('skip.header.line.count' = '1')"
 			if (value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>()) {
@@ -297,6 +320,8 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			// stored as a table parameter this would silently leave the table unbucketed
 			throw BinderException("Unknown CREATE TABLE option '%s', a bucketed Glue table is created with option '%s'",
 			                      key, BucketingOptionFor(key));
+		} else if (!OtherEngineOptionFor(key).empty()) {
+			throw BinderException("Unknown CREATE TABLE option '%s', use %s instead", key, OtherEngineOptionFor(key));
 		} else {
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;
@@ -333,6 +358,38 @@ static void CheckEntryType(optional_ptr<CatalogEntry> existing, CatalogType expe
 	if (existing && existing->type != expected) {
 		throw CatalogException("Existing object %s is of type %s, trying to %s type %s", name,
 		                       CatalogTypeToString(existing->type), action, CatalogTypeToString(expected));
+	}
+}
+
+static optional_ptr<CatalogEntry> OnExistingTable(const CreateTableInfo &base, const string &database_name,
+                                                  const string &table_name) {
+	switch (base.on_conflict) {
+	case OnCreateConflict::IGNORE_ON_CONFLICT:
+		return nullptr;
+	case OnCreateConflict::ERROR_ON_CONFLICT:
+		throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table_name,
+		                       database_name);
+	default:
+		throw NotImplementedException(
+		    "CREATE OR REPLACE TABLE is not supported for Glue catalogs, use separate DROP and CREATE statements");
+	}
+}
+
+//! Whether CREATE VIEW goes on to replace the existing view: not for IF NOT EXISTS, an error for a plain CREATE
+static bool ReplacesExistingView(const CreateViewInfo &info, const GlueView &existing, const string &database_name,
+                                 const string &view_name) {
+	switch (info.on_conflict) {
+	case OnCreateConflict::IGNORE_ON_CONFLICT:
+		return false;
+	case OnCreateConflict::ERROR_ON_CONFLICT:
+		throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view_name,
+		                       database_name);
+	default:
+		if (!existing.IsDuckDBView()) {
+			throw CatalogException(
+			    "Glue view \"%s\" was not written by DuckDB; replace it from the engine that wrote it", view_name);
+		}
+		return true;
 	}
 }
 
@@ -383,9 +440,23 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 
 	GlueTableInfo table;
 	table.name = table_name;
-	table.database_name = database_info.name;
-	table.location =
-	    options.location.empty() ? glue_catalog.GetTableLocation(database_info, table_name) : options.location;
+	table.schema_name = database_info.name;
+	// Table description: `WITH (comment = '...')` is the primary spelling (DuckDB's parser accepts a trailing
+	// `COMMENT '...'` only on CREATE SCHEMA, not CREATE TABLE); CreateInfo::comment is a Value and set by a
+	// future parser or an engine wrapper, so honor it too and let the WITH value override when both are given.
+	if (!base.comment.IsNull()) {
+		table.description = base.comment.ToString();
+	}
+	if (!options.description.empty()) {
+		table.description = options.description;
+	}
+	if (options.location.empty()) {
+		// the database's LocationUri only matters without DEFAULT_LOCATION, which wins over it
+		auto &database = glue_catalog.options.default_location.empty() ? GetSchemaInfo(context) : database_info;
+		table.location = glue_catalog.GetTableLocation(database, table_name);
+	} else {
+		table.location = options.location;
+	}
 	table.parameters = options.parameters;
 	table.file_format = options.format;
 	if (table.file_format == HiveFileFormat::CSV) {
@@ -413,6 +484,9 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 		GlueColumn glue_column;
 		glue_column.name = column.Name().GetIdentifierName();
 		glue_column.type = GlueTypes::FromLogicalType(column.Type());
+		if (!column.Comment().IsNull()) {
+			glue_column.comment = column.Comment().ToString();
+		}
 		table.columns.push_back(std::move(glue_column));
 	}
 	for (auto &partition_column : partition_columns) {
@@ -420,6 +494,9 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 		GlueColumn glue_column;
 		glue_column.name = column.Name().GetIdentifierName();
 		glue_column.type = GlueTypes::FromLogicalType(column.Type());
+		if (!column.Comment().IsNull()) {
+			glue_column.comment = column.Comment().ToString();
+		}
 		table.partition_keys.push_back(std::move(glue_column));
 	}
 	if (table.columns.empty()) {
@@ -451,21 +528,26 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	auto existing = tables.GetEntry(context, lookup);
 	CheckEntryType(existing, CatalogType::TABLE_ENTRY, table_name, "create");
 	if (existing) {
-		switch (base.on_conflict) {
-		case OnCreateConflict::IGNORE_ON_CONFLICT:
-			return nullptr;
-		case OnCreateConflict::ERROR_ON_CONFLICT:
-			throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table_name,
-			                       database_info.name);
-		default:
-			throw NotImplementedException(
-			    "CREATE OR REPLACE TABLE is not supported for Glue catalogs, use separate DROP and CREATE statements");
-		}
+		return OnExistingTable(base, database_info.name, table_name);
+	}
+	// CREATE TABLE AS creates its table through CreateTableFromInfo
+	if (!resolved_table_info && base.options.find("overwrite") != base.options.end()) {
+		throw BinderException("CREATE TABLE option 'overwrite' is only for CREATE TABLE ... AS: a table created "
+		                      "without a query writes no files");
 	}
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
-	D_ASSERT(table.database_name == database_info.name);
-	GlueAPI::CreateHiveTable(context, glue_catalog, table);
+	D_ASSERT(table.schema_name == database_info.name);
+	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {
+		// another client created the table since the lookup above: take its entry
+		auto raced = tables.GetEntry(context, lookup);
+		if (!raced) {
+			throw CatalogException("Glue table \"%s.%s\" exists but could not be fetched", database_info.name,
+			                       table_name);
+		}
+		CheckEntryType(raced, CatalogType::TABLE_ENTRY, table_name, "create");
+		return OnExistingTable(base, database_info.name, table_name);
+	}
 
 	// re-fetch so the entry reflects what Glue stored
 	GlueTableInfo created;
@@ -494,58 +576,91 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	EntryLookupInfo lookup(CatalogType::VIEW_ENTRY, QualifiedName(Identifier(view_name)));
 	auto existing = tables.GetEntry(context, lookup);
 	CheckEntryType(existing, CatalogType::VIEW_ENTRY, view_name, "create");
-	if (existing) {
-		switch (info.on_conflict) {
-		case OnCreateConflict::IGNORE_ON_CONFLICT:
-			return existing;
-		case OnCreateConflict::ERROR_ON_CONFLICT:
-			throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view_name,
-			                       database_info.name);
-		default:
-			if (!existing->Cast<GlueView>().IsDuckDBView()) {
-				throw CatalogException(
-				    "Glue view \"%s\" was not written by DuckDB; replace it from the engine that wrote it", view_name);
-			}
-			break;
-		}
+	if (existing && !ReplacesExistingView(info, existing->Cast<GlueView>(), database_info.name, view_name)) {
+		return existing;
+	}
+	if (info.binding_mode == CreateViewBindingMode::SKIP_BINDING) {
+		throw NotImplementedException("Glue views can not be created WITH (DEFER_BINDING) yet");
 	}
 
 	GlueViewInfo view;
 	view.database_name = database_info.name;
 	view.name = view_name;
+	// a DuckDB view's ViewOriginalText: the user's SQL; ViewExpandedText: tables of this catalog as db.t, of other
+	// catalogs by their Glue catalog id or "external:<type>:<alias>"
 	view.sql = GlueView::RenderViewSql(info);
-	try {
-		// what is stored must read back: never write a view DuckDB itself could not parse
-		auto parser = Parser::GetBuiltinParser();
-		CreateViewInfo::ParseSelect(parser, view.sql);
-	} catch (std::exception &ex) {
-		ErrorData error(ex);
-		throw InternalException("The SQL rendered for Glue view \"%s\" does not parse: %s\n%s", view_name,
-		                        error.RawMessage(), view.sql);
+	auto expanded = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());
+	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node);
+	view.expanded_sql = expanded->ToString();
+	// names were resolved by lookups, not the binder: check they bind to the same column types (not names: an
+	// unaliased expression is named after its text, which the rewrite changes)
+	auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
+	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
+	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
+	GlueViewNames::PinToCatalog(*check->node, catalog.GetName(), name);
+	vector<LogicalType> types;
+	vector<Identifier> names;
+	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
+	// if its new query would read itself under this alias (not when a path reaches it under another alias)
+	LogicalDependencyList reads;
+	Binder::BindView(context, *check, catalog.GetName(), GetSchemaPath(), &reads, info.aliases, types, names);
+	if (existing && reads.Contains(*existing)) {
+		throw BinderException("Glue view \"%s.%s\" can not be created: its query reads the view itself",
+		                      database_info.name, view_name);
+	}
+	if (types != info.types) {
+		throw BinderException("The ViewExpandedText of Glue view \"%s\" binds to other column types than the view "
+		                      "query:\n%s",
+		                      view_name, view.expanded_sql);
+	}
+	for (auto &text : {view.sql, view.expanded_sql}) {
+		try {
+			// what is stored must read back: never write a view DuckDB itself could not parse
+			auto parser = Parser::GetBuiltinParser();
+			CreateViewInfo::ParseSelect(parser, text);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			throw InternalException("The SQL rendered for Glue view \"%s\" does not parse: %s\n%s", view_name,
+			                        error.RawMessage(), text);
+		}
 	}
 	view.secure = info.security_type == ViewSecurityType::SECURE_VIEW;
+	view.has_column_alias_list = !info.aliases.empty();
 	// the stored columns carry the column alias list of CREATE VIEW: an alias replaces the query's own name
 	for (idx_t i = 0; i < info.types.size(); i++) {
 		GlueColumn column;
 		auto aliased = i < info.aliases.size() && !info.aliases[i].GetIdentifierName().empty();
 		column.name = (aliased ? info.aliases[i] : info.names[i]).GetIdentifierName();
-		column.type = GlueTypes::FromLogicalType(info.types[i]);
+		column.type = info.types[i].ToString();
 		view.columns.push_back(std::move(column));
 	}
-	if (existing) {
-		GlueAPI::UpdateView(context, glue_catalog, view);
-	} else {
-		GlueAPI::CreateView(context, glue_catalog, view);
-	}
-
 	// re-fetch so the entry reflects what Glue stored
-	tables.RemoveEntry(view_name);
-	GlueTableInfo created;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, view_name, created)) {
-		throw CatalogException("Glue view \"%s.%s\" was created but could not be fetched afterwards",
-		                       database_info.name, view_name);
+	auto fetch_stored = [&]() {
+		tables.RemoveEntry(view_name);
+		GlueTableInfo stored;
+		if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, view_name, stored)) {
+			throw CatalogException("Glue view \"%s.%s\" was created but could not be fetched afterwards",
+			                       database_info.name, view_name);
+		}
+		return tables.CreateEntry(tables.CreateEntry(stored));
+	};
+	if (!existing) {
+		if (GlueAPI::CreateView(context, glue_catalog, view) == GlueCreateOutcome::CREATED) {
+			return fetch_stored();
+		}
+		// another client created the view since the lookup above: take its entry
+		existing = tables.GetEntry(context, lookup);
+		if (!existing) {
+			throw CatalogException("Glue view \"%s.%s\" exists but could not be fetched", database_info.name,
+			                       view_name);
+		}
+		CheckEntryType(existing, CatalogType::VIEW_ENTRY, view_name, "create");
+		if (!ReplacesExistingView(info, existing->Cast<GlueView>(), database_info.name, view_name)) {
+			return existing;
+		}
 	}
-	return tables.CreateEntry(tables.CreateEntry(created));
+	GlueAPI::UpdateView(context, glue_catalog, view, DefinitionForWrite(context, *existing));
+	return fetch_stored();
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateSequence(CatalogTransaction transaction, CreateSequenceInfo &info) {
@@ -620,9 +735,9 @@ static void CheckTablePropertyChangeable(const string &key) {
 }
 
 //! ALTER TABLE t SET (key = value, ...) / RESET (key, ...): Hive's SET / UNSET TBLPROPERTIES
-void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table) {
+void GlueSchemaEntry::AlterTableProperties(ClientContext &context, const GlueTableInfo &table,
+                                           AlterTableInfo &alter_table) {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
-	auto table_name = alter_table.GetQualifiedName().Name().GetIdentifierName();
 	vector<pair<string, string>> set;
 	vector<string> unset;
 	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS) {
@@ -639,8 +754,8 @@ void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInf
 			unset.push_back(std::move(key));
 		}
 	}
-	GlueAPI::UpdateTableParameters(context, glue_catalog, database_info.name, table_name, set, unset);
-	RefreshTable(context, table_name);
+	GlueAPI::UpdateTableParameters(context, glue_catalog, table, set, unset);
+	RefreshTable(context, table.name);
 }
 
 //! Glue keeps BucketColumns and SortColumns as they are, so a column they name can not be dropped or renamed
@@ -660,30 +775,40 @@ static void CheckNotClustering(const GlueTableInfo &table, const string &table_n
 	}
 }
 
-void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &table_name, SetColumnCommentInfo &info) {
+void GlueSchemaEntry::SetColumnComment(ClientContext &context, const GlueTableInfo &table, SetColumnCommentInfo &info) {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
-	// Work on the current Glue definition, not the cached one
-	GlueTableInfo current;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
-		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
-		                       database_info.name);
-	}
+	auto &table_name = table.name;
 	auto &name = info.column_name.GetIdentifierName();
-	for (auto &key : current.partition_keys) {
-		if (StringUtil::CIEquals(key.name, name)) {
-			throw NotImplementedException("Comments on the partition keys of Glue tables are not supported yet");
-		}
+	auto by_name = [&](const GlueColumn &column) {
+		return StringUtil::CIEquals(column.name, name);
+	};
+	auto partition_key = std::find_if(table.partition_keys.begin(), table.partition_keys.end(), by_name);
+	if (partition_key != table.partition_keys.end()) {
+		auto partition_keys = table.partition_keys;
+		// NULL removes the comment
+		partition_keys[partition_key - table.partition_keys.begin()].comment =
+		    info.comment_value.IsNull() ? string() : info.comment_value.ToString();
+		GlueAPI::UpdateTablePartitionKeys(context, glue_catalog, table, partition_keys);
+		RefreshTable(context, table_name);
+		return;
 	}
-	auto columns = current.columns;
-	auto column = std::find_if(columns.begin(), columns.end(),
-	                           [&](const GlueColumn &column) { return StringUtil::CIEquals(column.name, name); });
+	auto columns = table.columns;
+	auto column = std::find_if(columns.begin(), columns.end(), by_name);
 	if (column == columns.end()) {
 		throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
 	}
 	// NULL removes the comment
 	column->comment = info.comment_value.IsNull() ? string() : info.comment_value.ToString();
-	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	GlueAPI::UpdateTableColumns(context, glue_catalog, table, columns);
 	RefreshTable(context, table_name);
+}
+
+void GlueSchemaEntry::SetTableComment(ClientContext &context, const GlueTableInfo &table, SetCommentInfo &info) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	// NULL removes the description
+	auto description = info.comment_value.IsNull() ? string() : info.comment_value.ToString();
+	GlueAPI::UpdateTableDescription(context, glue_catalog, table, description);
+	RefreshTable(context, table.name);
 }
 
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
@@ -710,14 +835,19 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		throw BinderException("\"%s\" is a view", table_name);
 	}
 	auto &glue_table = entry->Cast<GlueTable>();
-	auto format = glue_table.table_info.GetFormat();
+	auto &current = DefinitionForWrite(context, glue_table);
+	auto format = current.GetFormat();
 	if (!format.IsHive()) {
 		throw NotImplementedException("ALTER TABLE is only supported for Hive tables in a Glue catalog, '%s' is a %s "
 		                              "table",
-		                              table_name, format.Describe(glue_table.table_info));
+		                              table_name, format.Describe(current));
 	}
 	if (info.type == AlterType::SET_COLUMN_COMMENT) {
-		SetColumnComment(context, table_name, info.Cast<SetColumnCommentInfo>());
+		SetColumnComment(context, current, info.Cast<SetColumnCommentInfo>());
+		return;
+	}
+	if (info.type == AlterType::SET_COMMENT) {
+		SetTableComment(context, current, info.Cast<SetCommentInfo>());
 		return;
 	}
 	if (info.type != AlterType::ALTER_TABLE) {
@@ -726,16 +856,10 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &alter_table = info.Cast<AlterTableInfo>();
 	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS ||
 	    alter_table.alter_table_type == AlterTableType::RESET_TABLE_OPTIONS) {
-		AlterTableProperties(context, alter_table);
+		AlterTableProperties(context, current, alter_table);
 		return;
 	}
 
-	// Work on the current Glue definition, not the cached one
-	GlueTableInfo current;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
-		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
-		                       database_info.name);
-	}
 	auto find_column = [](vector<GlueColumn> &columns, const string &name) -> optional_ptr<GlueColumn> {
 		for (auto &column : columns) {
 			if (StringUtil::CIEquals(column.name, name)) {
@@ -745,7 +869,8 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		return nullptr;
 	};
 	auto is_partition_key = [&](const string &name) {
-		return find_column(current.partition_keys, name) != nullptr;
+		return std::any_of(current.partition_keys.begin(), current.partition_keys.end(),
+		                   [&](const GlueColumn &column) { return StringUtil::CIEquals(column.name, name); });
 	};
 
 	auto columns = current.columns;
@@ -861,7 +986,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		                              EnumUtil::ToString(alter_table.alter_table_type));
 	}
 
-	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	GlueAPI::UpdateTableColumns(context, glue_catalog, current, columns);
 	RefreshTable(context, table_name);
 }
 
@@ -872,6 +997,22 @@ GlueTable &GlueSchemaEntry::RefreshTable(ClientContext &context, const string &t
 		                       table_name);
 	}
 	return tables.CreateEntry(tables.CreateEntry(updated))->Cast<GlueTable>();
+}
+
+const GlueTableInfo &GlueSchemaEntry::DefinitionForWrite(ClientContext &context, const CatalogEntry &entry) {
+	auto &bound = GlueTableSet::GetTableInfo(entry);
+	if (!GlueTransactionCache::ConnectionScoped(context)) {
+		return bound;
+	}
+	GlueTableInfo current;
+	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), database_info.name, bound.name, current)) {
+		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", bound.name,
+		                       database_info.name);
+	}
+	if (bound.IsSameVersion(current)) {
+		return bound;
+	}
+	return GlueTableSet::GetTableInfo(*tables.CreateEntry(tables.CreateEntry(current)));
 }
 
 void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
@@ -913,6 +1054,48 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 
 void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
 	throw NotImplementedException("Scan without context not supported for Glue databases");
+}
+
+void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
+	string name;
+	if (!CatalogTypeIsSupported(info.type) || !info.filter || info.filter->GetOid() ||
+	    !TryGetNameEquality(info.filter->GetName(), "GlueSchemaEntry::Scan", name)) {
+		SchemaCatalogEntry::Scan(context, info);
+		return;
+	}
+	// tables and views share the set, so the lookup returns whichever Glue holds under the name; the caller keeps
+	// the entries of the type it asked for
+	EntryLookupInfo lookup(info.type, QualifiedName(Identifier(name)));
+	auto entry = tables.GetEntry(context, lookup);
+	if (entry) {
+		info.callback(*entry);
+	}
+}
+
+const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
+	lock_guard<mutex> guard(schema_info_lock);
+	if (!schema_info_loaded) {
+		GlueDatabaseInfo database;
+		if (!GlueAPI::GetDatabase(context, catalog.Cast<GlueCatalog>(), database_info.name, database)) {
+			throw CatalogException("Glue database \"%s\" no longer exists", database_info.name);
+		}
+		database_info.description = std::move(database.description);
+		database_info.location_uri = std::move(database.location_uri);
+		database_info.parameters = std::move(database.parameters);
+		schema_info_loaded = true;
+	}
+	return database_info;
+}
+
+void GlueSchemaEntry::SetSchemaInfo(const GlueDatabaseInfo &database) {
+	lock_guard<mutex> guard(schema_info_lock);
+	if (schema_info_loaded) {
+		return;
+	}
+	database_info.description = database.description;
+	database_info.location_uri = database.location_uri;
+	database_info.parameters = database.parameters;
+	schema_info_loaded = true;
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,

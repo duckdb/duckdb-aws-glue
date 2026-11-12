@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/map.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
@@ -59,14 +60,21 @@ private:
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
+	//! Throws when a partition registration skipped as existing is registered at another location than its files
+	void CheckExistingPartitionLocations(ClientContext &context,
+	                                     const vector<GluePartitionInput> &already_existing) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).
 	GlueCatalog &catalog;
 	//! The one resolved table definition used by both CTAS catalog creation and file-writer planning.
 	GlueTableInfo table_info;
+	//! Where each partition that existed when the INSERT was planned is registered, by its Glue values.
+	map<vector<string>, string> planned_locations;
 	//! The directories of existing partitions not laid out as <key=value>, with their Glue values.
 	unordered_map<string, vector<string>> partition_directories;
+	//! Names the files of this write, and its entry in the Glue transaction
+	string write_id;
 };
 
 } // namespace duckdb

@@ -137,5 +137,235 @@ not partitioned
 statement ok
 DROP TABLE my_datalake.default.orders_repair_plain;
 
+#---------------------------------------------------------------------------
+# a partition key called location: the location column becomes location_1
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.orders_repair_location;
+
+statement ok
+CREATE TABLE my_datalake.default.orders_repair_location (id INTEGER, location VARCHAR) PARTITIONED BY (location);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_location/location=us/data.parquet';
+
+query II
+SELECT location, location_1 FROM glue_repair_table('my_datalake.default.orders_repair_location');
+----
+us	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_location/location=us
+
+statement ok
+DROP TABLE my_datalake.default.orders_repair_location;
+
+#---------------------------------------------------------------------------
+# a partition is registered with its values unescaped, at the directory it was found in
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.orders_repair_escaped;
+
+statement ok
+CREATE TABLE my_datalake.default.orders_repair_escaped (id INTEGER, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+
+# the INSERT writes the value escaped in the directory name and registers it unescaped
+statement ok
+INSERT INTO my_datalake.default.orders_repair_escaped VALUES (1, '2016-05-14 10:00', 'IN');
+
+query III
+SELECT dt, country, location FROM glue_partitions('my_datalake.default.orders_repair_escaped');
+----
+2016-05-14 10:00	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_escaped/dt=2016-05-14%2010%3A00/country=IN
+
+# INSERT already registered the directory, so there is nothing to add
+query I
+SELECT count(*) FROM glue_repair_table('my_datalake.default.orders_repair_escaped');
+----
+0
+
+statement ok
+CALL glue_drop_partition('my_datalake.default.orders_repair_escaped', {dt: '2016-05-14 10:00', country: 'IN'});
+
+# directories with the partition keys in another order are skipped
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_escaped/country=US/dt=2016-05-15/data.parquet';
+
+# partition keys match case-insensitively; the location keeps the directory's spelling
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_escaped/DT=2016-05-16/Country=US/data.parquet';
+
+query III
+SELECT dt, country, location FROM glue_repair_table('my_datalake.default.orders_repair_escaped') ORDER BY dt;
+----
+2016-05-14 10:00	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_escaped/dt=2016-05-14%2010%3A00/country=IN
+2016-05-16	US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_escaped/DT=2016-05-16/Country=US
+
+query III
+SELECT id, dt, country FROM my_datalake.default.orders_repair_escaped ORDER BY id;
+----
+1	2016-05-14 10:00	IN
+3	2016-05-16	US
+
+statement ok
+DROP TABLE my_datalake.default.orders_repair_escaped;
+
+#---------------------------------------------------------------------------
+# values are cast to the key type; hidden directories and values that do not cast are skipped
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.orders_repair_typed;
+
+statement ok
+CREATE TABLE my_datalake.default.orders_repair_typed (id INTEGER, year INTEGER) PARTITIONED BY (year);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_typed/year=07/data.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_typed/year=abc/data.parquet';
+
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_typed/year=2020/_temporary/data.parquet';
+
+query II
+SELECT year, location FROM glue_repair_table('my_datalake.default.orders_repair_typed');
+----
+7	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_typed/year=07
+
+# year=abc was not registered, so INSERT can still convert every partition value
+statement ok
+INSERT INTO my_datalake.default.orders_repair_typed VALUES (4, 2021);
+
+query II
+SELECT id, year FROM my_datalake.default.orders_repair_typed ORDER BY id;
+----
+1	7
+4	2021
+
+# a renamed partition keeps its directory, which is not registered again under its old value
+statement ok
+CALL glue_rename_partition('my_datalake.default.orders_repair_typed', {year: 7}, {year: 8});
+
+query I
+SELECT count(*) FROM glue_repair_table('my_datalake.default.orders_repair_typed');
+----
+0
+
+query II
+SELECT id, year FROM my_datalake.default.orders_repair_typed ORDER BY id;
+----
+1	8
+4	2021
+
+statement ok
+DROP TABLE my_datalake.default.orders_repair_typed;
+
+#---------------------------------------------------------------------------
+# a directory holding only marker files (_SUCCESS, .crc) is not a partition
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.orders_repair_markers;
+
+statement ok
+CREATE TABLE my_datalake.default.orders_repair_markers (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_markers/dt=a/data.parquet';
+
+statement ok
+COPY (SELECT 1 AS x) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_markers/dt=b/_SUCCESS' (FORMAT csv);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_markers/dt=c/.data.parquet.crc' (FORMAT csv);
+
+query I
+SELECT dt FROM glue_repair_table('my_datalake.default.orders_repair_markers') ORDER BY dt;
+----
+a
+
+# with glue_cache_listings on, repair still finds files added after a scan cached the listing
+statement ok
+SET glue_cache_listings = true;
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok
+SET hive_partition_listing_threshold = 1;
+
+query I
+SELECT count(*) FROM my_datalake.default.orders_repair_markers;
+----
+1
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_markers/dt=d/data.parquet';
+
+query I
+SELECT dt FROM glue_repair_table('my_datalake.default.orders_repair_markers');
+----
+d
+
+statement ok
+RESET glue_cache_listings;
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.orders_repair_markers;
+
+#---------------------------------------------------------------------------
+# more new partitions than one BatchCreatePartition call takes (100)
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.orders_repair_many;
+
+statement ok
+CREATE TABLE my_datalake.default.orders_repair_many (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+COPY (SELECT i::INTEGER AS id, 'p' || i AS dt FROM range(250) t(i)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_many' (FORMAT parquet, PARTITION_BY (dt));
+
+# the Glue operation is in the x-amz-target header, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage='memory');
+
+query III
+SELECT count(*), count(DISTINCT dt), count(DISTINCT location) FROM glue_repair_table('my_datalake.default.orders_repair_many');
+----
+250	250	250
+
+# 3 calls, or more if a request is retried
+query I
+SELECT count(*) >= 3 FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] LIKE '%.BatchCreatePartition';
+----
+true
+
+statement ok
+CALL disable_logging();
+
+query II
+SELECT count(*), count(*) FILTER (WHERE location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_many/dt=' || dt) FROM glue_partitions('my_datalake.default.orders_repair_many');
+----
+250	250
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.orders_repair_many;
+----
+250	31125
+
+query I
+SELECT count(*) FROM glue_repair_table('my_datalake.default.orders_repair_many');
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.orders_repair_many;
+
 statement ok
 DROP TABLE my_datalake.default.orders_repair;

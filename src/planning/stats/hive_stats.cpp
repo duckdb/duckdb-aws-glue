@@ -13,15 +13,14 @@
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "core/glue_log_types.hpp"
 #include "core/glue_types.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
-//! The size the listing reported for a file, when it reported one. S3 and the local filesystem both carry it, so the
-//! bytes of a table are known from the listing alone, without opening anything
-static optional_idx ListedFileSize(const OpenFileInfo &file) {
+optional_idx ListedFileSize(const OpenFileInfo &file) {
 	if (!file.extended_info) {
 		return optional_idx();
 	}
@@ -60,8 +59,8 @@ struct HiveTableSample {
 // Cardinality sample
 //===--------------------------------------------------------------------===//
 //! The uncompressed size a gzip file records in its last four bytes (modulo 4 GiB, and of its last member only)
-static optional_idx GzipUncompressedSize(FileSystem &fs, const string &path) {
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+static optional_idx GzipUncompressedSize(FileSystem &fs, const OpenFileInfo &file) {
+	auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ);
 	if (!handle) {
 		return optional_idx();
 	}
@@ -99,13 +98,13 @@ static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const 
 	auto gzip = IsFileCompressed(file.path, FileCompressionType::GZIP);
 	optional_idx gzip_size;
 	if (gzip) {
-		gzip_size = GzipUncompressedSize(fs, file.path);
+		gzip_size = GzipUncompressedSize(fs, file);
 		if (!gzip_size.IsValid()) {
 			return optional_idx();
 		}
 	}
 	auto compression = gzip ? FileCompressionType::GZIP : FileCompressionType::UNCOMPRESSED;
-	auto handle = fs.OpenFile(file.path, FileFlags::FILE_FLAGS_READ | compression);
+	auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ | compression);
 	if (!handle) {
 		return optional_idx();
 	}
@@ -187,12 +186,24 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		// format overhead, so it is the least misleading one, and a file of a partition the scan does not read is
 		// not opened. The others listed only count with their sizes.
 		unordered_set<idx_t> reading;
+		// nor one of a partition stored differently than the table: the scan's reader can not open it
+		unordered_set<idx_t> unreadable;
 		if (!info.partition_keys.empty()) {
 			auto partition_indexes = files.PartitionIndexes();
 			reading.insert(partition_indexes->begin(), partition_indexes->end());
+			auto partitions = info.Partitions(context);
+			for (idx_t i = 0; i < partitions->size(); i++) {
+				if (info.PartitionStorageMismatch((*partitions)[i]).HasError()) {
+					unreadable.insert(i);
+				}
+			}
 		}
+		auto readable = [&](const OpenFileInfo &file) {
+			return info.partition_keys.empty() || unreadable.count(info.GetPartitionIndexOfFile(file.path)) == 0;
+		};
 		auto measurable = [&](const OpenFileInfo &file) {
-			return info.partition_keys.empty() || reading.count(info.GetPartitionIndexOfFile(file.path)) > 0;
+			return info.partition_keys.empty() ||
+			       (readable(file) && reading.count(info.GetPartitionIndexOfFile(file.path)) > 0);
 		};
 		optional_idx measured;
 		idx_t measured_size = 0;
@@ -238,7 +249,15 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 				}
 			}
 		}
-		auto &file = listed[measured.IsValid() ? measured.GetIndex() : 0];
+		for (idx_t i = 0; i < listed.size() && !measured.IsValid(); i++) {
+			if (readable(listed[i])) {
+				measured = i;
+			}
+		}
+		if (!measured.IsValid()) {
+			return sample;
+		}
+		auto &file = listed[measured.GetIndex()];
 		sample.file_bytes = ListedFileSize(file);
 		sample.file_rows = RowsInFile(context, bind_data, info, file);
 	} catch (std::exception &ex) {
@@ -267,7 +286,13 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->sample) {
+		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
 		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
+		if (entry->sample->listed) {
+			event.files = entry->sample->files;
+		}
+		event.Finish();
+		DUCKDB_LOG(context, GlueScanLogType, event);
 	}
 	return entry->sample;
 }

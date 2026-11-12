@@ -1,6 +1,8 @@
 #pragma once
 
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "duckdb/common/identifier.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 
@@ -23,9 +25,8 @@ public:
 
 	//! Build the view entry for a VIRTUAL_VIEW Glue table
 	static unique_ptr<GlueView> FromTableInfo(Catalog &catalog, SchemaCatalogEntry &schema, const GlueTableInfo &table);
-	//! The SELECT to store in Glue: the query as DuckDB prints it. Unqualified names in it belong to the view's
-	//! database, which the reader records next to it (duckdb_view_default_database) and DuckDB uses as the
-	//! search path when it binds a view; the column alias list is carried by the stored columns.
+	//! The SELECT shown for the view (ViewOriginalText): the query as DuckDB prints it; the column alias list is
+	//! carried by the stored columns.
 	static string RenderViewSql(const CreateViewInfo &info);
 
 	//! Whether the view was written by DuckDB (parameter duckdb_view): the only views we replace or drop
@@ -48,7 +49,12 @@ private:
 	//! Empty when the view can be queried, else why not (decided when the entry is built, before any parse)
 	string unsupported_reason;
 	mutex parse_lock;
+	//! The stored SQL, parsed once
 	unique_ptr<SelectStatement> parsed;
+	//! The catalog ids the stored SQL names tables by (none if it names only the view's own catalog)
+	identifier_set_t referenced_ids;
+	//! one copy per alias mapping, ids replaced by aliases; kept because a binder may hold one
+	map<string, unique_ptr<SelectStatement>> resolved;
 };
 
 } // namespace duckdb

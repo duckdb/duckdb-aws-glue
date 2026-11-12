@@ -1,0 +1,74 @@
+# name: test/sql/hive/ddl/ctas/ctas_location_holds_files.test
+# description: CREATE TABLE AS refuses a location that already holds files, such as those of a dropped table
+# group: [ctas]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+set ignore_error_messages
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ctas_reused;
+
+statement ok
+CREATE TABLE my_datalake.default.ctas_reused AS SELECT range AS id FROM range(3);
+
+# DROP TABLE leaves the files in place
+statement ok
+DROP TABLE my_datalake.default.ctas_reused;
+
+# files a scan skips do not count: Spark's _SUCCESS marker, hidden files
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ctas_marked;
+
+statement ok
+COPY (SELECT 'done' AS marker) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_marked/_SUCCESS' (FORMAT csv);
+
+statement ok
+COPY (SELECT 'hidden' AS marker) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_marked/.hidden' (FORMAT csv);
+
+statement ok
+CREATE TABLE my_datalake.default.ctas_marked WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_marked')
+AS SELECT range AS id FROM range(4);
+
+query I
+SELECT count(*) FROM my_datalake.default.ctas_marked;
+----
+4
+
+statement ok
+DROP TABLE my_datalake.default.ctas_marked;
+
+statement error
+CREATE TABLE my_datalake.default.ctas_reused AS SELECT range AS id FROM range(5);
+----
+<REGEX>:.*CREATE TABLE AS for Hive table 'default.ctas_reused' is not supported: its location '.*/default/ctas_reused' already holds files.*
+
+# nothing was created
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ctas_reused';
+----
+0
+
+# another location is empty
+statement ok
+CREATE TABLE my_datalake.default.ctas_reused WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_reused_new')
+AS SELECT range AS id FROM range(5);
+
+query I
+SELECT count(*) FROM my_datalake.default.ctas_reused;
+----
+5
+
+statement ok
+DROP TABLE my_datalake.default.ctas_reused;

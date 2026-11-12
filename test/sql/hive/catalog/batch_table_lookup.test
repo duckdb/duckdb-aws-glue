@@ -1,0 +1,218 @@
+# name: test/sql/hive/catalog/batch_table_lookup.test
+# description: Binding several tables of one database costs one GetTable plus one GetTables page, not one GetTable each
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.btl_t1;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.btl_t2;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.btl_t3;
+
+statement ok
+CREATE TABLE my_datalake.default.btl_t1 AS SELECT 1 AS id;
+
+statement ok
+CREATE TABLE my_datalake.default.btl_t2 AS SELECT 2 AS id;
+
+statement ok
+CREATE TABLE my_datalake.default.btl_t3 AS SELECT 3 AS id;
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# a fresh attach binding three tables of the database: the first lookup is direct, the rest come from one
+# GetTables page
+statement ok con2
+attach '{GLUE_CATALOG_ID}' as dl2 (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok con2
+SET redact_http_logs = false;
+
+statement ok con2
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT count(*) FROM (
+    SELECT id FROM dl2.default.btl_t1
+    UNION ALL SELECT id FROM dl2.default.btl_t2
+    UNION ALL SELECT id FROM dl2.default.btl_t3
+);
+----
+3
+
+query I con2
+SELECT glue_calls('GetTable') = 1 AND glue_calls('GetTables') = 1;
+----
+true
+
+# a miss after the bulk load stays direct: one GetTable, no second GetTables
+statement ok
+CREATE TABLE my_datalake.default.btl_t4 AS SELECT 4 AS id;
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT id FROM dl2.default.btl_t4;
+----
+4
+
+query I con2
+SELECT glue_calls('GetTables') = 0 AND glue_calls('GetTable') = 1;
+----
+true
+
+# a single-table query on a fresh attach must not enumerate the database: the attach's first
+# round-trip miss stays a direct lookup
+statement ok con4
+attach '{GLUE_CATALOG_ID}' as dl4 (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok con4
+SET redact_http_logs = false;
+
+statement ok con4
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok con4
+CALL truncate_duckdb_logs();
+
+query I con4
+SELECT id FROM dl4.default.btl_t1;
+----
+1
+
+query I con4
+SELECT glue_calls('GetTables') = 0 AND glue_calls('GetTable') = 1;
+----
+true
+
+# switched off, every table costs its own GetTable
+statement ok con3
+attach '{GLUE_CATALOG_ID}' as dl3 (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok con3
+SET glue_batch_table_lookup = false;
+
+statement ok con3
+SET redact_http_logs = false;
+
+statement ok con3
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok con3
+CALL truncate_duckdb_logs();
+
+query I con3
+SELECT count(*) FROM (
+    SELECT id FROM dl3.default.btl_t1
+    UNION ALL SELECT id FROM dl3.default.btl_t2
+    UNION ALL SELECT id FROM dl3.default.btl_t3
+);
+----
+3
+
+query I con3
+SELECT glue_calls('GetTables') = 0 AND glue_calls('GetTable') = 3;
+----
+true
+
+# the bulk page only warms the metadata cache: it must not pin tables this connection never referenced
+statement ok con5
+attach '{GLUE_CATALOG_ID}' as dl5 (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# two lookups trigger the bulk fetch; the page also carries btl_t3 and btl_t4, never referenced by con5
+query I con5
+SELECT count(*) FROM (
+    SELECT id FROM dl5.default.btl_t1
+    UNION ALL SELECT id FROM dl5.default.btl_t2
+);
+----
+2
+
+# another connection replaces the never-referenced btl_t4: new columns, new location
+statement ok
+attach '{GLUE_CATALOG_ID}' as ext_writer (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ext'
+);
+
+statement ok
+DROP TABLE my_datalake.default.btl_t4;
+
+statement ok
+CREATE TABLE ext_writer.default.btl_t4 AS SELECT 40 AS id, 'fresh' AS extra;
+
+# con5's first reference of btl_t4 resolves the current definition, not the page's snapshot
+query IT con5
+SELECT id, extra FROM dl5.default.btl_t4;
+----
+40	fresh
+
+# the table list stays live after a bulk fetch: a table created elsewhere after con5's page was read
+# still shows up in con5's first enumeration
+statement ok
+CREATE TABLE my_datalake.default.btl_t5 AS SELECT 5 AS id;
+
+query I con5
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'dl5' AND table_name IN ('btl_t4', 'btl_t5');
+----
+2
+
+statement ok
+DROP TABLE my_datalake.default.btl_t5;
+
+statement ok
+DROP TABLE my_datalake.default.btl_t1;
+
+statement ok
+DROP TABLE my_datalake.default.btl_t2;
+
+statement ok
+DROP TABLE my_datalake.default.btl_t3;
+
+statement ok
+DROP TABLE my_datalake.default.btl_t4;

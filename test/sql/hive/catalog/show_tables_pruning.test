@@ -1,0 +1,167 @@
+# name: test/sql/hive/catalog/show_tables_pruning.test
+# description: a schema_name equality pushed into duckdb_tables/duckdb_views is served by one GetDatabase lookup (or the cached entry) instead of listing every database; other filter shapes still list
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.stp_db CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.stp_db2 CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.stp_db;
+
+statement ok
+CREATE TABLE my_datalake.stp_db.t1 (id INTEGER);
+
+statement ok
+CREATE TABLE my_datalake.stp_db.t2 (id INTEGER);
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# the same catalog again with an empty schema cache, so the first lookup is a cold one
+statement ok
+attach '{GLUE_CATALOG_ID}' as cold_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# 1. SHOW TABLES FROM: bind looks the database up, the scan reuses that entry, no database listing
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SHOW TABLES FROM cold_datalake.stp_db;
+----
+t1
+t2
+
+query III
+SELECT glue_calls('GetDatabase'), glue_calls('GetDatabases'), glue_calls('GetTables');
+----
+1	0	1
+
+# 2. the same statement again is served from the cached entry
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SHOW TABLES FROM cold_datalake.stp_db;
+----
+t1
+t2
+
+query II
+SELECT glue_calls('GetDatabase'), glue_calls('GetDatabases');
+----
+0	0
+
+# 3. a plain equality on duckdb_tables takes the same lookup path
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables WHERE database_name = 'cold_datalake' AND schema_name = 'stp_db' ORDER BY table_name;
+----
+t1
+t2
+
+query I
+SELECT glue_calls('GetDatabases');
+----
+0
+
+# 4. a case-mismatched equality finds nothing without listing: the lookup result fails the filter re-check
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM duckdb_tables WHERE database_name = 'cold_datalake' AND schema_name = 'STP_DB';
+----
+0
+
+query I
+SELECT glue_calls('GetDatabases');
+----
+0
+
+# 5. a non-existent database is one lookup miss, not an error
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM duckdb_tables WHERE database_name = 'cold_datalake' AND schema_name = 'stp_nope';
+----
+0
+
+query II
+SELECT glue_calls('GetDatabase'), glue_calls('GetDatabases');
+----
+1	0
+
+# 6. shapes a lookup cannot serve fall back to listing
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT table_name FROM duckdb_tables WHERE database_name = 'cold_datalake' AND schema_name LIKE 'stp_d%' ORDER BY table_name;
+----
+t1
+t2
+
+query I
+SELECT glue_calls('GetDatabases');
+----
+1
+
+query I
+SELECT table_name FROM duckdb_tables WHERE database_name = 'cold_datalake' AND schema_name IN ('stp_db', 'stp_nope') ORDER BY table_name;
+----
+t1
+t2
+
+# 7. a database created through another attach is found by lookup
+statement ok
+CREATE SCHEMA my_datalake.stp_db2;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (SHOW TABLES FROM cold_datalake.stp_db2);
+----
+0
+
+query II
+SELECT glue_calls('GetDatabase'), glue_calls('GetDatabases');
+----
+1	0
+
+statement ok
+DROP SCHEMA my_datalake.stp_db CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.stp_db2 CASCADE;

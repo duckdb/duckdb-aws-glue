@@ -1,0 +1,53 @@
+# name: test/sql/hive/hive_scan/parquet_nan_statistics.test
+# description: A float column holding NaN keeps its NaN rows when the file has no nan_count and its min/max leave NaN out, as pyarrow writes it
+# group: [hive_scan]
+
+require parquet
+
+require glue
+
+# written by pyarrow with row_group_size 2: rows (1, 1.0), (2, NaN), (3, 2.0) in d (DOUBLE) and f (FLOAT); the first
+# row group holds the NaN but its min and max are both 1.0, and no nan_count is written
+query IIIII
+SELECT row_group_id, path_in_schema, stats_min_value, stats_max_value, stats_nan_count
+FROM parquet_metadata('test/data/parquet_nan_statistics/data.parquet')
+WHERE path_in_schema <> 'k'
+ORDER BY row_group_id, path_in_schema;
+----
+0	d	1.0	1.0	NULL
+0	f	1.0	1.0	NULL
+1	d	2.0	2.0	NULL
+1	f	2.0	2.0	NULL
+
+statement ok
+CREATE MACRO nan_table() AS TABLE
+SELECT * FROM hive_scan('test/data/parquet_nan_statistics', format := 'parquet',
+    schema := {k: 'INTEGER', d: 'DOUBLE', f: 'FLOAT'});
+
+query I
+SELECT k FROM nan_table() WHERE d <> 1 ORDER BY k;
+----
+2
+3
+
+query I
+SELECT k FROM nan_table() WHERE f <> 1 ORDER BY k;
+----
+2
+3
+
+query I
+SELECT k FROM nan_table() WHERE d > 1.5 ORDER BY k;
+----
+2
+3
+
+query I
+SELECT k FROM nan_table() WHERE NOT (CASE WHEN d IS NULL THEN NULL WHEN isnan(d) THEN false ELSE d < 3 END);
+----
+2
+
+query II
+SELECT isnan(max(d)), isnan(max(f)) FROM nan_table();
+----
+true	true

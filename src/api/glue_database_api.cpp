@@ -59,7 +59,8 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 	return true;
 }
 
-void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
+GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog,
+                                          const GlueDatabaseInfo &database) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateDatabase");
 	GlueHttpClientContextScope http_scope(context);
@@ -81,10 +82,11 @@ void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const
 	auto outcome = client->CreateDatabase(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
-			throw CatalogException("Glue database with name \"%s\" already exists", database.name);
+			return GlueCreateOutcome::ALREADY_EXISTED;
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreateDatabase '%s'", database.name));
 	}
+	return GlueCreateOutcome::CREATED;
 }
 
 void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
@@ -125,6 +127,11 @@ void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const
 	request.SetDatabaseInput(input);
 	auto outcome = client->UpdateDatabase(request);
 	if (!outcome.IsSuccess()) {
+		if (outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::CONCURRENT_MODIFICATION) {
+			throw TransactionException("Glue database \"%s\" was changed by another client while it was altered, run "
+			                           "the statement again",
+			                           database.name);
+		}
 		ThrowGlueError(outcome, StringUtil::Format("UpdateDatabase '%s'", database.name));
 	}
 }

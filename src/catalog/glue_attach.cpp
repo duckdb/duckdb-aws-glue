@@ -92,7 +92,8 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 	auto catalog = make_uniq<GlueCatalog>(db, options.access_mode, std::move(attach_options));
 	// Fail early when the catalog can not be reached with these credentials (unless opted out)
 	if (catalog->options.verify_connection) {
-		GlueAPI::VerifyConnection(context, *catalog);
+		// also learns the catalog id
+		catalog->FetchCatalogId(context);
 	}
 	if (!catalog->options.default_schema.empty()) {
 		GlueDatabaseInfo database;
