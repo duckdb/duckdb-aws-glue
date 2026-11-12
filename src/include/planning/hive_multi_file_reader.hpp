@@ -89,10 +89,6 @@ private:
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
 };
 
-//! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with
-//! '_' or '.', as Spark's _SUCCESS), not a directory marker (_$folder$) and not empty
-bool IsDataFile(const OpenFileInfo &file, const string &prefix);
-
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so
 //! only the partitions a query reads are ever listed. When at least 'hive_partition_listing_threshold' of those
@@ -155,8 +151,8 @@ private:
 	//! The partition of the deepest registered location containing the file, searching no shorter than
 	//! 'min_directory_size' characters of its ComparableLocation
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
-	//! IsDataFile for a file of the root listing: a hidden component counts only below the location of the file's
-	//! partition, as Hive engines list it, so the directories of a partition key such as '_k' are read
+	//! IsDataFile below the deepest registered partition location containing the file (see OwningPartition), or below
+	//! the root when there is none, so a partition key such as '_k' is not read as a hidden directory
 	bool IsRootListedDataFile(const OpenFileInfo &file, const string &root_prefix, idx_t comparable_root_size,
 	                          const vector<GluePartitionInfo> &partitions) const;
 	//! Add a listed file of the partition unless this list already has it. Called with

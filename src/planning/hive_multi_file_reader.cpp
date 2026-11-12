@@ -268,32 +268,6 @@ string HiveScanInfo::Describe() const {
 	return database_name + "." + table_name;
 }
 
-//! Whether a listed object is a data file, given 'relative', its path below the directory listed. Hive skips _* and .*
-//! files and directories; EMR and S3 tools mark a directory with a <name>_$folder$ object next to it (an object, never
-//! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
-//! file of any format the reader opens
-static bool IsDataFileBelow(const OpenFileInfo &file, const string &relative) {
-	auto components = StringUtil::Split(relative, '/');
-	for (auto &component : components) {
-		if (component.empty() || component[0] == '_' || component[0] == '.') {
-			return false;
-		}
-	}
-	if (components.empty() || StringUtil::EndsWith(components.back(), "_$folder$")) {
-		return false;
-	}
-	auto size = ListedFileSize(file);
-	return !size.IsValid() || size.GetIndex() > 0;
-}
-
-//! Whether a listed object below 'prefix' (the location, with its trailing slash) is a data file
-bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
-	if (!StringUtil::StartsWith(file.path, prefix)) {
-		return false;
-	}
-	return IsDataFileBelow(file, file.path.substr(prefix.size()));
-}
-
 //! Glue tables only: a hive_scan root has no catalog, and no write through the extension clears its listing
 static bool CacheListings(ClientContext &context, const HiveScanInfo &scan_info) {
 	// a listing kept beyond the transaction may not have been made with the secret the file secret names
@@ -548,16 +522,8 @@ optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t m
 bool HiveMultiFileList::IsRootListedDataFile(const OpenFileInfo &file, const string &root_prefix,
                                              idx_t comparable_root_size,
                                              const vector<GluePartitionInfo> &partitions) const {
-	if (!StringUtil::StartsWith(file.path, root_prefix)) {
-		return false;
-	}
 	auto owner = OwningPartition(file.path, comparable_root_size);
-	if (!owner.IsValid()) {
-		return IsDataFile(file, root_prefix);
-	}
-	// OwningPartition matched the partition's location as a directory of the file
-	auto location = ComparableLocation(partitions[owner.GetIndex()].location);
-	return IsDataFileBelow(file, ComparableLocation(file.path).substr(location.size() + 1));
+	return IsDataFile(file, owner.IsValid() ? partitions[owner.GetIndex()].location : root_prefix);
 }
 
 void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) const {

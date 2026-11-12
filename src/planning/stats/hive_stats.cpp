@@ -1,4 +1,5 @@
 #include "planning/stats/hive_stats.hpp"
+#include "core/hive_location.hpp"
 
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -19,17 +20,6 @@
 #include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
-
-optional_idx ListedFileSize(const OpenFileInfo &file) {
-	if (!file.extended_info) {
-		return optional_idx();
-	}
-	idx_t size;
-	if (!file.extended_info->TryGetOption("file_size", size)) {
-		return optional_idx();
-	}
-	return size;
-}
 
 //===--------------------------------------------------------------------===//
 // Table sample

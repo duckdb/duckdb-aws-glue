@@ -7,10 +7,6 @@
 
 namespace duckdb {
 
-//! The size the listing reported for a file, when it reported one. S3 and the local filesystem both carry it, so the
-//! bytes of a table are known from the listing alone, without opening anything
-optional_idx ListedFileSize(const OpenFileInfo &file);
-
 class BaseStatistics;
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions read
