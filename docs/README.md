@@ -124,10 +124,7 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   reads one of them and the location holds data files: Hive engines read such a file once for each partition, which
   DuckDB does not. `s3a://` and `s3n://` locations name the same bucket and key as `s3://`, and a location is read as
   registered, including a `//` in its path. A table without data files (just created) scans as empty.
-- A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
-  rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
-  ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
-  `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
+- A partitioned table with partition projection (`projection.enabled = true`) is refused on read and write. Its partitions are defined by `projection.*` parameters. Scanning only registered Glue partitions could return no rows or incorrect rows. To read it, set `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
@@ -232,8 +229,8 @@ their codec themselves.
   accounts are not checked. `CREATE OR REPLACE` refuses `overwrite`. Files a scan skips
   (`_SUCCESS`, hidden files) are left. `overwrite` is not stored as a table parameter, and a `CREATE TABLE` without a
   query refuses it. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
-  they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
-  Athena, JSON tables are written only with the Hive JsonSerDe (`org.apache.hive.hcatalog.data.JsonSerDe`, what
+  they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
+  JSON tables are written only with the Hive JsonSerDe (`org.apache.hive.hcatalog.data.JsonSerDe`, what
   `CREATE TABLE ... WITH (format = 'json')` creates): `INSERT` into a table with the OpenX JSON SerDe
   (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read. `INSERT` also requires the table's InputFormat to
   be one Hive uses for its file format (`MapredParquetInputFormat`, `TextInputFormat` or `CombineTextInputFormat` for

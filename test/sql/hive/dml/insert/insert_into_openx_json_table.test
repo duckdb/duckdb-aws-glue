@@ -1,5 +1,5 @@
 # name: test/sql/hive/dml/insert/insert_into_openx_json_table.test
-# description: JSON tables with the OpenX SerDe are read, writes are refused (Athena writes JSON only with the Hive JsonSerDe)
+# description: JSON tables with the OpenX SerDe are read, writes are refused (JSON writes require the Hive JsonSerDe)
 # group: [insert]
 
 require httpfs

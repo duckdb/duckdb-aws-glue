@@ -118,8 +118,7 @@ public:
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
 	string GetParameter(const string &key) const;
 	bool IsBucketed() const;
-	//! Whether this is a partitioned table with Athena partition projection on (projection.enabled): Athena then
-	//! derives the partitions from the projection.* parameters and ignores the ones registered in Glue
+	//! Partition projection derives partitions from projection.* parameters instead of registered Glue partitions.
 	bool IsPartitionProjected() const;
 	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;

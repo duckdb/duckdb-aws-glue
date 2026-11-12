@@ -124,7 +124,7 @@ GlueCreateOutcome GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 
-	// An external table, described the way Hive / Athena / Spark expect it for the file format
+	// Describe the external table with the storage descriptor for its file format.
 	Aws::Glue::Model::SerDeInfo serde_info;
 	Aws::Glue::Model::StorageDescriptor storage_descriptor;
 	auto parameters = ToAwsMap(table.parameters);

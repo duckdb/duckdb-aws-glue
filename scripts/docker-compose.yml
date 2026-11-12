@@ -2,7 +2,7 @@
 # the Glue database 'default' the tests use, the bucketed table 'fixture_bucketed_multi' (bucket columns without a
 # NumberOfBuckets, which the extension does not create), the tables 'fixture_struct_names' (struct field names with
 # spaces, as other engines write them), 'fixture_orc' (a SerDe the extension can not read), 'fixture_openx_json' (a
-# JSON table with the OpenX SerDe, which Athena and DuckDB do not write), 'fixture_openx_json_*' (OpenX tables
+# JSON table with the OpenX SerDe, which DuckDB does not write), 'fixture_openx_json_*' (OpenX tables
 # with SerDe properties), 'fixture_delta' (a Delta table, which the extension does not read), the text tables
 # 'fixture_text_*' with SerDe properties the extension does not write, tables whose InputFormat is another engine's
 # over Parquet's SerDe ('fixture_hudi', 'fixture_symlink', 'fixture_delta_symlink' and

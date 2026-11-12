@@ -248,8 +248,7 @@ SELECT * FROM my_datalake.default.formats_csv_dquote ORDER BY id;
 ----
 <REGEX>:.*parallel scanner does not support null_padding in conjunction with quoted new lines.*
 
-# one thread per file: the field is read as CSV defines it, one value, one row (Hive and Athena v3 split the record
-# at the line break and return two broken rows; not reproduced here)
+# one thread per file: a quoted field containing a line break remains one value in one row
 statement ok
 SET hive_csv_parallel = false;
 

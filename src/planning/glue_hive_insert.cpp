@@ -700,7 +700,7 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 	if (table_info.IsPartitionProjected()) {
 		throw NotImplementedException(
 		    "CREATE TABLE ... AS for Glue table '%s' is not supported: with 'projection.enabled' "
-		    "on a partitioned table it would use Athena partition projection, which this "
+		    "on a partitioned table it would use partition projection, which this "
 		    "extension cannot read yet. Set projection.enabled to false; the partitions the "
 		    "statement writes are then registered in Glue and readable",
 		    table_info.name);

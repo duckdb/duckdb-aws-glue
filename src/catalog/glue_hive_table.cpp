@@ -29,12 +29,11 @@ GlueTable &GetHiveTableForDML(ClientContext &context, GlueTable &table, const ch
 		                              statement, table.name.GetIdentifierName(), table_info.input_format,
 		                              HiveFileFormatToString(file_format));
 	}
-	// the partitions an INSERT registers are ignored by Athena, and the files may belong under a location template
+	// Partition projection may require a location template instead of registered Glue partitions.
 	if (table_info.IsPartitionProjected()) {
-		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses Athena partition "
-		                              "projection (projection.enabled), so the partitions it would register are "
-		                              "ignored by Athena. Set projection.enabled to false and register the partitions "
-		                              "to write it",
+		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses partition projection "
+		                              "(projection.enabled), which ignores registered Glue partitions. Set "
+		                              "projection.enabled to false and register the partitions to write it",
 		                              statement, table.name.GetIdentifierName());
 	}
 	// Hive and Spark bucket with different hash functions and file names; neither is implemented
@@ -43,8 +42,7 @@ GlueTable &GetHiveTableForDML(ClientContext &context, GlueTable &table, const ch
 		                              "write a bucketed layout.",
 		                              statement, table.name.GetIdentifierName(), table_info.DescribeBucketing());
 	}
-	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
-	// keys DuckDB writes
+	// OpenX properties (mapping.*, dots.in.keys) would not find the keys DuckDB writes.
 	if (table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses the OpenX JSON SerDe "
 		                              "'%s', DuckDB writes JSON tables only with the Hive JsonSerDe "
@@ -101,11 +99,10 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 
 TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	if (table_info.IsPartitionProjected()) {
-		throw NotImplementedException("Glue table '%s.%s' uses Athena partition projection (projection.enabled), "
-		                              "which is not supported yet: Athena derives its partitions from the "
-		                              "projection.* parameters and ignores the ones registered in Glue, so a scan "
-		                              "of the registered ones would read no rows or the wrong ones. Set "
-		                              "projection.enabled to false and register the partitions to read it",
+		throw NotImplementedException("Glue table '%s.%s' uses partition projection (projection.enabled), which is "
+		                              "not supported yet. Partitions are defined by projection.* parameters, so "
+		                              "scanning only registered Glue partitions could return no rows or incorrect "
+		                              "rows. Set projection.enabled to false and register the partitions to read it",
 		                              table_info.schema_name, table_info.name);
 	}
 	// The scan produces the columns this entry was planned with: data columns first, partition keys last. The SerDe

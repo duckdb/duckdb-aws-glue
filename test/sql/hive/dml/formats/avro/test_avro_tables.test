@@ -31,7 +31,7 @@ DROP TABLE IF EXISTS my_datalake.default.formats_avro_plain;
 statement ok
 CREATE TABLE my_datalake.default.formats_avro (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year) WITH (format = 'avro');
 
-# the Glue table describes an avro table the way Hive / Athena expect it
+# the Glue table describes an avro table with the Hive storage descriptor
 query IIII
 SELECT serde_library, parameters['classification'],
        response.StorageDescriptor.InputFormat::VARCHAR, response.StorageDescriptor.OutputFormat::VARCHAR

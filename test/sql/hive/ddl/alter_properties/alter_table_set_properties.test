@@ -76,7 +76,7 @@ SELECT parameters['EXTERNAL'], parameters['classification'] FROM glue_get_table_
 ----
 TRUE	parquet
 
-# the Athena documentation examples, spelled natively: a value with spaces and a quote is stored verbatim
+# a property value with spaces and a quote is stored verbatim
 statement ok
 ALTER TABLE my_datalake.default.ddl_properties SET (notes = 'Please don''t drop this table.');
 
@@ -85,7 +85,7 @@ SELECT parameters['notes'] FROM glue_get_table_response('my_datalake.default.ddl
 ----
 Please don't drop this table.
 
-# Athena: "EXTERNAL = FALSE has no effect": the parameter is stored, the table stays a readable Hive table
+# EXTERNAL = FALSE is stored without changing the table type or its readability
 statement ok
 ALTER TABLE my_datalake.default.ddl_properties SET (EXTERNAL = 'FALSE');
 

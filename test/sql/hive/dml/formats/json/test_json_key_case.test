@@ -20,7 +20,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.json_key_case;
 
-# a Hive JsonSerDe table; Glue stores the column and struct field names in lower case, as Athena does
+# a Hive JsonSerDe table; Glue stores the column and struct field names in lower case
 statement ok
 CREATE TABLE my_datalake.default.json_key_case (userid INTEGER, url VARCHAR, "user" STRUCT(userid INTEGER))
 WITH (format = 'json');

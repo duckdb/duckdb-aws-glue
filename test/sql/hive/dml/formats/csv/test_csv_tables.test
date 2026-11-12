@@ -30,7 +30,7 @@ DROP TABLE IF EXISTS my_datalake.default.formats_csv_plain;
 statement ok
 CREATE TABLE my_datalake.default.formats_csv (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year) WITH (format = 'csv');
 
-# the Glue table describes a csv table the way Hive / Athena expect it: LazySimpleSerDe, comma delimited, no header
+# the Glue table describes a csv table with the Hive storage descriptor: LazySimpleSerDe, comma delimited, no header
 query IIII
 SELECT serde_library, parameters['classification'],
        response.StorageDescriptor.InputFormat::VARCHAR, response.StorageDescriptor.OutputFormat::VARCHAR

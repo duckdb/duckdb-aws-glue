@@ -102,7 +102,7 @@ DROP TABLE my_datalake.default.ddl_drop_bucket_column;
 
 #---------------------------------------------------------------------------
 # a csv (text) table is read by position, so DROP COLUMN would silently shift
-# existing files' bytes into the wrong columns - refuse it (as Athena V3 does)
+# existing files' bytes into the wrong columns - refuse it
 #---------------------------------------------------------------------------
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.ddl_drop_column_csv;

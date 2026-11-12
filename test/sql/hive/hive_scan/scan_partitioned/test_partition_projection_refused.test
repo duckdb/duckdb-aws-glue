@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/scan_partitioned/test_partition_projection_refused.test
-# description: A partitioned table with Athena partition projection (projection.enabled) is refused on read and write instead of scanning as empty
+# description: A partitioned table with partition projection (projection.enabled) is refused on read and write instead of scanning as empty
 # group: [scan_partitioned]
 
 require httpfs
@@ -26,7 +26,7 @@ DROP TABLE IF EXISTS my_datalake.default.pp_flat;
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.pp_ctas;
 
-# the table has data Athena would read through its projection, and no registered partition
+# the table has data discoverable through partition projection, and no registered partition
 statement ok
 CREATE TABLE my_datalake.default.pp_events (id INTEGER, region VARCHAR, hour INTEGER) PARTITIONED BY (region, hour)
 WITH (
@@ -45,18 +45,18 @@ COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_events/region=us/h
 statement error
 SELECT * FROM my_datalake.default.pp_events;
 ----
-Glue table 'default.pp_events' uses Athena partition projection (projection.enabled), which is not supported yet: Athena derives its partitions from the projection.* parameters and ignores the ones registered in Glue, so a scan of the registered ones would read no rows or the wrong ones. Set projection.enabled to false and register the partitions to read it
+Glue table 'default.pp_events' uses partition projection (projection.enabled), which is not supported yet. Partitions are defined by projection.* parameters, so scanning only registered Glue partitions could return no rows or incorrect rows. Set projection.enabled to false and register the partitions to read it
 
 statement error
 SELECT count(*) FROM my_datalake.default.pp_events WHERE region = 'us';
 ----
-uses Athena partition projection
+uses partition projection
 
-# so is a write: the partitions it would register are ignored by Athena
+# so is a write: partition projection ignores registered Glue partitions
 statement error
 INSERT INTO my_datalake.default.pp_events VALUES (2, 'eu', 3);
 ----
-INSERT into Glue table 'pp_events' is not supported: the table uses Athena partition projection (projection.enabled), so the partitions it would register are ignored by Athena. Set projection.enabled to false and register the partitions to write it
+INSERT into Glue table 'pp_events' is not supported: the table uses partition projection (projection.enabled), which ignores registered Glue partitions. Set projection.enabled to false and register the partitions to write it
 
 statement ok
 COPY (SELECT 2 AS id, 'eu' AS region, 3 AS hour) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_src.parquet';
@@ -64,7 +64,7 @@ COPY (SELECT 2 AS id, 'eu' AS region, 3 AS hour) TO '{DEFAULT_S3_LOCATION}/{TEST
 statement error
 COPY my_datalake.default.pp_events FROM '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_src.parquet';
 ----
-INSERT into Glue table 'pp_events' is not supported: the table uses Athena partition projection
+INSERT into Glue table 'pp_events' is not supported: the table uses partition projection
 
 # and so is CREATE TABLE ... AS, which would otherwise create and fill a table this extension then refuses to read
 statement error
@@ -72,7 +72,7 @@ CREATE TABLE my_datalake.default.pp_ctas PARTITIONED BY (region)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_ctas', 'projection.enabled' = 'true', 'projection.region.type' = 'enum', 'projection.region.values' = 'us,eu')
 AS SELECT 1 AS id, 'us' AS region;
 ----
-CREATE TABLE ... AS for Glue table 'pp_ctas' is not supported: with 'projection.enabled' on a partitioned table it would use Athena partition projection, which this extension cannot read yet. Set projection.enabled to false; the partitions the statement writes are then registered in Glue and readable
+CREATE TABLE ... AS for Glue table 'pp_ctas' is not supported: with 'projection.enabled' on a partitioned table it would use partition projection, which this extension cannot read yet. Set projection.enabled to false; the partitions the statement writes are then registered in Glue and readable
 
 query I
 SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'pp_ctas';
@@ -89,7 +89,7 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_ctas/**');
 statement error
 DESCRIBE my_datalake.default.pp_events;
 ----
-uses Athena partition projection
+uses partition projection
 
 query I
 SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'pp_events' ORDER BY column_index;
@@ -103,14 +103,14 @@ SELECT parameters['projection.enabled'] FROM glue_get_table_response('my_datalak
 ----
 true
 
-# the value is matched trimmed and case-insensitively, as Athena does
+# the value is matched trimmed and case-insensitively
 statement ok
 ALTER TABLE my_datalake.default.pp_events SET ('projection.enabled' = ' TRUE ');
 
 statement error
 SELECT * FROM my_datalake.default.pp_events;
 ----
-uses Athena partition projection
+uses partition projection
 
 # hive_scan without the catalog takes an explicit partition list and is unaffected
 query II

@@ -21,7 +21,7 @@ on the first start (configure_spark_with_delta_pip), so that run needs network a
 What it does:
     1. Writes rows (1,1) (2,2) (3,1) (4,2) as a Delta table partitioned by int_col_partitioned to the S3 location
        (mode overwrite: an existing table at that location is replaced).
-    2. Registers the table in Glue the way Athena / Trino expect a Delta table: an EXTERNAL_TABLE at the table root
+    2. Registers the table in Glue as a Delta table: an EXTERNAL_TABLE at the table root
        with table_type=DELTA and spark.sql.sources.provider=delta, the data columns in the StorageDescriptor and
        the partition column as a PartitionKey. Use --no-register to skip this step.
 """
