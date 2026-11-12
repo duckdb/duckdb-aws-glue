@@ -1,0 +1,70 @@
+# name: benchmark/metadata_prefetch.benchmark
+# description: join four partitioned tables of 200 partitions each, with S3 requests delayed by 20 ms, in the local Glue (moto) + S3: their partition lists and the listings their row counts are estimated from are fetched at the same time, not one table after the other
+# group: [file_pruning_benchmarks]
+
+name Join four partitioned tables
+group file_pruning_benchmarks
+subgroup metadata_prefetch
+
+require parquet
+
+require httpfs
+
+require glue
+
+cache metadata_prefetch.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE TABLE IF NOT EXISTS my_datalake.default.prefetch_t1 (id BIGINT, v1 DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE IF NOT EXISTS my_datalake.default.prefetch_t2 (id BIGINT, v2 DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE IF NOT EXISTS my_datalake.default.prefetch_t3 (id BIGINT, v3 DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE IF NOT EXISTS my_datalake.default.prefetch_t4 (id BIGINT, v4 DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+INSERT INTO my_datalake.default.prefetch_t1
+SELECT d * 100 + r, random(), strftime(DATE '2020-01-01' + d::INTEGER, '%Y-%m-%d')
+FROM range(0, 200) AS t(d) CROSS JOIN range(0, 100) AS u(r)
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.default.prefetch_t1);
+INSERT INTO my_datalake.default.prefetch_t2 SELECT id, v1, dt FROM my_datalake.default.prefetch_t1
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.default.prefetch_t2);
+INSERT INTO my_datalake.default.prefetch_t3 SELECT id, v1, dt FROM my_datalake.default.prefetch_t1
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.default.prefetch_t3);
+INSERT INTO my_datalake.default.prefetch_t4 SELECT id, v1, dt FROM my_datalake.default.prefetch_t1
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.default.prefetch_t4);
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+
+run
+SET enable_external_file_cache = false;
+SET debug_fs_delay_mean_ms = 20;
+SELECT count(*), sum(v1 + v2 + v3 + v4) > 0
+FROM my_datalake.default.prefetch_t1
+JOIN my_datalake.default.prefetch_t2 USING (id, dt)
+JOIN my_datalake.default.prefetch_t3 USING (id, dt)
+JOIN my_datalake.default.prefetch_t4 USING (id, dt);

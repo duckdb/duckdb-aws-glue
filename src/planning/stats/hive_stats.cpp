@@ -309,6 +309,7 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
 	}
+	HiveQueryCache::Get(context)->PrefetchSampleListings(context);
 	auto sample_ptr = SampleTable(context, bind_data, hive_list);
 	auto &sample = *sample_ptr;
 	if (!sample.file_rows.IsValid()) {

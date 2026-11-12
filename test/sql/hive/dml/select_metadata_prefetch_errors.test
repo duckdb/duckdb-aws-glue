@@ -1,0 +1,184 @@
+# name: test/sql/hive/dml/select_metadata_prefetch_errors.test
+# description: a Glue error while fetching the partitions of several tables at the same time fails the query once per table, without asking Glue again
+# group: [hive]
+
+# GLUE_FAULT_ENDPOINT must be scripts/glue_fault_proxy.py of this revision, which fails GetPartitions on a fault_*
+# database as well as GetTables
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.fault_access_denied_pf;
+
+foreach tbl pf_a pf_b
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.fault_access_denied_pf.{tbl};
+
+statement ok
+CREATE TABLE my_datalake.fault_access_denied_pf.{tbl} (id BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.fault_access_denied_pf.{tbl} SELECT i, 'd' || (i % 3)::VARCHAR FROM range(30) r(i);
+
+endloop
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pf_ok;
+
+statement ok
+CREATE TABLE my_datalake.default.pf_ok (id BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.pf_ok SELECT i, 'd' || (i % 3)::VARCHAR FROM range(30) r(i);
+
+# GetPartitions on a fault_access_denied_* database is refused
+statement ok con2
+attach '{GLUE_CATALOG_ID}' as denied_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok con2
+SET redact_http_logs = false;
+
+statement ok con2
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok con2
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok con2
+CREATE MACRO s3_listings(tbl) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+    WHERE request.url LIKE '%list-type=2%' AND request.url LIKE '%' || tbl || '%'
+);
+
+# a fault proxy that lets GetPartitions through fails here
+statement ok con2
+CALL truncate_duckdb_logs();
+
+statement error con2
+SELECT count(*) FROM denied_dl.fault_access_denied_pf.pf_a;
+----
+<REGEX>:.*injected by glue_fault_proxy.*
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+statement error con2
+SELECT count(*) FROM denied_dl.fault_access_denied_pf.pf_a a JOIN denied_dl.fault_access_denied_pf.pf_b b USING (id);
+----
+<REGEX>:.*injected by glue_fault_proxy.*
+
+# both tables asked once, together: the scan that needs the partitions reports the error the prefetch got
+query I con2
+SELECT glue_calls('GetPartitions');
+----
+2
+
+# the error is not kept beyond the query
+statement ok con2
+CALL truncate_duckdb_logs();
+
+statement error con2
+SELECT count(*) FROM denied_dl.fault_access_denied_pf.pf_a;
+----
+<REGEX>:.*injected by glue_fault_proxy.*
+
+query I con2
+SELECT glue_calls('GetPartitions');
+----
+1
+
+# the failing table filtered, the other not: its partitions are fetched with the filter known, the other table's along
+# with them, each once
+statement ok con2
+CALL truncate_duckdb_logs();
+
+statement error con2
+SELECT count(*) FROM denied_dl.default.pf_ok o JOIN denied_dl.fault_access_denied_pf.pf_a a USING (id) WHERE a.dt = 'd1';
+----
+<REGEX>:.*Glue GetPartitions 'fault_access_denied_pf.pf_a' failed: injected by glue_fault_proxy \(AccessDeniedException\).*
+
+query I con2
+SELECT glue_calls('GetPartitions');
+----
+2
+
+statement ok con2
+DETACH denied_dl;
+
+# a table in a bucket that does not exist: listing its sample ahead of the scan fails, and the scan reports that error
+# without listing again
+statement ok
+attach '{GLUE_CATALOG_ID}' as missing_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION 's3://glue-test-missing-bucket/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS missing_dl.default.pf_missing;
+
+statement ok
+CREATE TABLE missing_dl.default.pf_missing (id BIGINT);
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+statement error con2
+SELECT count(*) FROM my_datalake.default.pf_missing;
+----
+<REGEX>:.*HTTP 404.*NoSuchBucket.*
+
+statement ok con2
+SET VARIABLE missing_listings = s3_listings('pf_missing');
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+statement error con2
+SELECT count(*) FROM my_datalake.default.pf_ok o JOIN my_datalake.default.pf_missing m USING (id);
+----
+<REGEX>:.*HTTP 404.*NoSuchBucket.*
+
+query I con2
+SELECT s3_listings('pf_missing') = getvariable('missing_listings');
+----
+true
+
+statement ok
+DROP TABLE missing_dl.default.pf_missing;
+
+statement ok
+DETACH missing_dl;
+
+statement ok
+DROP TABLE my_datalake.default.pf_ok;
+
+foreach tbl pf_a pf_b
+
+statement ok
+DROP TABLE my_datalake.fault_access_denied_pf.{tbl};
+
+endloop
+
+statement ok
+DROP SCHEMA my_datalake.fault_access_denied_pf;

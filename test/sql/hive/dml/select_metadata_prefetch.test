@@ -1,0 +1,150 @@
+# name: test/sql/hive/dml/select_metadata_prefetch.test
+# description: a query over several Hive tables fetches their partitions and sample listings together, and reads the same
+# group: [hive]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.prefetch_many;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.prefetch_few;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.prefetch_flat;
+
+# twelve partitions, listed from the table root
+statement ok
+CREATE TABLE my_datalake.default.prefetch_many (id BIGINT, v BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.prefetch_many SELECT i, i * 10, 'd' || (i % 12)::VARCHAR FROM range(120) r(i);
+
+# three partitions, listed one by one
+statement ok
+CREATE TABLE my_datalake.default.prefetch_few (id BIGINT, w BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.prefetch_few SELECT i, i * 100, 'd' || (i % 3)::VARCHAR FROM range(120) r(i);
+
+statement ok
+CREATE TABLE my_datalake.default.prefetch_flat AS SELECT i AS id, i * 1000 AS u FROM range(120) r(i);
+
+statement ok
+CREATE MACRO s3_listings(tbl) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+    WHERE request.url LIKE '%list-type=2%' AND request.url LIKE '%' || tbl || '%'
+);
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+# whether every GetPartitions of the query was answered before its first S3 listing: one table after the other, a
+# table's sample is listed before the next table's partitions are asked for
+statement ok
+CREATE MACRO partitions_before_listings() AS (
+    SELECT max(timestamp) FILTER (WHERE request.headers['x-amz-target'] = 'AWSGlue.GetPartitions')
+        < min(timestamp) FILTER (WHERE request.url LIKE '%list-type=2%')
+    FROM duckdb_logs_parsed('HTTP')
+);
+
+# whether the GetPartitions of the query were in flight at the same time: the last one started before the first one
+# ended. Fetched one after the other, each starts after the previous one ended. duration_ms is rounded down, so a
+# request ends no earlier than measured here
+statement ok
+CREATE MACRO partitions_overlap() AS (
+    SELECT max(epoch_us(request.start_time)) < min(epoch_us(request.start_time) + request.duration_ms * 1000)
+    FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.GetPartitions'
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query IIII
+SELECT count(*), sum(m.v), sum(f.w), sum(t.u)
+FROM my_datalake.default.prefetch_many m
+JOIN my_datalake.default.prefetch_few f USING (id)
+JOIN my_datalake.default.prefetch_flat t USING (id);
+----
+120	71400	714000	7140000
+
+# one listing per table: the sample listings fetched ahead are the ones the scans use
+query III
+SELECT s3_listings('prefetch_many'), s3_listings('prefetch_few'), s3_listings('prefetch_flat');
+----
+1	3	1
+
+query III
+SELECT glue_calls('GetPartitions'), partitions_before_listings(), partitions_overlap();
+----
+2	true	true
+
+# with partition filters: the sample of each table comes from a partition the scan reads
+statement ok
+CALL truncate_duckdb_logs();
+
+query III
+SELECT count(*), sum(m.v), sum(f.w)
+FROM my_datalake.default.prefetch_many m
+JOIN my_datalake.default.prefetch_few f USING (id)
+WHERE m.dt IN ('d1', 'd4') AND f.dt = 'd1';
+----
+20	11300	113000
+
+query II
+SELECT s3_listings('prefetch_many'), s3_listings('prefetch_few');
+----
+2	1
+
+# a table pruned to no partition is not listed
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(t.u)
+FROM my_datalake.default.prefetch_flat t
+LEFT JOIN (SELECT * FROM my_datalake.default.prefetch_many WHERE dt = 'none') m USING (id);
+----
+120	7140000
+
+query I
+SELECT s3_listings('prefetch_many');
+----
+0
+
+# a table scanned twice with different filters
+query III
+SELECT count(*), sum(a.v), sum(b.v)
+FROM my_datalake.default.prefetch_many a
+JOIN my_datalake.default.prefetch_many b ON a.id = b.id - 1
+WHERE a.dt = 'd0' AND b.dt = 'd1';
+----
+10	5400	5500
+
+statement ok
+DROP TABLE my_datalake.default.prefetch_many;
+
+statement ok
+DROP TABLE my_datalake.default.prefetch_few;
+
+statement ok
+DROP TABLE my_datalake.default.prefetch_flat;
