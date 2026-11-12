@@ -18,6 +18,7 @@ namespace duckdb {
 class GlueCatalog;
 class GlueSchemaEntry;
 class GlueTable;
+class ViewCatalogEntry;
 
 enum class GlueTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -187,8 +188,8 @@ public:
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
 	//! (so a prepared statement's two binds share it).
 	shared_ptr<GlueTransactionCache> cache;
-	//! Resolved entries are pinned to the transaction that selected their metadata.
-	reference_map_t<GlueTable, unique_ptr<CatalogEntry>> resolved_tables;
+	//! Redirects retain the context of the transaction that resolved their source metadata.
+	reference_map_t<GlueTable, unique_ptr<ViewCatalogEntry>> table_redirects;
 
 private:
 	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone

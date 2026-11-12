@@ -1,5 +1,3 @@
-#include "catalog/glue_table_implementation.hpp"
-
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
@@ -13,37 +11,9 @@
 namespace duckdb {
 namespace {
 
-class HiveTableImplementation : public GlueTableImplementation {
-public:
-	using GlueTableImplementation::GlueTableImplementation;
-	TableFunction BindScan(ClientContext &context, GlueTable &table, unique_ptr<FunctionData> &bind_data,
-	                       const EntryLookupInfo &lookup) override;
-	PhysicalOperator &PlanInsert(ClientContext &context, GlueTable &table, PhysicalPlanGenerator &planner,
-	                             LogicalInsert &op, optional_ptr<PhysicalOperator> plan) override;
-	virtual_column_map_t GetVirtualColumns() const override {
-		virtual_column_map_t result;
-		result.emplace(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR));
-		HiveMultiFileReader::AddMetadataColumns(result);
-		return result;
-	}
-};
-
-class UnsupportedTableImplementation : public GlueTableImplementation {
-public:
-	using GlueTableImplementation::GlueTableImplementation;
-	TableFunction BindScan(ClientContext &, GlueTable &table, unique_ptr<FunctionData> &,
-	                       const EntryLookupInfo &) override {
-		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
-		                              "glue_get_table_response() to inspect its definition",
-		                              table.table_info.schema_name, table.table_info.name,
-		                              table.table_info.GetFormat().Describe(table.table_info));
-	}
-};
-
-GlueTable &GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
+GlueTable &GetHiveTableForDML(ClientContext &context, GlueTable &table, const char *statement,
                               GlueTableInfo &table_info) {
-	auto &glue_table = table.Cast<GlueTable>();
-	table_info = glue_table.schema.Cast<GlueSchemaEntry>().DefinitionForWrite(context, glue_table);
+	table_info = table.schema.Cast<GlueSchemaEntry>().DefinitionForWrite(context, table);
 	auto format = table_info.GetFormat();
 	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "
@@ -81,14 +51,21 @@ GlueTable &GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, 
 		                              "(org.apache.hive.hcatalog.data.JsonSerDe)",
 		                              statement, table.name.GetIdentifierName(), table_info.serde_library);
 	}
-	return glue_table;
+	return table;
 }
 
-PhysicalOperator &HiveTableImplementation::PlanInsert(ClientContext &context, GlueTable &table,
-                                                      PhysicalPlanGenerator &planner, LogicalInsert &op,
-                                                      optional_ptr<PhysicalOperator> plan) {
-	GlueTableInfo table_info;
-	auto &glue_table = GetHiveTableForDML(context, table, "INSERT", table_info);
+} // namespace
+
+PhysicalOperator &GlueTable::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
+                                        optional_ptr<PhysicalOperator> plan) {
+	auto format = table_info.GetFormat();
+	if (!format.IsHive()) {
+		throw NotImplementedException("INSERT on Glue table '%s' with type %s is not supported, only Hive tables can "
+		                              "be written",
+		                              name, format.Describe(table_info));
+	}
+	GlueTableInfo definition;
+	auto &glue_table = GetHiveTableForDML(context, *this, "INSERT", definition);
 	// an INSERT writes by path, without the credentials the table's scans read with
 	// TODO: support INSERT into a table with credentials, by writing its files with them
 	if (!GlueFileCredentialsCallback::Get(context, glue_table).empty()) {
@@ -96,12 +73,33 @@ PhysicalOperator &HiveTableImplementation::PlanInsert(ClientContext &context, Gl
 		                              "supported",
 		                              op.table.name.GetIdentifierName());
 	}
-	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, table_info, plan);
+	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, definition, plan);
 }
 
-TableFunction HiveTableImplementation::BindScan(ClientContext &context, GlueTable &table,
-                                                unique_ptr<FunctionData> &bind_data, const EntryLookupInfo &lookup) {
-	auto &table_info = table.table_info;
+virtual_column_map_t GlueTable::GetVirtualColumns() const {
+	virtual_column_map_t result;
+	if (table_info.GetFormat().IsHive()) {
+		result.emplace(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR));
+		HiveMultiFileReader::AddMetadataColumns(result);
+	}
+	return result;
+}
+
+vector<column_t> GlueTable::GetRowIdColumns() const {
+	return {};
+}
+
+TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
+	auto format = table_info.GetFormat();
+	if (!format.IsHive()) {
+		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
+		                              "glue_get_table_response() to inspect its definition",
+		                              table_info.schema_name, table_info.name, format.Describe(table_info));
+	}
+	return GetHiveScanFunction(context, bind_data);
+}
+
+TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	if (table_info.IsPartitionProjected()) {
 		throw NotImplementedException("Glue table '%s.%s' uses Athena partition projection (projection.enabled), "
 		                              "which is not supported yet: Athena derives its partitions from the "
@@ -114,10 +112,10 @@ TableFunction HiveTableImplementation::BindScan(ClientContext &context, GlueTabl
 	// decides the file format (throws for unsupported SerDes).
 	auto scan_info = make_shared_ptr<HiveScanInfo>();
 	scan_info->scan_id = HiveQueryCache::Get(context)->NextScanId();
-	scan_info->catalog_name = table.ParentCatalog().GetName().GetIdentifierName();
+	scan_info->catalog_name = ParentCatalog().GetName().GetIdentifierName();
 	scan_info->database_name = table_info.schema_name;
 	scan_info->table_name = table_info.name;
-	scan_info->table = &table;
+	scan_info->table = this;
 	scan_info->root_location = table_info.location;
 	scan_info->file_format = table_info.GetFileFormat();
 	if (IsTextFileFormat(scan_info->file_format)) {
@@ -133,7 +131,7 @@ TableFunction HiveTableImplementation::BindScan(ClientContext &context, GlueTabl
 			                   table_info.schema_name, table_info.name, property);
 		}
 	}
-	scan_info->file_secret = GlueFileCredentialsCallback::Get(context, table);
+	scan_info->file_secret = GlueFileCredentialsCallback::Get(context, *this);
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());
@@ -143,23 +141,6 @@ TableFunction HiveTableImplementation::BindScan(ClientContext &context, GlueTabl
 	}
 	// the partitions are fetched from Glue on first use (HiveScanInfo::Partitions), not at bind
 	return BindHiveScan(context, std::move(scan_info), bind_data);
-}
-
-} // namespace
-
-PhysicalOperator &GlueTableImplementation::PlanInsert(ClientContext &, GlueTable &table, PhysicalPlanGenerator &,
-                                                      LogicalInsert &, optional_ptr<PhysicalOperator>) {
-	throw NotImplementedException("INSERT on Glue table '%s' with type %s is not supported, only Hive tables can be "
-	                              "written",
-	                              table.name, table.table_info.GetFormat().Describe(table.table_info));
-}
-
-unique_ptr<GlueTableImplementation> GlueTableImplementation::CreateHive(const ColumnList &columns) {
-	return make_uniq<HiveTableImplementation>(columns.Copy());
-}
-
-unique_ptr<GlueTableImplementation> GlueTableImplementation::CreateUnsupported(const ColumnList &columns) {
-	return make_uniq<UnsupportedTableImplementation>(columns.Copy());
 }
 
 } // namespace duckdb

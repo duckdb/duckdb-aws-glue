@@ -136,30 +136,21 @@ GlueTableResolver::~GlueTableResolver() {
 }
 
 CatalogEntry &GlueTableResolver::Resolve(ClientContext &context, GlueTable &table) {
+	if (table.table_info.GetFormat().format != GlueFormat::ICEBERG) {
+		return table;
+	}
 	auto &transaction = GlueTransaction::Get(context, catalog);
-	auto existing = transaction.resolved_tables.find(table);
-	if (existing != transaction.resolved_tables.end()) {
+	auto existing = transaction.table_redirects.find(table);
+	if (existing != transaction.table_redirects.end()) {
 		return *existing->second;
 	}
-	auto &schema = table.ParentSchema();
-	unique_ptr<CatalogEntry> resolved;
-	auto format = table.table_info.GetFormat().format;
-	if (format == GlueFormat::ICEBERG) {
-		CreateViewInfo info(schema, table.name);
-		resolved = make_uniq<IcebergRedirectView>(context, table, *iceberg, info);
-	} else {
-		auto implementation = format == GlueFormat::HIVE
-		                          ? GlueTableImplementation::CreateHive(table.GetColumns())
-		                          : GlueTableImplementation::CreateUnsupported(table.GetColumns());
-		CreateTableInfo info(schema, table.name);
-		info.columns = table.GetColumns().Copy();
-		resolved = make_uniq<GlueTable>(catalog, schema, info, table.table_info, std::move(implementation));
-	}
+	CreateViewInfo info(table.ParentSchema(), table.name);
+	auto resolved = make_uniq<IcebergRedirectView>(context, table, *iceberg, info);
 	resolved->oid = table.oid;
 	resolved->comment = table.comment;
 	resolved->tags = table.tags;
 	auto &result = *resolved;
-	transaction.resolved_tables.emplace(table, std::move(resolved));
+	transaction.table_redirects.emplace(table, std::move(resolved));
 	return result;
 }
 

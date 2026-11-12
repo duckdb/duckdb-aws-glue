@@ -5,29 +5,25 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 
 #include "core/glue_info.hpp"
-#include "catalog/glue_table_implementation.hpp"
 
 namespace duckdb {
-class GlueCatalog;
+class LogicalInsert;
+class PhysicalOperator;
+class PhysicalPlanGenerator;
 
 //! Glue metadata, with local scan and write support for Hive tables.
 class GlueTable : public TableCatalogEntry {
 public:
-	GlueTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, GlueTableInfo table_info,
-	          unique_ptr<GlueTableImplementation> implementation = nullptr);
+	GlueTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, GlueTableInfo table_info);
 
 public:
 	const ColumnList &GetColumns() const override;
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
-	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
-	                              const EntryLookupInfo &lookup) override;
 	PhysicalOperator &PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
 	                             optional_ptr<PhysicalOperator> plan);
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
-	//! The implementation's virtual columns, including any format-specific metadata columns.
 	virtual_column_map_t GetVirtualColumns() const override;
-	//! The implementation's row identifiers, if supported.
 	vector<column_t> GetRowIdColumns() const override;
 
 	//! Called by duckdb_tables().sql / ToSQL(). On a Hive table we can round-trip, the sql column
@@ -40,8 +36,10 @@ public:
 	GlueTableInfo table_info;
 
 private:
-	ColumnList metadata_columns;
-	unique_ptr<GlueTableImplementation> implementation;
+	TableFunction GetHiveScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data);
+
+private:
+	ColumnList columns;
 };
 
 } // namespace duckdb

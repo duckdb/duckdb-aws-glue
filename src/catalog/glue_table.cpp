@@ -161,15 +161,13 @@ void AddTableProperties(CreateTableInfo &info, const GlueTableInfo &table_info) 
 
 } // namespace
 
-GlueTable::GlueTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, GlueTableInfo table_info_p,
-                     unique_ptr<GlueTableImplementation> implementation_p)
-    : TableCatalogEntry(catalog, schema, info), table_info(std::move(table_info_p)),
-      metadata_columns(info.columns.Copy()), implementation(std::move(implementation_p)) {
+GlueTable::GlueTable(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, GlueTableInfo table_info_p)
+    : TableCatalogEntry(catalog, schema, info), table_info(std::move(table_info_p)), columns(info.columns.Copy()) {
 	this->internal = false;
 }
 
 const ColumnList &GlueTable::GetColumns() const {
-	return implementation ? implementation->GetColumns() : metadata_columns;
+	return columns;
 }
 
 unique_ptr<BaseStatistics> GlueTable::GetStatistics(ClientContext &context, column_t column_id) {
@@ -179,14 +177,6 @@ unique_ptr<BaseStatistics> GlueTable::GetStatistics(ClientContext &context, colu
 TableStorageInfo GlueTable::GetStorageInfo(ClientContext &context) {
 	TableStorageInfo result;
 	return result;
-}
-
-virtual_column_map_t GlueTable::GetVirtualColumns() const {
-	return implementation ? implementation->GetVirtualColumns() : virtual_column_map_t {};
-}
-
-vector<column_t> GlueTable::GetRowIdColumns() const {
-	return implementation ? implementation->GetRowIdColumns() : vector<column_t> {};
 }
 
 //! Called by duckdb_tables().sql. On success, returns a CreateTableInfo so ToString() renders
@@ -203,23 +193,6 @@ unique_ptr<CreateInfo> GlueTable::GetInfo() const {
 		result->error = ErrorData(e).RawMessage();
 		return result;
 	}
-}
-
-TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
-	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(catalog.GetName(), schema.name, name));
-	return GetScanFunction(context, bind_data, lookup);
-}
-
-TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data,
-                                         const EntryLookupInfo &lookup) {
-	D_ASSERT(implementation);
-	return implementation->BindScan(context, *this, bind_data, lookup);
-}
-
-PhysicalOperator &GlueTable::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
-                                        optional_ptr<PhysicalOperator> plan) {
-	D_ASSERT(implementation);
-	return implementation->PlanInsert(context, *this, planner, op, plan);
 }
 
 } // namespace duckdb

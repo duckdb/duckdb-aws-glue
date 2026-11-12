@@ -320,6 +320,38 @@ TEST_CASE("Glue table names remain valid through an Iceberg redirect view", "[gl
 	Run(*fixture.con, "EXPLAIN SELECT * FROM lake.sales.orders");
 }
 
+TEST_CASE("Hive scans retain their schema when another connection refreshes Glue metadata", "[glue_table_binding]") {
+	ViewBindingFixture fixture;
+	auto &con = *fixture.con;
+	Connection other(*fixture.db);
+	Run(other, "SET glue_metadata_cache_scope = 'connection'");
+	fixture.Warm(other);
+	Run(con, "BEGIN");
+	auto prepared = con.Prepare("SELECT id, name FROM lake.sales.customers");
+	REQUIRE_FALSE(prepared->HasError());
+
+	Run(other, "BEGIN");
+	auto &catalog = Catalog::GetCatalog(*other.context, Identifier("lake"));
+	auto &cache = *GlueTransaction::Get(*other.context, catalog).cache;
+	cache.Clear();
+	auto updated = fixture.tables.front();
+	updated.version_id = "2";
+	updated.columns.front().type = "bigint";
+	cache.GetTable("sales", "customers", [&]() { return make_shared_ptr<const GlueTableInfo>(updated); });
+	auto refreshed = Run(other, "SELECT id FROM lake.sales.customers");
+	REQUIRE(refreshed->GetTypes()[0] == LogicalType::BIGINT);
+	Run(other, "COMMIT");
+
+	auto result = prepared->Execute();
+	REQUIRE_FALSE(result->HasError());
+	REQUIRE(result->GetTypes()[0] == LogicalType::INTEGER);
+	auto rows = result->Fetch();
+	REQUIRE(rows->GetValue(0, 0).ToString() == "1");
+	REQUIRE(rows->GetValue(1, 0).ToString() == "Ada");
+	Run(con, "COMMIT");
+	REQUIRE(fixture.reader->names.empty());
+}
+
 TEST_CASE("Glue redirects register the Iceberg catalog and bind its real table", "[glue_table_binding]") {
 	ViewBindingFixture fixture;
 	auto &con = *fixture.con;
@@ -460,6 +492,10 @@ TEST_CASE("Unsupported Glue formats remain metadata-only tables", "[glue_table_b
 
 	auto drop = con.Prepare("DROP TABLE lake.sales.delta_orders");
 	REQUIRE_FALSE(drop->HasError());
+	auto insert = con.Prepare("INSERT INTO lake.sales.delta_orders VALUES (2, '99')");
+	REQUIRE(insert->HasError());
+	REQUIRE(insert->GetError().find("only Hive tables can be written") != string::npos);
+	fixture.Warm();
 	auto result = con.Query("SELECT * FROM lake.sales.delta_orders");
 	REQUIRE(result->HasError());
 	REQUIRE(result->GetError().find("DELTA") != string::npos);

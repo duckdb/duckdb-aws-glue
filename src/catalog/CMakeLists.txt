@@ -4,10 +4,10 @@ add_library_unity(
   glue_attach.cpp
   glue_catalog.cpp
   glue_file_credentials.cpp
+  glue_hive_table.cpp
   glue_schema_entry.cpp
   glue_schema_set.cpp
   glue_table.cpp
-  glue_table_implementation.cpp
   glue_table_resolver.cpp
   glue_table_set.cpp
   glue_transaction.cpp
