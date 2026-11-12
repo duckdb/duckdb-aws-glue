@@ -31,11 +31,9 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -52,7 +50,6 @@
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
-#include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/query_node/set_operation_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
@@ -1639,21 +1636,6 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	                              global_state);
 }
 
-//! Make the cast of a field's text to its column's type a TRY_CAST
-static void MakeTryCast(ClientContext &context, unique_ptr<Expression> &expr) {
-	if (!expr || !BoundCastExpression::IsCast(*expr)) {
-		return;
-	}
-	auto &cast = expr->Cast<BoundFunctionExpression>();
-	if (BoundCastExpression::IsTryCast(cast) ||
-	    BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
-		return;
-	}
-	auto target_type = cast.GetReturnType();
-	auto child = std::move(BoundCastExpression::ChildMutable(cast));
-	expr = BoundCastExpression::AddCastToType(context, std::move(child), target_type, true);
-}
-
 //! A parquet BYTE_ARRAY column without a STRING annotation (Impala, older Hive and parquet-mr writers) reads as a
 //! BLOB when the table has a binary column (binary_as_string = false, BindHiveScan), while Glue declares this column
 //! 'string'. The reader's cast of that BLOB to VARCHAR would escape every non-ASCII byte (\xC3\xBC for ü); the bytes
@@ -1674,61 +1656,6 @@ static void DecodeBlobAsText(ClientContext &context, unique_ptr<Expression> &exp
 	children.push_back(std::move(BoundCastExpression::ChildMutable(cast)));
 	FunctionBinder function_binder(context);
 	expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, "decode", std::move(children));
-}
-
-//! Make the cast of a field's text to BOOLEAN lower(text) = 'true', as OpenCSVSerde reads a boolean
-static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &expr) {
-	if (!expr || !BoundCastExpression::IsCast(*expr) || expr->GetReturnType().id() != LogicalTypeId::BOOLEAN) {
-		return;
-	}
-	auto &cast = expr->Cast<BoundFunctionExpression>();
-	if (BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
-		return;
-	}
-	vector<unique_ptr<Expression>> children;
-	children.push_back(std::move(BoundCastExpression::ChildMutable(cast)));
-	FunctionBinder function_binder(context);
-	auto lower =
-	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("lower"), std::move(children));
-	expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, std::move(lower),
-	                                         make_uniq<BoundConstantExpression>(Value("true")));
-}
-
-//! Make the cast of a field's text to TIMESTAMP make_timestamp_ms(CAST(text AS BIGINT)), and to DATE
-//! DATE '1970-01-01' + CAST(text AS INTEGER), as OpenCSVSerde reads a timestamp and a date
-static void MakeEpoch(ClientContext &context, unique_ptr<Expression> &expr, bool try_cast) {
-	if (!expr || !BoundCastExpression::IsCast(*expr)) {
-		return;
-	}
-	auto is_date = expr->GetReturnType() == LogicalType::DATE;
-	if (!is_date && expr->GetReturnType() != LogicalType::TIMESTAMP) {
-		return;
-	}
-	auto &cast = expr->Cast<BoundFunctionExpression>();
-	if (BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
-		return;
-	}
-	vector<unique_ptr<Expression>> children;
-	if (is_date) {
-		children.push_back(make_uniq<BoundConstantExpression>(Value::DATE(date_t::epoch())));
-	}
-	children.push_back(BoundCastExpression::AddCastToType(context, std::move(BoundCastExpression::ChildMutable(cast)),
-	                                                      is_date ? LogicalType::INTEGER : LogicalType::BIGINT,
-	                                                      try_cast));
-	FunctionBinder function_binder(context);
-	ErrorData error;
-	auto value = function_binder.BindScalarFunction(
-	    Identifier::DefaultSchema(), Identifier(is_date ? "+" : "make_timestamp_ms"), std::move(children), error);
-	if (!value) {
-		error.Throw();
-	}
-	if (try_cast) {
-		// a number out of the type's range is NULL too
-		auto try_value = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_TRY, value->GetReturnType());
-		try_value->GetChildrenMutable().push_back(std::move(value));
-		value = std::move(try_value);
-	}
-	expr = std::move(value);
 }
 
 void HiveMultiFileReader::FinalizeChunk(ClientContext &context, const MultiFileBindData &bind_data,
@@ -1782,23 +1709,7 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 		if (!expr) {
 			continue;
 		}
-		switch (csv_options.FieldConversion(expr->GetReturnType())) {
-		case HiveFieldConversion::NONE:
-		case HiveFieldConversion::CAST:
-			break;
-		case HiveFieldConversion::TRY_CAST:
-			MakeTryCast(context, expr);
-			break;
-		case HiveFieldConversion::FALSE_UNLESS_TRUE:
-			MakeFalseUnlessTrue(context, expr);
-			break;
-		case HiveFieldConversion::EPOCH:
-			MakeEpoch(context, expr, false);
-			break;
-		case HiveFieldConversion::TRY_EPOCH:
-			MakeEpoch(context, expr, true);
-			break;
-		}
+		csv_options.ConvertField(context, expr);
 	}
 	return result;
 }
@@ -1858,20 +1769,12 @@ static bool ScanTypeIsTableType(const HiveScanInfo &info, const MultiFileBindDat
 	return false;
 }
 
-//! A csv field read as text, barred (__internal_barrier) so that the caller's optimizer does not push its conversion
-//! into read_csv (type_pushdown), which would convert the text itself, and strictly
-static unique_ptr<ParsedExpression> BarredField(const Identifier &name) {
-	vector<unique_ptr<ParsedExpression>> field;
-	field.push_back(make_uniq<ColumnRefExpression>(name));
-	return make_uniq<FunctionExpression>(Identifier("__internal_barrier"), std::move(field));
-}
-
-//! A field of the files as the reader call reads it: the column read_csv returns, barred, or with line_fields the field
-//! hive_opencsv_field splits from the line read_csv returns as the first column, as FinalizeChunk reads it
-static unique_ptr<ParsedExpression> ReaderField(const HiveScanInfo &info, const Identifier &name, bool barred) {
+//! With line_fields, a field of the files as the reader call reads it: hive_opencsv_field splitting the line read_csv
+//! returns as the first column, as FinalizeChunk does; otherwise nullptr
+static unique_ptr<ParsedExpression> LineField(const HiveScanInfo &info, const Identifier &name) {
 	auto &options = info.csv_options;
 	if (!options.line_fields) {
-		return barred ? BarredField(name) : make_uniq<ColumnRefExpression>(name);
+		return nullptr;
 	}
 	optional<Identifier> line;
 	int64_t field = 0;
@@ -1904,51 +1807,7 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 	if (info.file_format != HiveFileFormat::CSV || !info.csv_options.serde_fields) {
 		return make_uniq<ColumnRefExpression>(name);
 	}
-	auto &options = info.csv_options;
-	unique_ptr<ParsedExpression> column;
-	auto conversion = options.FieldConversion(type);
-	switch (conversion) {
-	case HiveFieldConversion::NONE:
-		if (!options.line_fields) {
-			return make_uniq<ColumnRefExpression>(name);
-		}
-		column = ReaderField(info, name, false);
-		break;
-	case HiveFieldConversion::CAST:
-		column = make_uniq<CastExpression>(type, ReaderField(info, name, true), false);
-		break;
-	case HiveFieldConversion::TRY_CAST:
-		column = make_uniq<CastExpression>(type, ReaderField(info, name, true), true);
-		break;
-	case HiveFieldConversion::FALSE_UNLESS_TRUE: {
-		vector<unique_ptr<ParsedExpression>> lower;
-		lower.push_back(ReaderField(info, name, true));
-		column = make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL,
-		                                         make_uniq<FunctionExpression>(Identifier("lower"), std::move(lower)),
-		                                         ConstantExpression::FromValue(Value("true")));
-		break;
-	}
-	case HiveFieldConversion::EPOCH:
-	case HiveFieldConversion::TRY_EPOCH: {
-		auto is_date = type == LogicalType::DATE;
-		auto number =
-		    make_uniq<CastExpression>(is_date ? LogicalType::INTEGER : LogicalType::BIGINT,
-		                              ReaderField(info, name, true), conversion == HiveFieldConversion::TRY_EPOCH);
-		vector<unique_ptr<ParsedExpression>> children;
-		if (is_date) {
-			children.push_back(ConstantExpression::FromValue(Value::DATE(date_t::epoch())));
-		}
-		children.push_back(std::move(number));
-		column = make_uniq<FunctionExpression>(Identifier(is_date ? "+" : "make_timestamp_ms"), std::move(children),
-		                                       nullptr, nullptr, false, is_date);
-		if (conversion == HiveFieldConversion::TRY_EPOCH) {
-			column = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_TRY, std::move(column));
-		}
-		break;
-	}
-	}
-	column->SetAlias(name);
-	return column;
+	return info.csv_options.GetFieldReaderExpression(name, type, LineField(info, name));
 }
 
 optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get) {

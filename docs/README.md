@@ -44,31 +44,43 @@ A `float` or `double` column may hold NaN wherever the file does not count its N
 writers leave out): such a column's min/max never skip a row group for a filter that NaN could match.
 Text tables are read the way their SerDe reads them:
 
-- LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
-  is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
-  quoted.
-- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\` when the table has none; doubled quotes
-  are read either way). Without `escapeChar`, as with `escapeChar` `\`, each line is split into its fields as
-  OpenCSVSerde splits it (`SplitOpenCSVLine`): the `\` is dropped and the `\` or quote character after it is kept, in a
-  quoted field or not (`\` is an empty field, `a\x` is `ax`, `a\\b` is `a\b`, `"a\"b"` is `a"b`), a `\` before the
-  separator or the end of the line is dropped too (`a\,b` is the fields `a` and `b`), and a line break ends the line,
-  inside quotes too, as OpenCSVSerde reads it. A NUL byte is data, as in any field. Another `escapeChar`, such as the
-  `"` of the tables this extension creates, is applied by `read_csv` (OpenCSVSerde reads `"` as `\` too). A separator of
-  more than one byte (a non-ASCII character such as `¦`) is split on as any other. An empty field is an empty string;
-  there is no NULL. In a table `read_csv` splits, a line break inside a quoted field fails a
-  scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner does not
-  support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per file and
-  the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per file in
-  every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two broken
-  rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any case and
-  false otherwise. A timestamp field is a number of milliseconds since the epoch (`1579059880000` is `2020-01-15
-  03:44:40`) and a date field a number of days since the epoch (`18276` is `2020-01-15`); text such as `2020-01-15
-  03:44:40` or `2020-01-15` does not parse.
+- LazySimpleSerDe:
+  - The delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127 is a byte code
+    (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not quoted.
+  - `timestamp.formats` is not supported as the SerDe defines it (Joda-Time patterns, the longest match wins). Its
+    patterns are hints: a `timestamp` field is trimmed and tried with `try_strptime` and each pattern strptime can
+    express (`y`, `M`, `d`, `H`, `h`, `m`, `s`, `SSS`, `a`, `E` and quoted text), the first match in the list winning;
+    then as milliseconds since the epoch if `millis` is listed; then with the usual cast. A field shorter than 8
+    characters is NULL, as in the SerDe. Patterns are separated by `,` (`\,` is a comma in a pattern); those with a time
+    zone, a fraction other than `SSS`, or no year are ignored. Without the property, timestamps are read with the usual
+    cast only.
+- OpenCSVSerde:
+  - `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\` when the table has none; see escapes below). An
+    empty field is an empty string; there is no NULL.
+  - A boolean field is true when it is `true` in any case and false otherwise.
+  - A timestamp field is a number of milliseconds since the epoch (`1579059880000` is `2020-01-15 03:44:40`) and a date
+    field a number of days since the epoch (`18276` is `2020-01-15`); text such as `2020-01-15 03:44:40` or
+    `2020-01-15` does not parse.
+  - Escapes: without `escapeChar`, as with `escapeChar` `\`, each line is split into its fields as the SerDe splits it
+    (`SplitOpenCSVLine`): the `\` is dropped and the `\` or quote character after it is kept, in a quoted field or not
+    (`\` is an empty field, `a\x` is `ax`, `a\\b` is `a\b`, `"a\"b"` is `a"b`), and a `\` before the separator or the
+    end of the line is dropped too (`a\,b` is the fields `a` and `b`). Doubled quotes are one quote either way. A
+    separator of more than one byte (a non-ASCII character such as `¦`) is split on as any other, and a NUL byte is data,
+    as in any field. Another `escapeChar`, such as the `"` of the tables this extension creates, is applied by
+    `read_csv` (the SerDe reads `"` as `\` too).
+  - Line breaks: the SerDe reads a file line by line (TextInputFormat), so a line break inside a quoted field splits the
+    record into two broken rows, and a quote that is never closed (`2,"abc`) makes only that field NULL. Without
+    `escapeChar`, and with `escapeChar` `\`, the extension reads the lines the same way. With another `escapeChar` it
+    reads CSV as `read_csv` does: a quoted field continues across line breaks, so a quoted line break is read as one
+    value, and the lines after an unclosed quote are read into that one value without an error. There, a quoted line
+    break fails a scan of at most twice `threads` files, which reads each file with several threads (`The parallel
+    scanner does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one
+    thread per file. `SET hive_csv_parallel = false` reads one thread per file in every scan.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
-  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
-  details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
-  (Hive: a row of NULLs).
+  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property; OpenCSVSerde booleans, timestamps
+  and dates as above), which differs from Hive in details: surrounding spaces are ignored, `'1.5'` in an `int` column
+  is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
 - A line may be up to `hive_csv_max_line_size` bytes long (default 8000000; Hive has no limit); a longer line fails
   the query. Up to the default the reader's buffers and how a file is split between threads are unchanged; a larger
@@ -546,6 +558,19 @@ SELECT "table", scan_id, event, partitions, partitions_read, listings, files, du
 FROM duckdb_logs_parsed('GlueScan');
 ```
 
+The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry strategy decides on for a Glue API call,
+before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
+the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got
+no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection). The retry limit is
+`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew does not go through the
+retry strategy and is not logged.
+
+```sql
+CALL enable_logging('GlueRetry', storage = 'memory');
+-- ... run queries ...
+SELECT error, status, count(*) FROM duckdb_logs_parsed('GlueRetry') GROUP BY ALL;
+```
+
 ## Testing
 
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:
@@ -562,8 +587,11 @@ which the tests use in their ATTACH; tests are skipped without a config (`requir
 The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
 GetTables on a database named `fault_access_denied*` / `fault_invalid_input*` with that Glue error, and carries out
 CreateDatabase / CreateTable on a `fault_already_exists*` database before answering AlreadyExistsException (what it
-creates differs from what was asked for); tests that need it are skipped without it. It also sets
-`GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
+creates differs from what was asked for), and refuses the first attempt of each request on a `fault_throttled*`
+database with ThrottlingException, letting the SDK's retries through. A table named `fault_denied_*` is one the caller
+may not describe, as Lake Formation leaves it: GetTable on it fails with AccessDeniedException and GetTables leaves it
+out. Tests that need the proxy are skipped without it. It
+also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
 `link_db` as Glue does through a database resource link whose target is `target_db`.
 
 ```sh

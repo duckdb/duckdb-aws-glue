@@ -2,6 +2,7 @@
 
 #include "core/glue_types.hpp"
 #include "core/helpers.hpp"
+#include "core/hive_timestamp_formats.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
@@ -356,8 +357,7 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	options.null_for_invalid_data =
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
-	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
-	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
+	options.serde = GetSerDe();
 	// without escapeChar OpenCSVSerde reads with a '\' escape, as with escapeChar '\', which read_csv does not apply as
 	// it does: the lines are split by SplitOpenCSVLine instead; an explicit escapeChar '"', which this extension
 	// writes, is read as it is
@@ -371,6 +371,12 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 		}
 		options.line_fields = true;
 		options.escape = "\\";
+	}
+	string timestamp_formats;
+	if (GetSerDe() == HiveSerDe::LAZY_SIMPLE && TryGetProperty("timestamp.formats", timestamp_formats)) {
+		auto formats = HiveTimestampFormats::Parse(timestamp_formats);
+		options.timestamp_formats = std::move(formats.strptime_formats);
+		options.timestamp_millis = formats.millis;
 	}
 	return options;
 }

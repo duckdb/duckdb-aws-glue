@@ -24,7 +24,8 @@
 # UpdateTable on a fault_concurrent_update* database, which another client's update precedes (a lost update),
 # BatchCreatePartition on a fault_partition_elsewhere* database, which another client's registration of the same
 # partitions at other locations precedes, and CreatePartition on a fault_noncanonical_values* database, which
-# registers each value with a leading '0'. BatchCreatePartition is delayed on a fault_slow_partitions* database (a
+# registers each value with a leading '0'. GetTable on a table named fault_denied_* fails with AccessDeniedException,
+# and GetTables leaves such tables out, as Lake Formation does for a table the caller may not describe. BatchCreatePartition is delayed on a fault_slow_partitions* database (a
 # timeout lands during registration) and, on a fault_recreated_during_write* database, finds the table dropped and
 # created again by another client and then fails.
 # 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link

@@ -28,6 +28,12 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.ps_text;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.ps_opencsv;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ps_ts_formats;
+
+statement ok
 CREATE TABLE my_datalake.default.ps_orders (id INTEGER, amount DECIMAL(10,2), dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
@@ -48,6 +54,23 @@ WITH (format = 'csv', 'skip.header.line.count' = '1', 'serialization.null.format
 statement ok
 COPY (SELECT * FROM (VALUES ('id,name,amount'), ('1,"a",1.5'), ('2,NA,x'), ('3,c')) t(line))
 TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_text/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# OpenCSVSerde booleans, integers and epoch timestamps
+statement ok
+CREATE TABLE my_datalake.default.ps_opencsv (id INTEGER, ok BOOLEAN, ts TIMESTAMP) WITH (format = 'csv', quote = '"');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1,TRUE,1579059880000'), ('2,yes,0'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_opencsv/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# a timestamp in a format timestamp.formats lists
+statement ok
+CREATE TABLE my_datalake.default.ps_ts_formats (id INTEGER, ts TIMESTAMP) WITH (format = 'csv',
+    'timestamp.formats' = 'dd/MM/yyyy HH:mm:ss,millis');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1,15/01/2020 06:24:40'), ('2,1579069480000'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_ts_formats/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
 # with the verifier on, every plan below is serialized, deserialized and run as deserialized
 statement ok
@@ -109,6 +132,31 @@ SELECT id, name, name IS NULL, amount FROM my_datalake.default.ps_text ORDER BY 
 2	NULL	true	NULL
 3	c	false	NULL
 
+# an OpenCSVSerde table keeps its SerDe's conversions
+query III
+SELECT id, ok, ts FROM my_datalake.default.ps_opencsv ORDER BY id;
+----
+1	true	2020-01-15 03:44:40
+2	false	1970-01-01 00:00:00
+
+# a LazySimpleSerDe table keeps its timestamp formats
+query II
+SELECT id, ts FROM my_datalake.default.ps_ts_formats ORDER BY id;
+----
+1	2020-01-15 06:24:40
+2	2020-01-15 06:24:40
+
+# the reader call of a deserialized scan converts the fields as the scan does
+query II
+EXPLAIN (SQL) SELECT ok, ts FROM my_datalake.default.ps_opencsv;
+----
+sql	<REGEX>:.*\(lower\(__internal_barrier\(ok\)\) = 'true'\) AS ok,\s+make_timestamp_ms\(CAST\(__internal_barrier\(ts\) AS BIGINT\)\) AS ts.*
+
+query II
+EXPLAIN (SQL) SELECT ts FROM my_datalake.default.ps_ts_formats;
+----
+sql	<REGEX>:.*try_strptime\(.*'%d/%m/%Y %H:%M:%S'.*TRY\(make_timestamp_ms\(.*END AS ts.*
+
 query II
 SELECT n, s.a FROM my_datalake.default.ps_lines;
 ----
@@ -148,6 +196,12 @@ SET debug_verify_serializer = false;
 
 statement ok
 DROP TABLE my_datalake.default.ps_text;
+
+statement ok
+DROP TABLE my_datalake.default.ps_opencsv;
+
+statement ok
+DROP TABLE my_datalake.default.ps_ts_formats;
 
 statement ok
 DROP TABLE my_datalake.default.ps_lines;

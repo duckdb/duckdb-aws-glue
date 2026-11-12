@@ -25,6 +25,7 @@
 
 #include "core/glue_types.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "catalog/glue_view.hpp"
@@ -1066,7 +1067,18 @@ void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
 	// tables and views share the set, so the lookup returns whichever Glue holds under the name; the caller keeps
 	// the entries of the type it asked for
 	EntryLookupInfo lookup(info.type, QualifiedName(Identifier(name)));
-	auto entry = tables.GetEntry(context, lookup);
+	optional_ptr<CatalogEntry> entry;
+	try {
+		entry = tables.GetEntry(context, lookup);
+	} catch (const GlueException &ex) {
+		// like the listing this filter replaces, a table we may not describe is not listed
+		if (!ex.access_denied) {
+			throw;
+		}
+		ErrorData error(ex);
+		DUCKDB_LOG_WARNING(context, "Not listing Glue table '%s.%s': %s", database_info.name, name, error.RawMessage());
+		return;
+	}
 	if (entry) {
 		info.callback(*entry);
 	}
