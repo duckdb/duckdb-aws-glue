@@ -536,8 +536,8 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	REQUIRE(Scalar(con, "SELECT count(*) FROM (" + read + ") WHERE id = 5 AND ts IS NULL AND d IS NULL").ToString() ==
 	        "1");
 	REQUIRE(Differences(con, query, read) == 0);
-	// OpenCSVSerde with escapeChar '\' or without escapeChar: read_csv returns each line split only at its NUL bytes,
-	// which the reader call joins and splits with hive_opencsv_field as the scan does
+	// OpenCSVSerde with escapeChar '\' or without escapeChar: read_csv returns each line as one column, which the
+	// reader call splits with hive_opencsv_field as the scan does
 	for (auto escape_set : {true, false}) {
 		auto escaped = tables.Add(escape_set ? "backslash" : "no_escape");
 		Run(con, "CREATE TABLE lake.default." + escaped +
@@ -552,12 +552,12 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 		{
 			PlannedScan scan(con, escaped_query);
 			auto call = Call(scan);
-			REQUIRE(Parameter(call, "delim") == "''");
+			REQUIRE(Parameter(call, "delim") == "'\r'");
 			REQUIRE(Parameter(call, "quote") == "''");
 			REQUIRE(Parameter(call, "escape") == "''");
 			auto columns = Columns(call);
 			REQUIRE(columns.size() == 3);
-			REQUIRE(StringUtil::Contains(columns[1], "hive_opencsv_field(concat_ws(chr(0), id, val, n), "));
+			REQUIRE(StringUtil::Contains(columns[1], "hive_opencsv_field(id, "));
 		}
 		auto escaped_read = Restate(con, escaped_query);
 		REQUIRE(Scalar(con, "SELECT string_agg(id || ':' || coalesce(replace(val, chr(0), '<0>'), 'NULL') || ':' || "

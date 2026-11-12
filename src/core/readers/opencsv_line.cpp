@@ -1,12 +1,6 @@
 #include "core/readers/opencsv_line.hpp"
 
-#include "core/readers/hive_csv_options.hpp"
-#include "duckdb/common/exception.hpp"
-#include "duckdb/common/multi_file/base_file_reader.hpp"
-#include "duckdb/common/multi_file/multi_file_states.hpp"
-#include "duckdb/common/types/data_chunk.hpp"
-#include "duckdb/planner/expression/bound_reference_expression.hpp"
-#include "duckdb/planner/expression_iterator.hpp"
+#include <cstring>
 
 namespace duckdb {
 
@@ -26,59 +20,91 @@ bool IsSeparatorBefore(const char *line, idx_t position, const string &separator
 	       memcmp(line + position - separator.size(), separator.data(), separator.size()) == 0;
 }
 
-bool IsAllWhitespace(const string &text) {
-	for (auto c : text) {
-		if (!IsWhitespace(c)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-//! As CsvDeserializer.parseLine: hands each of the first field_count fields to 'emit' (index, text), which returns
-//! false to stop
-template <class EMIT>
+//! As CsvDeserializer.parseLine: hands each of the first field_count fields that 'want' (index) asks for to 'emit'
+//! (index, text), which returns false to stop; the fields it does not ask for are parsed but not kept
+template <class WANT, class EMIT>
 void ParseOpenCSVLine(const char *line, idx_t length, const OpenCSVDialect &dialect, idx_t field_count, string &field,
-                      EMIT &&emit) {
+                      WANT &&want, EMIT &&emit) {
 	if (length == 0 || field_count == 0) {
 		return;
 	}
+	auto separator_start = dialect.separator[0];
+	auto separator_size = dialect.separator.size();
 	field.clear();
 	idx_t field_index = 0;
+	bool keep = want(field_index);
+	// whether the field holds text, and only whitespace, kept or not
+	bool field_empty = true;
+	bool field_blank = true;
 	bool in_quotes = false;
 	bool in_field = false;
-	// a position in UTF-16 code units, as Java counts the characters the embedded quote rule looks at
+	// a position in UTF-16 code units, as Java counts the characters the embedded quote rule looks at; only whether it
+	// is past 2 matters, so the count stops there
 	idx_t char_position = 0;
-	for (idx_t position = 0; position < length; position++) {
-		auto start = position;
+	auto append = [&](const char *text, idx_t size) {
+		if (keep) {
+			field.append(text, size);
+		}
+		field_empty = false;
+		for (idx_t i = 0; field_blank && i < size; i++) {
+			field_blank = IsWhitespace(text[i]);
+		}
+	};
+	auto count = [&](idx_t start, idx_t end) {
+		for (auto consumed = start; consumed < end && char_position <= 2; consumed++) {
+			auto byte = static_cast<uint8_t>(line[consumed]);
+			if ((byte & 0xC0) != 0x80) {
+				// a character above the BMP is two UTF-16 code units
+				char_position += byte >= 0xF0 ? 2 : 1;
+			}
+		}
+	};
+	auto special = [&](char c) {
+		return c == dialect.escape || c == dialect.quote || c == separator_start;
+	};
+	idx_t position = 0;
+	while (position < length) {
 		auto c = line[position];
+		if (!special(c)) {
+			auto end = position + 1;
+			while (end < length && !special(line[end])) {
+				end++;
+			}
+			append(line + position, end - position);
+			in_field = true;
+			count(position, end);
+			position = end;
+			continue;
+		}
+		auto start = position;
 		auto has_next = position + 1 < length;
 		if (c == dialect.escape) {
 			if ((in_quotes || in_field) && has_next &&
 			    (line[position + 1] == dialect.quote || line[position + 1] == dialect.escape)) {
-				field += line[position + 1];
+				append(line + position + 1, 1);
 				position++;
 			}
 		} else if (c == dialect.quote) {
 			if ((in_quotes || in_field) && has_next && line[position + 1] == dialect.quote) {
-				field += line[position + 1];
+				append(line + position + 1, 1);
 				position++;
 			} else {
 				// a quote in the middle of a field, not next to a separator, is a literal character
 				if (char_position > 2 && !IsSeparatorBefore(line, position, dialect.separator) && has_next &&
 				    !IsSeparatorAt(line, length, position + 1, dialect.separator)) {
-					if (!field.empty() && IsAllWhitespace(field)) {
+					if (!field_empty && field_blank) {
 						field.clear();
+						field_empty = true;
 					} else {
-						field += c;
+						append(&c, 1);
 					}
 				}
 				in_quotes = !in_quotes;
 			}
 			in_field = !in_field;
 		} else if (!in_quotes && IsSeparatorAt(line, length, position, dialect.separator)) {
-			position += dialect.separator.size() - 1;
-			if (!emit(field_index, field)) {
+			position += separator_size - 1;
+			if (keep && !emit(field_index, field)) {
 				return;
 			}
 			field_index++;
@@ -86,164 +112,47 @@ void ParseOpenCSVLine(const char *line, idx_t length, const OpenCSVDialect &dial
 				return;
 			}
 			field.clear();
+			field_empty = true;
+			field_blank = true;
+			keep = want(field_index);
 			in_field = false;
 		} else {
-			field += c;
+			append(&c, 1);
 			in_field = true;
 		}
-		for (auto consumed = start; consumed <= position; consumed++) {
-			auto byte = static_cast<uint8_t>(line[consumed]);
-			if ((byte & 0xC0) != 0x80) {
-				// a character above the BMP is two UTF-16 code units
-				char_position += byte >= 0xF0 ? 2 : 1;
-			}
-		}
+		count(start, position + 1);
+		position++;
 	}
-	if (!in_quotes) {
+	if (!in_quotes && keep) {
 		emit(field_index, field);
 	}
 }
 
 } // namespace
 
-void SplitOpenCSVLine(const char *line, idx_t length, const OpenCSVDialect &dialect, vector<string> &fields,
-                      vector<bool> &valid) {
+void SplitOpenCSVLine(const char *line, idx_t length, const OpenCSVDialect &dialect, const vector<bool> &wanted,
+                      vector<string> &fields, vector<bool> &valid, string &buffer) {
 	valid.assign(fields.size(), false);
-	string field;
-	ParseOpenCSVLine(line, length, dialect, fields.size(), field, [&](idx_t index, const string &text) {
-		fields[index].assign(text);
-		valid[index] = true;
-		return true;
-	});
+	ParseOpenCSVLine(
+	    line, length, dialect, fields.size(), buffer, [&](idx_t index) { return bool(wanted[index]); },
+	    [&](idx_t index, const string &text) {
+		    fields[index].assign(text);
+		    valid[index] = true;
+		    return true;
+	    });
 }
 
 bool GetOpenCSVLineField(const char *line, idx_t length, const OpenCSVDialect &dialect, idx_t index, string &field) {
 	bool found = false;
 	string text;
-	ParseOpenCSVLine(line, length, dialect, index + 1, text, [&](idx_t field_index, const string &value) {
-		if (field_index < index) {
-			return true;
-		}
-		field.assign(value);
-		found = true;
-		return false;
-	});
+	ParseOpenCSVLine(
+	    line, length, dialect, index + 1, text, [&](idx_t field_index) { return field_index == index; },
+	    [&](idx_t, const string &value) {
+		    field.assign(value);
+		    found = true;
+		    return false;
+	    });
 	return found;
-}
-
-void ReadOpenCSVLines(BaseFileReader &reader) {
-	auto file_columns = reader.GetColumns().size();
-	vector<bool> read(file_columns, false);
-	for (idx_t i = 0; i < reader.column_ids.size(); i++) {
-		auto file_column = reader.column_ids[MultiFileLocalIndex(i)].GetId();
-		if (file_column < file_columns) {
-			read[file_column] = true;
-		}
-	}
-	for (idx_t file_column = 0; file_column < file_columns; file_column++) {
-		if (!read[file_column]) {
-			reader.column_ids.push_back(MultiFileLocalColumnId(file_column));
-			reader.column_indexes.push_back(ColumnIndex(file_column));
-		}
-	}
-}
-
-void SplitOpenCSVLines(BaseFileReader &reader, const MultiFileReaderData &reader_data, DataChunk &chunk,
-                       const HiveCSVOptions &options) {
-	vector<bool> used(reader.column_ids.size(), false);
-	for (auto &expr : reader_data.expressions) {
-		if (!expr) {
-			continue;
-		}
-		ExpressionIterator::VisitExpression<BoundReferenceExpression>(*expr, [&](const BoundReferenceExpression &ref) {
-			if (ref.Index() < used.size()) {
-				used[ref.Index()] = true;
-			}
-		});
-	}
-	auto file_columns = reader.GetColumns().size();
-	vector<optional_idx> segments(file_columns);
-	vector<pair<idx_t, idx_t>> targets;
-	idx_t field_count = 0;
-	for (idx_t i = 0; i < reader.column_ids.size(); i++) {
-		auto file_column = reader.column_ids[MultiFileLocalIndex(i)].GetId();
-		if (file_column >= file_columns) {
-			continue;
-		}
-		if (!segments[file_column].IsValid()) {
-			segments[file_column] = i;
-		}
-		if (used[i]) {
-			targets.emplace_back(i, file_column);
-			field_count = MaxValue<idx_t>(field_count, file_column + 1);
-		}
-	}
-	for (auto &segment : segments) {
-		if (!segment.IsValid()) {
-			throw InternalException("Hive text table: a column of the lines of a line_fields file was not read");
-		}
-	}
-	if (targets.empty()) {
-		return;
-	}
-	auto count = chunk.size();
-	OpenCSVDialect dialect {options.delimiter, options.quote[0], options.escape[0]};
-	vector<Vector> fields_read;
-	for (idx_t t = 0; t < targets.size(); t++) {
-		fields_read.emplace_back(LogicalType::VARCHAR, count);
-	}
-	{
-		vector<VectorWriter<string_t>> writers;
-		for (auto &vector : fields_read) {
-			writers.push_back(FlatVector::Writer<string_t>(vector, count));
-		}
-		vector<VectorIterator<string_t>> pieces;
-		pieces.reserve(segments.size());
-		for (auto &segment : segments) {
-			pieces.push_back(chunk.data[segment.GetIndex()].Values<string_t>());
-		}
-		vector<string> fields(field_count);
-		vector<bool> valid;
-		string joined;
-		for (idx_t row = 0; row < count; row++) {
-			// read_csv splits a line at each NUL byte, the delimiter it is given, and pads the columns after its last
-			// piece with NULL
-			auto first = pieces[0][row];
-			const char *line = nullptr;
-			idx_t length = 0;
-			if (first.IsValid()) {
-				line = first.GetValue().GetData();
-				length = first.GetValue().GetSize();
-			}
-			if (pieces.size() > 1 && pieces[1][row].IsValid()) {
-				joined.assign(line, length);
-				for (idx_t p = 1; p < pieces.size() && pieces[p][row].IsValid(); p++) {
-					auto &piece = pieces[p][row].GetValue();
-					joined += '\0';
-					joined.append(piece.GetData(), piece.GetSize());
-				}
-				line = joined.data();
-				length = joined.size();
-			}
-			if (first.IsValid()) {
-				SplitOpenCSVLine(line, length, dialect, fields, valid);
-			} else {
-				valid.assign(field_count, false);
-			}
-			for (idx_t t = 0; t < targets.size(); t++) {
-				auto file_column = targets[t].second;
-				if (valid[file_column]) {
-					auto &field = fields[file_column];
-					writers[t].WriteValue(string_t(field.data(), UnsafeNumericCast<uint32_t>(field.size())));
-				} else {
-					writers[t].WriteNull();
-				}
-			}
-		}
-	}
-	for (idx_t t = 0; t < targets.size(); t++) {
-		chunk.data[targets[t].first].Reference(fields_read[t]);
-	}
 }
 
 } // namespace duckdb

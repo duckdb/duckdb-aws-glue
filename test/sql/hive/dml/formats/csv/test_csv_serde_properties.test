@@ -206,7 +206,7 @@ has 'skip.footer.line.count' set, which DuckDB can not read or write
 #---------------------------------------------------------------------------
 # tables this extension writes; a table property overrides the SerDe property of the same name
 #---------------------------------------------------------------------------
-foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_opencsv_escape formats_csv_opencsv_escape_same formats_csv_opencsv_backslash formats_csv_opencsv_backslash_text formats_csv_opencsv_nul formats_csv_opencsv_nul_plain formats_csv_wide_escape formats_csv_wide_plain formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
+foreach table formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_opencsv_escape formats_csv_opencsv_escape_same formats_csv_opencsv_backslash formats_csv_opencsv_backslash_text formats_csv_opencsv_nul formats_csv_opencsv_nul_one formats_csv_opencsv_nul_plain formats_csv_wide_escape formats_csv_wide_plain formats_csv_header_ctas formats_csv_bad formats_csv_signed_delim formats_csv_wide formats_csv_nested formats_csv_zeros
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -410,7 +410,7 @@ DROP TABLE my_datalake.default.formats_csv_opencsv_escape_same;
 query II
 EXPLAIN (SQL) SELECT id, val FROM my_datalake.default.fixture_text_opencsv_escape;
 ----
-sql	<REGEX>:.*hive_opencsv_field\(\s*concat_ws\(chr\(0\), id, val, n\),\s*CAST\(1 AS BIGINT\),\s*',',\s*'"',\s*'\\'\) AS val.*\(delim = CAST\('' AS VARCHAR\)\).*
+sql	<REGEX>:.*hive_opencsv_field\(\s*id,\s*CAST\(1 AS BIGINT\),\s*',',\s*'"',\s*'\\'\) AS val.*\(delim = CAST\('\r' AS VARCHAR\)\).*
 
 # a written backslash is doubled, so that it reads back as one; the fixture's files are kept between runs, so this run's
 # rows are told apart by their tag
@@ -511,7 +511,7 @@ SELECT count(*) FROM my_datalake.default.formats_csv_opencsv_backslash;
 query II
 EXPLAIN (SQL) SELECT val FROM my_datalake.default.formats_csv_opencsv_backslash;
 ----
-sql	<REGEX>:.*hive_opencsv_field\(\s*concat_ws\(chr\(0\), id, val, extra\),\s*CAST\(1 AS BIGINT\),\s*',',\s*'"',\s*'\\'\) AS val.*\(delim = CAST\('' AS VARCHAR\)\).*
+sql	<REGEX>:.*hive_opencsv_field\(\s*id,\s*CAST\(1 AS BIGINT\),\s*',',\s*'"',\s*'\\'\) AS val.*\(delim = CAST\('\r' AS VARCHAR\)\).*
 
 # hive_opencsv_field splits a line as the scan does, and a line has no field beyond its last
 query IIII
@@ -564,7 +564,7 @@ statement ok
 CREATE TABLE my_datalake.default.formats_csv_opencsv_nul (id INTEGER, s VARCHAR, tail VARCHAR) WITH (format = 'csv', quote = '"', escape = '\');
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_opencsv_nul VALUES (1, 'a' || chr(0) || 'b', 'tail'), (2, chr(0) || chr(0), ''), (3, chr(0), NULL);
+INSERT INTO my_datalake.default.formats_csv_opencsv_nul VALUES (1, 'a' || chr(0) || 'b', 'tail'), (2, chr(0) || chr(0), ''), (3, chr(0), NULL), (4, repeat(chr(0), 10), repeat('x' || chr(0), 5));
 
 query III
 SELECT id, s = ('a' || chr(0) || 'b'), tail = 'tail' FROM my_datalake.default.formats_csv_opencsv_nul WHERE id = 1;
@@ -572,11 +572,24 @@ SELECT id, s = ('a' || chr(0) || 'b'), tail = 'tail' FROM my_datalake.default.fo
 1	true	true
 
 query III
-SELECT id, replace(s, chr(0), '<0>'), tail FROM my_datalake.default.formats_csv_opencsv_nul ORDER BY id;
+SELECT id, replace(s, chr(0), '<0>'), replace(tail, chr(0), '<0>') FROM my_datalake.default.formats_csv_opencsv_nul ORDER BY id;
 ----
 1	a<0>b	tail
 2	<0><0>	(empty)
 3	<0>	(empty)
+4	<0><0><0><0><0><0><0><0><0><0>	x<0>x<0>x<0>x<0>x<0>
+
+# so is one in a table of one column
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_opencsv_nul_one (s VARCHAR) WITH (format = 'csv', quote = '"', escape = '\');
+
+statement ok
+INSERT INTO my_datalake.default.formats_csv_opencsv_nul_one VALUES ('a' || chr(0) || 'b');
+
+query II
+SELECT s IS NULL, s = ('a' || chr(0) || 'b') FROM my_datalake.default.formats_csv_opencsv_nul_one;
+----
+false	true
 
 statement ok
 CREATE TABLE my_datalake.default.formats_csv_opencsv_nul_plain (id INTEGER, s VARCHAR, tail VARCHAR) WITH (format = 'csv', quote = '"', location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv_nul');
@@ -585,11 +598,12 @@ statement ok
 ALTER TABLE my_datalake.default.formats_csv_opencsv_nul_plain SET ('escapeChar' = '');
 
 query III
-SELECT id, replace(s, chr(0), '<0>'), tail FROM my_datalake.default.formats_csv_opencsv_nul_plain ORDER BY id;
+SELECT id, replace(s, chr(0), '<0>'), replace(tail, chr(0), '<0>') FROM my_datalake.default.formats_csv_opencsv_nul_plain ORDER BY id;
 ----
 1	a<0>b	tail
 2	<0><0>	(empty)
 3	<0>	(empty)
+4	<0><0><0><0><0><0><0><0><0><0>	x<0>x<0>x<0>x<0>x<0>
 
 # a separator of more than one byte can be read, but not written
 statement ok
@@ -880,7 +894,7 @@ DROP TABLE my_datalake.default.formats_json_lines;
 
 endloop
 
-foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_opencsv_escape formats_csv_opencsv_backslash formats_csv_opencsv_backslash_text formats_csv_opencsv_nul formats_csv_opencsv_nul_plain formats_csv_header_ctas
+foreach table formats_csv_two_headers formats_csv_footer formats_csv_byte_delim formats_csv_empty_null formats_csv_backslash_n formats_csv_opencsv formats_csv_opencsv_bool formats_csv_opencsv_escape formats_csv_opencsv_backslash formats_csv_opencsv_backslash_text formats_csv_opencsv_nul formats_csv_opencsv_nul_one formats_csv_opencsv_nul_plain formats_csv_header_ctas
 
 statement ok
 DROP TABLE my_datalake.default.{table};

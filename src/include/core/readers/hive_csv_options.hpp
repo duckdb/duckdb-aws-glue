@@ -48,8 +48,8 @@ struct HiveCSVOptions {
 	string field_escape;
 	//! With serde_fields: a timestamp field is a number of milliseconds, a date field a number of days since the epoch
 	bool epoch_fields = false;
-	//! With serde_fields: read_csv splits each line only at its NUL bytes, and the line is split as OpenCSVSerde
-	//! splits it (SplitOpenCSVLine) with the delimiter, quote and escape character
+	//! With serde_fields: read_csv reads each line as one field, which is split as OpenCSVSerde splits it
+	//! (SplitOpenCSVLine) with the delimiter, quote and escape character
 	bool line_fields = false;
 
 public:

@@ -65,7 +65,7 @@
 #include "duckdb/planner/sql_export_helpers.hpp"
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
-#include "core/readers/opencsv_line.hpp"
+#include "planning/opencsv_line_reader.hpp"
 #include "functions/hive_reader_call.hpp"
 
 namespace duckdb {
@@ -1111,9 +1111,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["header"] = Value::BOOLEAN(false);
 		param_map["skip"] = Value::BIGINT(NumericCast<int64_t>(scan_info->csv_options.skip_lines));
 		if (scan_info->csv_options.line_fields) {
-			// each line split only at its NUL bytes (an empty delimiter is NUL), joined and split again by
+			// '\r' ends a row before it is a delimiter, so each line is one field, NUL bytes and all, split by
 			// FinalizeChunk
-			param_map["delim"] = Value("");
+			param_map["delim"] = Value("\r");
 			param_map["quote"] = Value("");
 			param_map["escape"] = Value("");
 		} else {
@@ -1867,35 +1867,29 @@ static unique_ptr<ParsedExpression> BarredField(const Identifier &name) {
 }
 
 //! A field of the files as the reader call reads it: the column read_csv returns, barred, or with line_fields the field
-//! hive_opencsv_field splits from the line read_csv returns split at its NUL bytes, as InitializeReader reads it
+//! hive_opencsv_field splits from the line read_csv returns as the first column, as FinalizeChunk reads it
 static unique_ptr<ParsedExpression> ReaderField(const HiveScanInfo &info, const Identifier &name, bool barred) {
 	auto &options = info.csv_options;
 	if (!options.line_fields) {
 		return barred ? BarredField(name) : make_uniq<ColumnRefExpression>(name);
 	}
-	vector<unique_ptr<ParsedExpression>> pieces;
+	optional<Identifier> line;
 	int64_t field = 0;
+	int64_t file_column = 0;
 	for (auto &column : info.names) {
 		if (info.GetPartitionKeyIndex(column.GetIdentifierName()) != DConstants::INVALID_INDEX) {
 			continue;
 		}
-		if (StringUtil::CIEquals(column.GetIdentifierName(), name.GetIdentifierName())) {
-			field = NumericCast<int64_t>(pieces.size());
+		if (!line) {
+			line = column;
 		}
-		pieces.push_back(make_uniq<ColumnRefExpression>(column));
-	}
-	unique_ptr<ParsedExpression> line;
-	if (pieces.size() == 1) {
-		line = std::move(pieces[0]);
-	} else {
-		// read_csv pads the columns after a line's last piece with NULL, which concat_ws skips
-		vector<unique_ptr<ParsedExpression>> nul;
-		nul.push_back(ConstantExpression::FromValue(Value::INTEGER(0)));
-		pieces.insert(pieces.begin(), make_uniq<FunctionExpression>(Identifier("chr"), std::move(nul)));
-		line = make_uniq<FunctionExpression>(Identifier("concat_ws"), std::move(pieces));
+		if (StringUtil::CIEquals(column.GetIdentifierName(), name.GetIdentifierName())) {
+			field = file_column;
+		}
+		file_column++;
 	}
 	vector<unique_ptr<ParsedExpression>> children;
-	children.push_back(std::move(line));
+	children.push_back(make_uniq<ColumnRefExpression>(*line));
 	children.push_back(ConstantExpression::FromValue(Value::BIGINT(field)));
 	children.push_back(ConstantExpression::FromValue(Value(options.delimiter)));
 	children.push_back(ConstantExpression::FromValue(Value(options.quote)));

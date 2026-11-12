@@ -162,7 +162,7 @@ jobs:
           - name: parquet
             benchmarks: '^benchmark/([^/]+|pushdown/join_filter_partition_pruning(_two_keys)?|optimizer/(common_subplan|estimate_cardinality_for_join_order_optimizer)|tpcds/sf1/parquet/q64)\.benchmark$'
           - name: csv/json
-            benchmarks: '^benchmark/((optimizer/estimate_cardinality_for_join_order_optimizer|pushdown/join_filter_partition_pruning)_(csv|json)|tpch/sf0\.1/csv/q(09|18|21)|tpcds/sf0\.01/csv/q(14|64|72|78))\.benchmark$'
+            benchmarks: '^benchmark/((optimizer/estimate_cardinality_for_join_order_optimizer|pushdown/join_filter_partition_pruning)_(csv|json)|text/opencsv_[a-z_]+|tpch/sf0\.1/csv/q(09|18|21)|tpcds/sf0\.01/csv/q(14|64|72|78))\.benchmark$'
     env:
       # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
       AWS_EC2_METADATA_DISABLED: "true"
