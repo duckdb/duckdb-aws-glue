@@ -599,6 +599,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
 	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
 	GlueViewNames::PinToCatalog(*check->node, catalog.GetName(), name);
+	GlueViewNames::MapIcebergTables(context, glue_catalog, database_info.name + "." + view_name, *check->node);
 	vector<LogicalType> types;
 	vector<Identifier> names;
 	// the entries the query reads in this catalog, through other views too: the view being replaced is among them

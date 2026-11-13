@@ -1,6 +1,7 @@
 {
 	"description": "A live AWS Glue Data Catalog; credentials from the AWS credential chain (AWS_PROFILE, environment, ...). aws_default_credentials is off: with credentials in the environment the aws extension adds a default secret whose negative match score httpfs's bulk S3 delete can not cast (Information loss on integer cast), so deleting written files fails",
-	"on_init": "SET aws_default_credentials = false; CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');",
+	"on_init": "SET aws_default_credentials = false; CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-west-1');",
+	"skip_error_messages": [],
 	"statically_loaded_extensions": [
 		"core_functions",
 		"parquet",
@@ -25,7 +26,7 @@
 		},
 		{
 			"env_name": "DEFAULT_S3_LOCATION",
-			"env_value": "s3://tom-glue-tables-test-bucket"
+			"env_value": "s3://tom-glue-tables-test-bucket-ci/glue-root"
 		}
 	],
 	"skip_tests": [

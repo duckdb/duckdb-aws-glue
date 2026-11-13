@@ -263,27 +263,6 @@ string HiveScanInfo::Describe() const {
 	return database_name + "." + table_name;
 }
 
-//! Whether a listed object below 'prefix' (the location, with its trailing slash) is a data file. Hive skips _* and .*
-//! files and directories; EMR and S3 tools mark a directory with a <name>_$folder$ object next to it (an object, never
-//! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
-//! file of any format the reader opens
-bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
-	if (!StringUtil::StartsWith(file.path, prefix)) {
-		return false;
-	}
-	auto components = StringUtil::Split(file.path.substr(prefix.size()), '/');
-	for (auto &component : components) {
-		if (component.empty() || component[0] == '_' || component[0] == '.') {
-			return false;
-		}
-	}
-	if (components.empty() || StringUtil::EndsWith(components.back(), "_$folder$")) {
-		return false;
-	}
-	auto size = ListedFileSize(file);
-	return !size.IsValid() || size.GetIndex() > 0;
-}
-
 //! Glue tables only: a hive_scan root has no catalog, and no write through the extension clears its listing
 static bool CacheListings(ClientContext &context, const HiveScanInfo &scan_info) {
 	// a listing kept beyond the transaction may not have been made with the secret the file secret names
@@ -549,6 +528,13 @@ optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t m
 	return optional_idx();
 }
 
+bool HiveMultiFileList::IsRootListedDataFile(const OpenFileInfo &file, const string &root_prefix,
+                                             idx_t comparable_root_size,
+                                             const vector<GluePartitionInfo> &partitions) const {
+	auto owner = OwningPartition(file.path, comparable_root_size);
+	return IsDataFile(file, owner.IsValid() ? partitions[owner.GetIndex()].location : root_prefix);
+}
+
 unordered_set<idx_t> HiveMultiFileList::ReadingSet(const vector<idx_t> &partition_indexes) const {
 	auto partitions = scan_info->Partitions(client_context);
 	for (auto partition_index : partition_indexes) {
@@ -609,7 +595,7 @@ void HiveMultiFileList::AddFile(OpenFileInfo file, idx_t partition_index) const 
 }
 
 optional_idx HiveMultiFileList::RootFileOwner(const OpenFileInfo &file) const {
-	if (!IsDataFile(file, root_prefix)) {
+	if (!IsRootListedDataFile(file, root_prefix, comparable_root_size, *scan_info->Partitions(client_context))) {
 		return optional_idx();
 	}
 	return OwningPartition(file.path, comparable_root_size);
@@ -858,6 +844,7 @@ HiveMultiFileList::ListingSample HiveMultiFileList::SampleListing(const string &
 	                   ->GetListing(client_context, glob, CacheListings(client_context, *scan_info));
 	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
 	BuildPartitionLocations();
+	auto all = scan_info->Partitions(client_context);
 	optional_idx sampled;
 	string sampled_prefix;
 	bool in_sampled = false;
@@ -887,7 +874,7 @@ HiveMultiFileList::ListingSample HiveMultiFileList::SampleListing(const string &
 		}
 		auto comparable_path = ComparableLocation(file.path);
 		boundary = comparable_path;
-		if (!IsDataFile(file, root_prefix)) {
+		if (!IsRootListedDataFile(file, root_prefix, comparable_root_size, *all)) {
 			scanned.push_back(std::move(comparable_path));
 			continue;
 		}
@@ -913,7 +900,6 @@ HiveMultiFileList::ListingSample HiveMultiFileList::SampleListing(const string &
 	}
 	// the pages start at the prefix's first key: a partition below it is complete when its keys all sort before the
 	// boundary, and open when the boundary is inside it (also inside a partition registered within its directory)
-	auto all = scan_info->Partitions(client_context);
 	auto comparable_prefix = ComparableLocation(prefix) + (StringUtil::EndsWith(prefix, "/") ? "/" : "");
 	vector<string> open;
 	for (idx_t i = 0; i < all->size(); i++) {
@@ -1238,6 +1224,11 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["binary_as_string"] = Value::BOOLEAN(!HasBinaryColumn(*scan_info));
 		// writers leave NaN out of a float column's min/max, so without a nan_count the bounds do not cover NaN
 		param_map["can_have_nan"] = Value::BOOLEAN(true);
+		if (scan_info->partition_keys.empty()) {
+			// a small table's footers give the optimizer its row count and column statistics; a partitioned scan
+			// would list its partitions at bind, before a join's filter prunes them
+			param_map["maximum_files_for_stats"] = Value::UBIGINT(HiveFooterStatisticsMaxFiles(context));
+		}
 		break;
 	case HiveFileFormat::CSV:
 		// Hive CSV files carry no schema: the columns are given, by position, and the dialect is the one the table
@@ -1313,6 +1304,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_info->format_statistics = scan_function.statistics_extended;
 	scan_function.statistics_extended = HivePartitionStatistics;
 	// and the row count comes from a sampled file rather than the format's constant
+	scan_info->format_cardinality = scan_function.cardinality;
 	scan_function.cardinality = HiveScanCardinality;
 	scan_function.get_table_entry = HiveScanGetTableEntry;
 	// EXPLAIN (SQL) shows the scan as the standard reader calls that read its files

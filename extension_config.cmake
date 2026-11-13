@@ -30,3 +30,11 @@ if (NOT MINGW)
         SUBMODULES "third_party/avro-c"
     )
 endif()
+
+# Iceberg tables in Glue views are read through an attached Iceberg catalog (ICEBERG_CATALOG); test/sql/cloud_glue
+if (NOT EMSCRIPTEN AND NOT MINGW)
+    duckdb_extension_load(iceberg
+        GIT_URL https://github.com/duckdb/duckdb-iceberg
+        GIT_TAG 7246b00586ad00f1c2a6c2c36490734a326056e9
+    )
+endif()

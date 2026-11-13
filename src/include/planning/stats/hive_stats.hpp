@@ -7,11 +7,13 @@
 
 namespace duckdb {
 
-//! The size the listing reported for a file, when it reported one. S3 and the local filesystem both carry it, so the
-//! bytes of a table are known from the listing alone, without opening anything
-optional_idx ListedFileSize(const OpenFileInfo &file);
-
 class BaseStatistics;
+
+//! The default and the largest value of hive_footer_statistics_max_files
+constexpr idx_t HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES = 16;
+constexpr idx_t HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT = 25;
+//! hive_footer_statistics_max_files, capped at its limit: the reader's maximum_files_for_stats
+idx_t HiveFooterStatisticsMaxFiles(ClientContext &context);
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions read
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p);

@@ -1,10 +1,12 @@
 #include "planning/stats/hive_stats.hpp"
+#include "core/hive_location.hpp"
 
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -19,17 +21,6 @@
 #include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
-
-optional_idx ListedFileSize(const OpenFileInfo &file) {
-	if (!file.extended_info) {
-		return optional_idx();
-	}
-	idx_t size;
-	if (!file.extended_info->TryGetOption("file_size", size)) {
-		return optional_idx();
-	}
-	return size;
-}
 
 //===--------------------------------------------------------------------===//
 // Table sample
@@ -297,6 +288,15 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 	return entry->sample;
 }
 
+idx_t HiveFooterStatisticsMaxFiles(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_footer_statistics_max_files", setting) && !setting.IsNull()) {
+		// SET checks the bound; DBConfig::SetOptionByName does not
+		return MinValue<idx_t>(setting.GetValue<idx_t>(), HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT);
+	}
+	return HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES;
+}
+
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
 //! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
 //! same, and csv and json are estimated at one row.
@@ -308,6 +308,10 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	auto partitions = info.partition_keys.empty() ? idx_t(1) : hive_list.PartitionIndexes()->size();
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
+	}
+	if (!bind_data.union_readers.empty() && info.format_cardinality) {
+		// the reader opened every file for its footer at bind (maximum_files_for_stats): their row counts
+		return info.format_cardinality(context, bind_data_p);
 	}
 	auto sample_ptr = SampleTable(context, bind_data, hive_list);
 	auto &sample = *sample_ptr;
@@ -392,7 +396,7 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 		}
 	}
 	if (key_index == DConstants::INVALID_INDEX) {
-		// a data column, a struct field or a virtual column
+		// a data column, a struct field or a virtual column: the format merges the footers it read at bind
 		return info.format_statistics ? info.format_statistics(context, input) : nullptr;
 	}
 	// off by default: key statistics can cost a join on the key its run-time partition pruning

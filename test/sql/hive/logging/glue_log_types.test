@@ -78,8 +78,27 @@ GROUP BY ALL ORDER BY operation;
 AWSGlue.GetPartitions	OK_200	true
 AWSGlue.GetTable	OK_200	true
 
-# each scan of a query has its own scan_id, numbered from 1 in every query; the second scan of a table reuses its
-# sample
+# a small unpartitioned parquet table is counted from the footers its scan reads while planning: neither scan samples it
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM glog_cold.default.glog_flat a JOIN glog_cold.default.glog_flat b USING (id);
+----
+5
+
+query III
+SELECT scan_id, count(*) FILTER (event = 'listing'), count(*) FILTER (event = 'sample')
+FROM duckdb_logs_parsed('GlueScan') GROUP BY scan_id ORDER BY scan_id;
+----
+1	1	0
+2	1	0
+
+# without footer statistics each scan of a query has its own scan_id, numbered from 1 in every query; the second scan
+# of a table reuses its sample
+statement ok
+SET hive_footer_statistics_max_files = 0;
+
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -131,6 +150,9 @@ SELECT event, partitions, partitions_read, listings, files, detail FROM duckdb_l
 ----
 listing	NULL	NULL	NULL	1	table
 sample	NULL	NULL	NULL	1	NULL
+
+statement ok
+RESET hive_footer_statistics_max_files;
 
 # an avro table is not sampled: its sample lists nothing
 statement ok

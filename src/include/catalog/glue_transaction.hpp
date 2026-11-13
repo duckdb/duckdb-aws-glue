@@ -1,8 +1,10 @@
 #pragma once
 
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
@@ -16,6 +18,8 @@
 namespace duckdb {
 class GlueCatalog;
 class GlueSchemaEntry;
+class GlueView;
+class ViewCatalogEntry;
 
 enum class GlueTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -185,6 +189,10 @@ public:
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
 	//! (so a prepared statement's two binds share it).
 	shared_ptr<GlueTransactionCache> cache;
+	//! Glue views with their Iceberg tables bound in the catalog the attach option ICEBERG_CATALOG names, per alias
+	//! mapping and Iceberg catalog; null when the view reads no Iceberg table
+	mutex iceberg_views_lock;
+	reference_map_t<GlueView, map<string, unique_ptr<ViewCatalogEntry>>> iceberg_views;
 
 private:
 	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone

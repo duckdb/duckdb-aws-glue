@@ -24,6 +24,7 @@ Attach options:
 | `DEFAULT_LOCATION` | optional S3 prefix for new databases and for tables created without an explicit location (takes precedence over the Glue database LocationUri) |
 | `DEFAULT_SCHEMA`   | Glue database to use as the default schema                                   |
 | `READ_ONLY`        | refuse everything that changes the catalog: DML, DDL and the mutating `glue_*` partition functions |
+| `ICEBERG_CATALOG`  | an attached Iceberg catalog over the same Glue catalog; Glue views read their Iceberg tables from it (see [Views](#views)) |
 
 ## Reading
 
@@ -161,11 +162,22 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
   that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
-  the listing. Avro tables are not measured, so planning them lists nothing.
+  the listing. Avro tables are not measured, so planning them lists nothing. An unpartitioned parquet table of at
+  most `hive_footer_statistics_max_files` (default 16, at most 25) files is counted instead: its row count is the
+  sum of the row counts in the footers of all its files.
 - Partition keys have no optimizer statistics by default, as for `read_parquet` with hive partitioning. With
   `SET glue_enable_partition_key_statistics = true` they get the bounds and exact distinct count of the partitions a
   scan reads: the group estimate on a key is exact, but the optimizer can then push aggregates below a join on the
   key and lose that join's run-time partition pruning.
+- A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
+  gets its minimum, maximum and NULLs merged from the footers of all of them, which DuckDB's parquet reader reads
+  when the scan binds (its `maximum_files_for_stats`), so a `DESCRIBE` of such a table lists the table and reads its
+  footers too. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file
+  with rows lacks the column, stores it as another type than the table declares, or, in a table of several files,
+  has statistics for it that DuckDB cannot read; so do the data columns of partitioned, csv, json and avro tables. A
+  table of one file whose statistics DuckDB cannot read fails planning, as `read_parquet` of that file does. An empty
+  file is skipped. The optimizer prunes on these statistics and orders joins by them: the minimum and maximum of a
+  dimension's key let it see how much a join on that key keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
@@ -296,6 +308,21 @@ their codec themselves.
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
 
+With `SET glue_store_written_files = true`, every `INSERT` or `CREATE TABLE ... AS` into a Hive table adds the data
+files it wrote to the temporary table `temp.main.glue_written_files`, one row per file with the `query_id` of the
+statement, the `table` (`database.table`) and the `file_path`, for example to give a manifest of what a query wrote. The
+table is created by the first write that stores its files. Its rows are added once the write's partitions are
+registered, in the write's transaction, so a write that fails adds none. Like any temporary table, it belongs to the
+connection.
+
+```sql
+SET glue_store_written_files = true;
+INSERT INTO lake.db.events SELECT ...;
+SELECT file_path FROM temp.main.glue_written_files WHERE query_id = (SELECT max(query_id) FROM temp.main.glue_written_files);
+-- s3://bucket/db/events/day=2026-11-09/<write id>_<file id>.snappy.parquet
+-- s3://bucket/db/events/day=2026-11-10/<write id>_<file id>.snappy.parquet
+```
+
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
 of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
@@ -330,6 +357,18 @@ this connection's cache: a write through it, a rollback, or DETACH.
   it applies to every connection and `SET SESSION` is refused), views can also read tables of catalogs of those types, stored as `"external:<type>:<alias>".<schema>.<table>` and read wherever a
   catalog of that type is attached under that alias, never from one in memory, temporary, system or attached hidden. A
   bare table name in a body written to Glue by other means is read from the view's own Glue database.
+- A view can join Hive and Iceberg tables of its Glue catalog. Iceberg tables are read through an existing Iceberg attachment, named by the Glue attach option `ICEBERG_CATALOG`:
+
+  ```sql
+  ATTACH '123456789012' AS lake (TYPE GLUE, ICEBERG_CATALOG 'lake_ice');
+  ATTACH '123456789012' AS lake_ice (TYPE ICEBERG, ENDPOINT_TYPE GLUE);
+  CREATE VIEW lake.sales.orders_by_customer AS
+  SELECT c.name, o.amount FROM lake.sales.customers c JOIN lake_ice.sales.orders o ON c.id = o.id;
+  ```
+
+  `ViewExpandedText`, the executable view SQL, stores both tables by their Glue names (`sales.customers`, `sales.orders`). `ViewOriginalText` keeps the submitted SQL, including its attachment aliases. When the view is read, its Iceberg references are mapped to the attachment named by `ICEBERG_CATALOG`. Direct Iceberg reads through `lake` remain unsupported; use the Iceberg attachment.
+
+  The named attachment must have catalog type `iceberg`. Its warehouse must match the Glue attachment path or known catalog ID, and each mapped table must be registered as Iceberg in Glue. Configure both attachments for the same region and endpoint; these are not verified by the warehouse check.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
