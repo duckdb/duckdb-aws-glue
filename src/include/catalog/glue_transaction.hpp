@@ -7,10 +7,12 @@
 #include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_entry_set.hpp"
 #include "execution/glue_hive_write.hpp"
 
 #include <functional>
@@ -68,16 +70,27 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
+		listed_sets.clear();
 	}
 	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
 	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
 	idx_t Id() const {
 		return id;
 	}
-
-private:
+	//! Whether the entry set with this id was listed from Glue under this cache; the listing holds until the cache is
+	//! cleared
+	bool HasListed(glue_entry_set_id_t set_id) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		return listed_sets.count(set_id) > 0;
+	}
+	void MarkListed(glue_entry_set_id_t set_id) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		listed_sets.insert(set_id);
+	}
+	//! Monotonic ids, never reused: for cache instances and for the entry sets they track
 	static idx_t NextId();
 
+private:
 	//! One cached value and the lock that guards loading it. The lock is per entry so the Glue calls for
 	//! different tables do not wait on each other (resolving N tables runs their fetches in parallel).
 	template <class T>
@@ -112,6 +125,7 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
+	unordered_set<glue_entry_set_id_t> listed_sets DUCKDB_GUARDED_BY(lock);
 	const idx_t id = NextId();
 };
 

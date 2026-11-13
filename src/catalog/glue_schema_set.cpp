@@ -5,12 +5,13 @@
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
 
-GlueSchemaSet::GlueSchemaSet(GlueCatalog &catalog) : catalog(catalog) {
+GlueSchemaSet::GlueSchemaSet(GlueCatalog &catalog) : catalog(catalog), id(GlueTransactionCache::NextId()) {
 }
 
 unique_ptr<GlueSchemaEntry> GlueSchemaSet::CreateSchemaEntry(const GlueDatabaseInfo &database, bool loaded) {
@@ -21,12 +22,14 @@ unique_ptr<GlueSchemaEntry> GlueSchemaSet::CreateSchemaEntry(const GlueDatabaseI
 	return make_uniq<GlueSchemaEntry>(catalog, info, database, loaded);
 }
 
-void GlueSchemaSet::LoadEntries(ClientContext &context) {
-	if (is_loaded) {
+void GlueSchemaSet::LoadEntries(ClientContext &context, GlueTransactionCache &cache) {
+	if (cache.HasListed(id)) {
 		return;
 	}
 	auto databases = GlueAPI::GetDatabases(context, catalog);
+	case_insensitive_set_t listed;
 	for (auto &database : databases) {
+		listed.insert(database.name);
 		auto entry = entries.find(database.name);
 		if (entry != entries.end()) {
 			// already loaded through a direct lookup, possibly from a table lookup that only knew the name
@@ -35,7 +38,11 @@ void GlueSchemaSet::LoadEntries(ClientContext &context) {
 		}
 		entries.emplace(database.name, CreateSchemaEntry(database));
 	}
-	is_loaded = true;
+	// what Glue no longer returns was dropped by another client
+	for (auto &name : UnlistedNames(entries, listed)) {
+		RetireEntry(name);
+	}
+	cache.MarkListed(id);
 }
 
 optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const string &name) {
@@ -79,9 +86,9 @@ optional_ptr<CatalogEntry> GlueSchemaSet::AddEntryIfAbsent(unique_ptr<GlueSchema
 }
 
 void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
-	Transaction::Get(context, catalog);
+	auto &transaction = GlueTransaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
-	LoadEntries(context);
+	LoadEntries(context, *transaction.cache);
 	for (auto &entry : entries) {
 		callback(*entry.second);
 	}

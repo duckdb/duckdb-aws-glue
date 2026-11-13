@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/drop_schema/list_tables_of_dropped_database.test
-# description: Listing the tables of a Glue database that was dropped after the databases were listed finds none
+# description: Listing the tables of a Glue database that was dropped after the databases were listed finds none, and the next database listing no longer knows the database
 # group: [drop_schema]
 
 require httpfs
@@ -46,10 +46,11 @@ SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND sch
 ----
 0
 
+# SHOW ALL TABLES lists the databases again, which drops the stale one
 statement ok
 SHOW ALL TABLES;
 
-query I
+statement error
 SELECT count(*) FROM (SHOW TABLES FROM my_datalake.ddl_dropped_db);
 ----
-0
+No catalog + schema named "my_datalake.ddl_dropped_db" found

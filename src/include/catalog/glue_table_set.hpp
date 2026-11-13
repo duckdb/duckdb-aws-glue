@@ -6,6 +6,7 @@
 #include "duckdb/common/mutex.hpp"
 
 #include "core/glue_info.hpp"
+#include "catalog/glue_entry_set.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_view.hpp"
 
@@ -23,8 +24,10 @@ public:
 	//! The entry with this name whatever its type (callers check entry->type against what they need), replaced when
 	//! Glue holds another version of it and gone when Glue no longer has it
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup);
-	//! The entries of the given type (TABLE_ENTRY or VIEW_ENTRY)
+	//! The entries of the given type (TABLE_ENTRY or VIEW_ENTRY), listed from Glue once per metadata cache
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
+	//! The entries already in the set, without listing Glue
+	void ScanLoaded(const std::function<void(CatalogEntry &)> &callback);
 	//! Insert a (new) entry into the set, replacing any existing entry with the same name
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
 	void RemoveEntry(const string &name);
@@ -35,7 +38,9 @@ public:
 	static const GlueTableInfo &GetTableInfo(const CatalogEntry &entry);
 
 private:
-	void LoadEntries(ClientContext &context);
+	//! Lists the database from Glue unless the transaction's cache has this set listed, and merges the listing into
+	//! entries. Called with entry_lock held.
+	void LoadEntries(ClientContext &context, GlueTransactionCache &cache);
 	//! One first-page GetTables warming the metadata cache, instead of a GetTable per table. Only warms the
 	//! cache: entries stay per referenced table and Scan still enumerates, so neither outlives the page's truth.
 	void BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache);
@@ -50,7 +55,7 @@ private:
 	GlueCatalog &catalog;
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
-	bool is_loaded = false;
+	const glue_entry_set_id_t id;
 	//! Direct-lookup round trips since the last bulk fetch: bulk pays off from the second one on
 	idx_t direct_lookups = 0;
 	//! The GlueTransactionCache::Id() the last successful bulk fetch warmed (0 = none yet)
