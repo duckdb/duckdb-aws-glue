@@ -65,6 +65,8 @@ private:
 
 //! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info);
+//! Those partitions if a scan of the table fetched them in this query, else null: Glue is not asked
+shared_ptr<const vector<GluePartitionInfo>> FindTablePartitions(ClientContext &context, const HiveScanInfo &info);
 //! Drop the connection's cached directory listings
 void ClearHiveListingCache(ClientContext &context);
 

@@ -191,7 +191,7 @@ struct GluePartitionInfo {
 	vector<string> values;
 	string location;
 	//! The partition's own StorageDescriptor.InputFormat and SerdeInfo, which Hive reads its files with and which can
-	//! differ from the table's; empty when not known (a hive_scan, a deserialized plan)
+	//! differ from the table's; empty when not known (a hive_scan, a plan deserialized in another query)
 	string input_format;
 	string serde_library;
 	unordered_map<string, string> serde_parameters;

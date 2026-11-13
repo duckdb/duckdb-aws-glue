@@ -113,6 +113,18 @@ SELECT count(*) FROM my_datalake.default.pl_events WHERE dt = 'shared';
 ----
 <REGEX>:.*Partitions \[c0\] and \[shared\] of Hive table .* are registered at the same location.*
 
+# a deserialized plan refuses it too: it holds the table's partitions as the scan it copies does
+statement ok
+SET debug_verify_serializer = true;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pl_events WHERE dt = 'shared';
+----
+<REGEX>:.*Partitions \[c0\] and \[shared\] of Hive table .* are registered at the same location.*
+
+statement ok
+SET debug_verify_serializer = false;
+
 statement ok
 RESET hive_partition_listing_threshold;
 

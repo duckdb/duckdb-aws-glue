@@ -113,9 +113,13 @@ bool HiveScanInfo::PartitionsLoaded() const {
 }
 
 void HiveScanInfo::SetPartitions(vector<GluePartitionInfo> partitions_p) {
+	SetPartitions(make_shared_ptr<const vector<GluePartitionInfo>>(std::move(partitions_p)));
+}
+
+void HiveScanInfo::SetPartitions(shared_ptr<const vector<GluePartitionInfo>> partitions_p) {
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
 	D_ASSERT(!partitions);
-	partitions = make_shared_ptr<const vector<GluePartitionInfo>>(std::move(partitions_p));
+	partitions = std::move(partitions_p);
 }
 
 idx_t HiveScanInfo::GetPartitionIndexOfFile(const string &path) const {
@@ -897,6 +901,9 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WritePropertyWithDefault<string>(116, "table", info.table ? info.table_name : string());
 	// a name only: outside the transaction that created the secret, the open fails rather than reading by path
 	serializer.WritePropertyWithDefault<string>(117, "file_secret", info.file_secret);
+	// where the table's partition list holds the partitions written above
+	serializer.WritePropertyWithDefault<vector<idx_t>>(118, "partition_indexes",
+	                                                   info.table ? *indexes : vector<idx_t>());
 }
 
 //! The Glue table a deserialized scan was bound to, while the catalog holds it as the scan read it: the same location
@@ -950,8 +957,31 @@ static void RestoreScanTable(ClientContext &context, HiveScanInfo &info, const s
 	info.table = &table;
 }
 
-//! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
-//! that filters already pruned are not brought back
+//! The query's partition list for a deserialized scan's table, if the scan's partitions are at the positions it wrote
+static shared_ptr<const vector<GluePartitionInfo>> FindScanPartitions(ClientContext &context, const HiveScanInfo &info,
+                                                                      const vector<idx_t> &indexes,
+                                                                      const vector<vector<string>> &partitions,
+                                                                      const vector<string> &locations) {
+	if (!info.table || indexes.size() != partitions.size()) {
+		return nullptr;
+	}
+	auto table_partitions = FindTablePartitions(context, info);
+	if (!table_partitions) {
+		return nullptr;
+	}
+	for (idx_t i = 0; i < indexes.size(); i++) {
+		if (indexes[i] >= table_partitions->size()) {
+			return nullptr;
+		}
+		auto &partition = (*table_partitions)[indexes[i]];
+		if (partition.values != partitions[i] || partition.location != locations[i]) {
+			return nullptr;
+		}
+	}
+	return table_partitions;
+}
+
+//! Bind the scan again from what HiveScanSerialize wrote: it reads the partitions the plan read, not the pruned ones
 static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
 	auto &context = deserializer.Get<ClientContext &>();
 	auto info = make_shared_ptr<HiveScanInfo>();
@@ -972,21 +1002,32 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	auto database_name = deserializer.ReadPropertyWithDefault<string>(115, "database");
 	auto table_name = deserializer.ReadPropertyWithDefault<string>(116, "table");
 	info->file_secret = deserializer.ReadPropertyWithDefault<string>(117, "file_secret");
+	auto partition_indexes = deserializer.ReadPropertyWithDefault<vector<idx_t>>(118, "partition_indexes");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
 	}
-	vector<GluePartitionInfo> partition_infos;
-	for (idx_t i = 0; i < partitions.size(); i++) {
-		GluePartitionInfo partition;
-		partition.values = std::move(partitions[i]);
-		partition.location = std::move(locations[i]);
-		partition_infos.push_back(std::move(partition));
-	}
-	info->SetPartitions(std::move(partition_infos));
 	RestoreScanTable(context, *info, catalog_name, database_name, table_name);
+	auto table_partitions = FindScanPartitions(context, *info, partition_indexes, partitions, locations);
+	if (table_partitions) {
+		info->SetPartitions(table_partitions);
+	} else {
+		vector<GluePartitionInfo> partition_infos;
+		for (idx_t i = 0; i < partitions.size(); i++) {
+			GluePartitionInfo partition;
+			partition.values = std::move(partitions[i]);
+			partition.location = std::move(locations[i]);
+			partition_infos.push_back(std::move(partition));
+		}
+		info->SetPartitions(std::move(partition_infos));
+	}
 	unique_ptr<FunctionData> bind_data;
-	function = BoundTableFunction(BindHiveScan(context, std::move(info), bind_data));
+	function = BoundTableFunction(BindHiveScan(context, info, bind_data));
+	if (table_partitions) {
+		// of the table's partitions, the ones the plan reads
+		bind_data->Cast<MultiFileBindData>().file_list =
+		    make_shared_ptr<HiveMultiFileList>(context, std::move(info), std::move(partition_indexes));
+	}
 	return bind_data;
 }
 

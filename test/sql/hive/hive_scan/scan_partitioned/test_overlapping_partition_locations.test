@@ -61,6 +61,24 @@ SELECT id FROM my_datalake.default.overlap_orders WHERE dt = 'outer';
 ----
 1
 
+# nor does a copy of the pruned scan, which the window self join rewrite reads the table through
+query II
+SELECT id, count(*) OVER (PARTITION BY dt) FROM my_datalake.default.overlap_orders WHERE dt = 'outer';
+----
+1	1
+
+# nor does a deserialized plan
+statement ok
+SET debug_verify_serializer = true;
+
+query I
+SELECT id FROM my_datalake.default.overlap_orders WHERE dt = 'outer';
+----
+1
+
+statement ok
+SET debug_verify_serializer = false;
+
 query I
 SELECT id FROM my_datalake.default.overlap_orders WHERE dt = 'inner';
 ----

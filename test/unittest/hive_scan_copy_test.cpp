@@ -1,7 +1,9 @@
+#include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "glue_test_util.hpp"
+#include "planning/hive_multi_file_reader.hpp"
 
 using namespace duckdb;
 
@@ -19,6 +21,12 @@ static vector<reference<LogicalGet>> Scans(LogicalOperator &plan) {
 	vector<reference<LogicalGet>> scans;
 	CollectScans(plan, scans);
 	return scans;
+}
+
+//! How many partitions the scan's info holds: the table's, or only those the scan reads
+static idx_t HeldPartitions(ClientContext &context, LogicalGet &get) {
+	auto &list = get.bind_data->Cast<MultiFileBindData>().file_list->Cast<HiveMultiFileList>();
+	return list.ScanInfo().Partitions(context)->size();
 }
 
 TEST_CASE("A copy of a plan reports the Glue table of its hive scans", "[hive_scan][glue_catalog]") {
@@ -57,6 +65,15 @@ TEST_CASE("A copy of a plan reports the Glue table of its hive scans", "[hive_sc
 	auto pruned = Scans(*pruned_copy);
 	REQUIRE(pruned.size() == 1);
 	REQUIRE(pruned[0].get().GetTable().get() == scanned.get());
+	REQUIRE(HeldPartitions(*con.context, pruned[0]) == 2);
+
+	// after another statement the query's partition list is gone: the copy still binds and reports its table
+	Run(con, "SELECT 1");
+	auto later_copy = pruned_plan->Copy(*con.context);
+	auto later = Scans(*later_copy);
+	REQUIRE(later.size() == 1);
+	REQUIRE(later[0].get().GetTable().get() == scanned.get());
+	REQUIRE(HeldPartitions(*con.context, later[0]) == 1);
 	Run(con, "COMMIT");
 
 	// a hive_scan() call reads a location, not a table: its copy has no table either

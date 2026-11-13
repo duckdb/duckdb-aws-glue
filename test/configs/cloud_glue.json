@@ -36,6 +36,7 @@
 				"test/sql/hive/dml/insert/insert_into_bucketed_table.test",
 				"test/sql/hive/dml/formats/csv/test_csv_serde_properties.test",
 				"test/sql/hive/hive_scan/scan_partitioned/test_partition_storage_format.test",
+				"test/sql/hive/hive_scan/scan_partitioned/test_partition_storage_plan_copy.test",
 				"test/sql/hive/hive_scan/unreadable_tables.test",
 				"test/sql/hive/functions/glue_get_partition_response.test",
 				"test/sql/hive/ddl/create_table/create_table_struct_field_names.test",
