@@ -78,6 +78,13 @@ FROM glue_get_table_response('lake.cloud_glue_iceberg_views.orders_by_customer')
 ----
 false	true
 
+# the stored column types are Hive types
+query TT
+SELECT response.StorageDescriptor.Columns[1].Type::VARCHAR, response.StorageDescriptor.Columns[2].Type::VARCHAR
+FROM glue_get_table_response('lake.cloud_glue_iceberg_views.orders_by_customer');
+----
+string	decimal(38,0)
+
 query TT
 SELECT column_name, data_type FROM duckdb_columns()
 WHERE database_name = 'lake' AND schema_name = 'cloud_glue_iceberg_views' AND table_name = 'orders_by_customer'

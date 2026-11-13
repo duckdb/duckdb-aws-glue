@@ -26,6 +26,9 @@ statement ok
 DROP VIEW IF EXISTS my_datalake.default.gr_defer;
 
 statement ok
+DROP VIEW IF EXISTS my_datalake.default.gr_all;
+
+statement ok
 DROP TABLE IF EXISTS my_datalake.default.gr_orders;
 
 statement ok
@@ -59,6 +62,129 @@ SELECT response.ViewOriginalText, response.ViewExpandedText, response.StorageDes
 FROM glue_get_table_response('my_datalake.default.gr_view');
 ----
 SELECT id FROM gr_orders	SELECT id FROM "default".gr_orders	[{'Name': id, 'Type': int}]
+
+# CREATE OR REPLACE rewrites the column types
+statement ok
+CREATE OR REPLACE VIEW my_datalake.default.gr_view AS SELECT sum(id) AS id FROM gr_orders;
+
+query I
+SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response('my_datalake.default.gr_view');
+----
+[{'Name': id, 'Type': 'decimal(38,0)'}]
+
+# a column stores the closest Hive type other engines read, else string
+statement ok
+CREATE VIEW my_datalake.default.gr_all AS
+SELECT true AS b, 1::TINYINT AS ti, 1::SMALLINT AS si, 1::INTEGER AS i, 1::BIGINT AS bi, 1::UTINYINT AS uti,
+    1::USMALLINT AS usi, 1::UINTEGER AS ui, 1::UBIGINT AS ubi, sum(id) AS h, 1::UHUGEINT AS uh, 1.5::FLOAT AS f,
+    1.5::DOUBLE AS d, 1.5::DECIMAL(18,3) AS dec, 'a' AS v, '\x01'::BLOB AS bl, DATE '2020-01-02' AS dt,
+    TIMESTAMP '2020-01-02 03:04:05' AS ts, TIMESTAMP_S '2020-01-02 03:04:05' AS ts_s,
+    TIMESTAMP_MS '2020-01-02 03:04:05' AS ts_ms, TIMESTAMP_NS '2020-01-02 03:04:05' AS ts_ns,
+    TIMESTAMPTZ '2020-01-02 03:04:05+00' AS tz, '2020-01-02 03:04:05+00'::TIMESTAMPTZ_NS AS tz_ns,
+    TIME '03:04:05' AS tm, '03:04:05'::TIME_NS AS tm_ns, '03:04:05+01'::TIMETZ AS tmtz, INTERVAL 1 DAY AS iv,
+    '00000000-0000-0000-0000-000000000001'::UUID AS u, 'a'::ENUM('a', 'b') AS e, '101'::BIT AS bit,
+    1::BIGNUM AS bn, union_value(a := 1)::UNION(a INTEGER, b VARCHAR) AS un, NULL AS n, [1::UBIGINT] AS l,
+    [1, 2]::INTEGER[2] AS fa, MAP {'k': 1} AS m, MAP {[1]: 'a'} AS mk, {'a': 1, 't': TIME '03:04:05'} AS st,
+    {'a b': 1} AS odd, {'1': 1} AS digit, [{'it''s': 1}] AS nested, MAP {'k': {'x y': 1}} AS ms, row(1, 'a') AS r,
+    1::VARIANT AS va, struct_pack() AS es, {'a': {'b': 1}} AS ss, [{'a': 1}] AS ls, MAP {'k': {'x': 1}} AS mv
+FROM gr_orders;
+
+query II
+SELECT c.Name, c.Type
+FROM (SELECT unnest(response.StorageDescriptor.Columns::STRUCT("Name" VARCHAR, "Type" VARCHAR)[]) AS c
+      FROM glue_get_table_response('my_datalake.default.gr_all'));
+----
+b	boolean
+ti	tinyint
+si	smallint
+i	int
+bi	bigint
+uti	smallint
+usi	int
+ui	bigint
+ubi	decimal(20,0)
+h	decimal(38,0)
+uh	decimal(38,0)
+f	float
+d	double
+dec	decimal(18,3)
+v	string
+bl	binary
+dt	date
+ts	timestamp
+ts_s	timestamp
+ts_ms	timestamp
+ts_ns	timestamp
+tz	timestamp
+tz_ns	timestamp
+tm	string
+tm_ns	string
+tmtz	string
+iv	string
+u	string
+e	string
+bit	string
+bn	string
+un	string
+n	string
+l	array<decimal(20,0)>
+fa	array<int>
+m	map<string,int>
+mk	string
+st	struct<a:int,t:string>
+odd	string
+digit	string
+nested	array<string>
+ms	map<string,string>
+r	string
+va	string
+es	string
+ss	struct<a:struct<b:int>>
+ls	array<struct<a:int>>
+mv	map<string,struct<x:int>>
+
+statement ok
+CREATE VIEW memory.main.gr_all_direct AS
+SELECT true AS b, 1::TINYINT AS ti, 1::SMALLINT AS si, 1::INTEGER AS i, 1::BIGINT AS bi, 1::UTINYINT AS uti,
+    1::USMALLINT AS usi, 1::UINTEGER AS ui, 1::UBIGINT AS ubi, sum(id) AS h, 1::UHUGEINT AS uh, 1.5::FLOAT AS f,
+    1.5::DOUBLE AS d, 1.5::DECIMAL(18,3) AS dec, 'a' AS v, '\x01'::BLOB AS bl, DATE '2020-01-02' AS dt,
+    TIMESTAMP '2020-01-02 03:04:05' AS ts, TIMESTAMP_S '2020-01-02 03:04:05' AS ts_s,
+    TIMESTAMP_MS '2020-01-02 03:04:05' AS ts_ms, TIMESTAMP_NS '2020-01-02 03:04:05' AS ts_ns,
+    TIMESTAMPTZ '2020-01-02 03:04:05+00' AS tz, '2020-01-02 03:04:05+00'::TIMESTAMPTZ_NS AS tz_ns,
+    TIME '03:04:05' AS tm, '03:04:05'::TIME_NS AS tm_ns, '03:04:05+01'::TIMETZ AS tmtz, INTERVAL 1 DAY AS iv,
+    '00000000-0000-0000-0000-000000000001'::UUID AS u, 'a'::ENUM('a', 'b') AS e, '101'::BIT AS bit,
+    1::BIGNUM AS bn, union_value(a := 1)::UNION(a INTEGER, b VARCHAR) AS un, NULL AS n, [1::UBIGINT] AS l,
+    [1, 2]::INTEGER[2] AS fa, MAP {'k': 1} AS m, MAP {[1]: 'a'} AS mk, {'a': 1, 't': TIME '03:04:05'} AS st,
+    {'a b': 1} AS odd, {'1': 1} AS digit, [{'it''s': 1}] AS nested, MAP {'k': {'x y': 1}} AS ms, row(1, 'a') AS r,
+    1::VARIANT AS va, struct_pack() AS es, {'a': {'b': 1}} AS ss, [{'a': 1}] AS ls, MAP {'k': {'x': 1}} AS mv
+FROM my_datalake.default.gr_orders;
+
+# DuckDB binds the view's SQL, so after a fresh attach the view has the types and values of its query
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query III
+SELECT (SELECT list((column_name, data_type) ORDER BY column_index) FROM duckdb_columns()
+        WHERE database_name = 'my_datalake' AND table_name = 'gr_all') =
+       (SELECT list((column_name, data_type) ORDER BY column_index) FROM duckdb_columns()
+        WHERE database_name = 'memory' AND table_name = 'gr_all_direct'),
+       (SELECT count(*) FROM (FROM my_datalake.default.gr_all EXCEPT ALL FROM memory.main.gr_all_direct)),
+       (SELECT count(*) FROM (FROM memory.main.gr_all_direct EXCEPT ALL FROM my_datalake.default.gr_all));
+----
+true	0	0
+
+statement ok
+DROP VIEW my_datalake.default.gr_all;
+
+statement ok
+DROP VIEW memory.main.gr_all_direct;
 
 # nothing is written for a refused view
 statement error
