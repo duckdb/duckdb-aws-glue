@@ -150,4 +150,11 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 	return entry->partitions;
 }
 
+shared_ptr<const vector<GluePartitionInfo>> FindTablePartitions(ClientContext &context, const HiveScanInfo &info) {
+	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
+	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	return entry->partitions;
+}
+
 } // namespace duckdb

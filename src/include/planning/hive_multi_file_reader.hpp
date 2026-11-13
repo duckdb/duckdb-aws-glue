@@ -83,6 +83,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+	void SetPartitions(shared_ptr<const vector<GluePartitionInfo>> partitions_p);
 
 private:
 	mutable annotated_mutex partitions_lock;
