@@ -1,0 +1,163 @@
+# name: test/sql/hive/functions/glue_functions_nested_names.test
+# description: the glue functions and the Hive partition DDL refuse a table name with a nested schema path, as a query does; a quoted name with a dot is one database
+# group: [functions]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.nested_names_db CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake."nested_names.db" CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.nested_names_db;
+
+statement ok
+CREATE TABLE my_datalake.nested_names_db.pt (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL glue_add_partition('my_datalake.nested_names_db.pt', {dt: 'keep'});
+
+# no part of the name is dropped: the path is refused, whether or not its first schema exists
+statement error
+SELECT * FROM glue_partitions('my_datalake.zz.nested_names_db.pt');
+----
+does not support nested schemas: zz.nested_names_db
+
+statement error
+SELECT * FROM glue_partitions('my_datalake.default.nested_names_db.pt');
+----
+does not support nested schemas
+
+statement error
+SELECT * FROM glue_get_table_response('my_datalake.zz.nested_names_db.pt');
+----
+does not support nested schemas
+
+statement error
+SELECT * FROM glue_get_partition_response('my_datalake.zz.nested_names_db.pt', {dt: 'keep'});
+----
+does not support nested schemas
+
+statement error
+CALL glue_add_partition('my_datalake.zz.nested_names_db.pt', {dt: 'added'});
+----
+does not support nested schemas
+
+statement error
+CALL glue_drop_partition('my_datalake.zz.nested_names_db.pt', {dt: 'keep'});
+----
+does not support nested schemas
+
+statement error
+CALL glue_rename_partition('my_datalake.zz.nested_names_db.pt', {dt: 'keep'}, {dt: 'renamed'});
+----
+does not support nested schemas
+
+statement error
+CALL glue_set_partition_location('my_datalake.zz.nested_names_db.pt', {dt: 'keep'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/nested_names_moved');
+----
+does not support nested schemas
+
+statement error
+CALL glue_set_table_location('my_datalake.zz.nested_names_db.pt', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/nested_names_moved');
+----
+does not support nested schemas
+
+statement error
+CALL glue_replace_columns('my_datalake.zz.nested_names_db.pt', {id: 'BIGINT', extra: 'VARCHAR'});
+----
+does not support nested schemas
+
+statement error
+CALL glue_repair_table('my_datalake.zz.nested_names_db.pt');
+----
+does not support nested schemas
+
+statement error
+CALL glue_alter_table('my_datalake.zz.nested_names_db.pt',
+    [{action: 'add', if_not_exists: false, if_exists: NULL::BOOLEAN,
+      partition: [{key: 'dt', value: 'added'}],
+      new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: NULL::VARCHAR}]);
+----
+does not support nested schemas
+
+# the SQL form passes the table name as written
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement error
+ALTER TABLE my_datalake.zz.nested_names_db.pt ADD PARTITION (dt = 'added');
+----
+does not support nested schemas
+
+statement error
+ALTER TABLE my_datalake.zz.nested_names_db.pt DROP PARTITION (dt = 'keep');
+----
+does not support nested schemas
+
+statement error
+ALTER TABLE my_datalake.zz.nested_names_db.pt SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/nested_names_moved';
+----
+does not support nested schemas
+
+# the table is as it was
+query II
+SELECT dt, location FROM glue_partitions('my_datalake.nested_names_db.pt');
+----
+keep	{DEFAULT_S3_LOCATION}/{TEST_DIR}/nested_names_db/pt/dt=keep
+
+query II
+SELECT location, columns FROM glue_get_table_response('my_datalake.nested_names_db.pt');
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/nested_names_db/pt	[{'name': id, 'type': int, 'comment': NULL}]
+
+# a quoted name with a dot is one database
+statement ok
+CREATE SCHEMA my_datalake."nested_names.db";
+
+statement ok
+CREATE TABLE my_datalake."nested_names.db".pt (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL glue_add_partition('my_datalake."nested_names.db".pt', {dt: 'a'});
+
+statement ok
+ALTER TABLE my_datalake."nested_names.db".pt ADD PARTITION (dt = 'b');
+
+query I
+SELECT dt FROM glue_partitions('my_datalake."nested_names.db".pt') ORDER BY dt;
+----
+a
+b
+
+query I
+SELECT database_name FROM glue_get_table_response('my_datalake."nested_names.db".pt');
+----
+nested_names.db
+
+query I
+SELECT dt FROM glue_partitions('my_datalake.nested_names_db.pt');
+----
+keep
+
+statement ok
+RESET active_grammar_extensions;
+
+statement ok
+DROP SCHEMA my_datalake."nested_names.db" CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.nested_names_db CASCADE;
