@@ -862,9 +862,9 @@ HiveMultiFileList::ListingSample HiveMultiFileList::SampleListing(const string &
 	string sampled_prefix;
 	bool in_sampled = false;
 	bool listed_all = false;
-	optional_idx last_partition;
-	idx_t last_partition_start = 0;
-	idx_t last_partition_keys = 0;
+	// every key up to 'boundary' is fetched; when the scan stops on a key it does not keep, that key
+	string boundary;
+	vector<string> scanned;
 	ListingSample sample;
 	auto &files = sample.files;
 	vector<idx_t> file_partitions;
@@ -885,24 +885,21 @@ HiveMultiFileList::ListingSample HiveMultiFileList::SampleListing(const string &
 			scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
 			continue;
 		}
+		auto comparable_path = ComparableLocation(file.path);
+		boundary = comparable_path;
 		if (!IsDataFile(file, root_prefix)) {
-			sample.keys++;
+			scanned.push_back(std::move(comparable_path));
 			continue;
 		}
-		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
+		in_sampled = sampled.IsValid() && StringUtil::StartsWith(comparable_path, sampled_prefix);
 		if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
 			// pages come in key order, so the sampled partition's files are all seen
 			break;
 		}
-		sample.keys++;
+		scanned.push_back(std::move(comparable_path));
 		auto owner = OwningPartition(file.path, comparable_root_size);
 		if (!owner.IsValid()) {
 			continue;
-		}
-		if (owner != last_partition) {
-			last_partition = owner;
-			last_partition_start = files.size();
-			last_partition_keys = sample.keys - 1;
 		}
 		if (!sampled.IsValid() && reading.count(owner.GetIndex())) {
 			sampled = owner;
@@ -914,23 +911,47 @@ HiveMultiFileList::ListingSample HiveMultiFileList::SampleListing(const string &
 		files.push_back(file);
 		file_partitions.push_back(owner.GetIndex());
 	}
-	if (!listed_all && last_partition.IsValid() && last_partition != sampled) {
-		// the pages fetched may end inside the last partition
-		files.resize(last_partition_start);
-		sample.keys = last_partition_keys;
-	}
-	// the pages start at the prefix's first key, so they span every partition below it sorting up to the last one kept
+	// the pages start at the prefix's first key: a partition below it is complete when its keys all sort before the
+	// boundary, and open when the boundary is inside it (also inside a partition registered within its directory)
 	auto all = scan_info->Partitions(client_context);
 	auto comparable_prefix = ComparableLocation(prefix) + (StringUtil::EndsWith(prefix, "/") ? "/" : "");
-	string last_kept;
-	if (!files.empty()) {
-		last_kept = ComparableLocation((*all)[file_partitions[files.size() - 1]].location) + "/";
-	}
+	vector<string> open;
 	for (idx_t i = 0; i < all->size(); i++) {
 		auto location = ComparableLocation((*all)[i].location) + "/";
-		if (location.size() > comparable_root_size && StringUtil::StartsWith(location, comparable_prefix) &&
-		    (listed_all || location <= last_kept)) {
+		if (location.size() <= comparable_root_size || !StringUtil::StartsWith(location, comparable_prefix)) {
+			continue;
+		}
+		if (listed_all) {
 			sample.partitions.insert(i);
+		} else if (StringUtil::StartsWith(boundary, location)) {
+			open.push_back(std::move(location));
+		} else if (location < boundary) {
+			sample.partitions.insert(i);
+		}
+	}
+	auto in_open = [&](const string &path) {
+		for (auto &location : open) {
+			if (StringUtil::StartsWith(path, location) &&
+			    (!sampled.IsValid() || !StringUtil::StartsWith(path, sampled_prefix))) {
+				return true;
+			}
+		}
+		return false;
+	};
+	// the files and keys of open partitions may continue past the fetched pages: measure only the complete ones
+	vector<OpenFileInfo> kept_files;
+	vector<idx_t> kept_partitions;
+	for (idx_t i = 0; i < files.size(); i++) {
+		if (!in_open(ComparableLocation(files[i].path))) {
+			kept_files.push_back(std::move(files[i]));
+			kept_partitions.push_back(file_partitions[i]);
+		}
+	}
+	files = std::move(kept_files);
+	file_partitions = std::move(kept_partitions);
+	for (auto &path : scanned) {
+		if (!in_open(path)) {
+			sample.keys++;
 		}
 	}
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
