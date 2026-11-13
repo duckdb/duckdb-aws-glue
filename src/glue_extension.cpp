@@ -12,6 +12,7 @@
 #include "functions/glue_functions.hpp"
 #include "functions/glue_repair_table.hpp"
 #include "grammar/glue_grammar.hpp"
+#include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
 #include "core/glue_log_types.hpp"
@@ -37,6 +38,13 @@ public:
 		create_transaction_manager = CreateTransactionManager;
 	}
 };
+
+static void SetHiveFooterStatisticsMaxFiles(ClientContext &context, SetScope scope, Value &parameter) {
+	if (!parameter.IsNull() && UBigIntValue::Get(parameter) > HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT) {
+		throw InvalidInputException("hive_footer_statistics_max_files is at most %d, not %d",
+		                            HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT, UBigIntValue::Get(parameter));
+	}
+}
 
 static void InitAWSAPI() {
 	// Should only be called once, and databases can load the extension concurrently
@@ -111,12 +119,25 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "superseded files, until then. Default false.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
+	config.AddExtensionOption("glue_enable_partition_key_statistics",
+	                          "Give the optimizer the bounds and distinct count of a Hive table's partition keys, from "
+	                          "the partitions a scan reads. Default false, as for read_parquet with hive partitioning.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	config.AddExtensionOption("hive_partition_listing_threshold",
 	                          "When set, a scan reading at least this many partitions below the table location lists "
 	                          "the location once (recursively) instead of one listing per partition. Unset (default), "
 	                          "the location is listed when that takes fewer rounds of requests than listing the "
 	                          "partitions read, or as many rounds and a tenth of the requests.",
 	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
+
+	config.AddExtensionOption("hive_footer_statistics_max_files",
+	                          "An unpartitioned parquet scan that reads at most this many files gives the optimizer "
+	                          "its row count and each column's min, max and NULLs, from the footers of all of them, "
+	                          "which it reads at bind; a scan of more files gives a sampled estimate and no column "
+	                          "statistics. 0 turns it off. Default 16, at most 25.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES),
+	                          SetHiveFooterStatisticsMaxFiles);
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "

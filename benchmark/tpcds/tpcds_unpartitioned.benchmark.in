@@ -1,0 +1,111 @@
+# name: ${FILE_PATH}
+# description: ${DESCRIPTION}
+# group: [tpcds]
+
+# TPC-DS at scale factor ${SF} written to unpartitioned parquet Hive tables in the local Glue (moto) + S3 with CTAS,
+# and DuckDB's own TPC-DS queries. Each table is a CTAS with per-thread output, so it has up to `threads` files.
+
+require parquet
+
+require httpfs
+
+require glue
+
+require tpcds
+
+cache glue_tpcds_${SF_NAME}_flat_${FORMAT}.duckdb
+
+load
+CALL dsdgen(sf=${SF});
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT};
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.store_sales WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM store_sales;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.store_returns WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM store_returns;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.catalog_sales WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM catalog_sales;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.catalog_returns WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM catalog_returns;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.web_sales WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM web_sales;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.web_returns WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM web_returns;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.inventory WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM inventory;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.call_center WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM call_center;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.catalog_page WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM catalog_page;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.customer WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM customer;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.customer_address WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM customer_address;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.customer_demographics WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM customer_demographics;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.date_dim WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM date_dim;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.household_demographics WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM household_demographics;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.income_band WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM income_band;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.item WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM item;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.promotion WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM promotion;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.reason WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM reason;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.ship_mode WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM ship_mode;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.store WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM store;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.time_dim WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM time_dim;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.warehouse WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM warehouse;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.web_page WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM web_page;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT}.web_site WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM web_site;
+DROP TABLE store_sales;
+DROP TABLE store_returns;
+DROP TABLE catalog_sales;
+DROP TABLE catalog_returns;
+DROP TABLE web_sales;
+DROP TABLE web_returns;
+DROP TABLE inventory;
+DROP TABLE call_center;
+DROP TABLE catalog_page;
+DROP TABLE customer;
+DROP TABLE customer_address;
+DROP TABLE customer_demographics;
+DROP TABLE date_dim;
+DROP TABLE household_demographics;
+DROP TABLE income_band;
+DROP TABLE item;
+DROP TABLE promotion;
+DROP TABLE reason;
+DROP TABLE ship_mode;
+DROP TABLE store;
+DROP TABLE time_dim;
+DROP TABLE warehouse;
+DROP TABLE web_page;
+DROP TABLE web_site;
+CREATE TABLE glue_tpcds_${SF_NAME}_flat_${FORMAT}_loaded AS SELECT 1 AS loaded;
+USE my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT};
+SET enable_external_file_cache=false;
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+USE my_datalake.bench_tpcds_${SF_NAME}_flat_${FORMAT};
+SET enable_external_file_cache=false;
+
+name DSQ${QUERY_NUMBER_PADDED}_flat_${FORMAT}
+group tpcds_glue
+subgroup ${SF_NAME}_flat_${FORMAT}
+
+run duckdb/extension/tpcds/dsdgen/queries/${QUERY_NUMBER_PADDED}.sql
+
+result duckdb/extension/tpcds/dsdgen/answers/sf${SF}/${QUERY_NUMBER_PADDED}.csv

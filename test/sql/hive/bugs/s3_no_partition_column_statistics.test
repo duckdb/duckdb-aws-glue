@@ -18,6 +18,9 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 );
 
 statement ok
+SET glue_enable_partition_key_statistics = true;
+
+statement ok
 DROP TABLE IF EXISTS my_datalake.default.pcol;
 
 statement ok

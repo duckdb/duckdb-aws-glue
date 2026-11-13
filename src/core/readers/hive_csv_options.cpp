@@ -12,11 +12,15 @@ HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) con
 	if (type == LogicalType::VARCHAR) {
 		return HiveFieldConversion::NONE;
 	}
-	if (false_unless_true && type.id() == LogicalTypeId::BOOLEAN) {
+	auto open_csv = serde == HiveSerDe::OPEN_CSV;
+	if (open_csv && type.id() == LogicalTypeId::BOOLEAN) {
 		return HiveFieldConversion::FALSE_UNLESS_TRUE;
 	}
-	if (epoch_fields && (type == LogicalType::TIMESTAMP || type == LogicalType::DATE)) {
+	if (open_csv && (type == LogicalType::TIMESTAMP || type == LogicalType::DATE)) {
 		return null_for_invalid_data ? HiveFieldConversion::TRY_EPOCH : HiveFieldConversion::EPOCH;
+	}
+	if (type == LogicalType::TIMESTAMP && (!timestamp_formats.empty() || timestamp_millis)) {
+		return HiveFieldConversion::TIMESTAMP_FORMATS;
 	}
 	return null_for_invalid_data ? HiveFieldConversion::TRY_CAST : HiveFieldConversion::CAST;
 }
@@ -29,8 +33,9 @@ string HiveCSVOptions::FieldEscapePattern() const {
 bool HiveCSVOptions::operator==(const HiveCSVOptions &other) const {
 	return delimiter == other.delimiter && quote == other.quote && escape == other.escape &&
 	       skip_lines == other.skip_lines && null_string == other.null_string && serde_fields == other.serde_fields &&
-	       null_for_invalid_data == other.null_for_invalid_data && false_unless_true == other.false_unless_true &&
-	       field_escape == other.field_escape && epoch_fields == other.epoch_fields;
+	       null_for_invalid_data == other.null_for_invalid_data && serde == other.serde &&
+	       field_escape == other.field_escape && timestamp_formats == other.timestamp_formats &&
+	       timestamp_millis == other.timestamp_millis;
 }
 
 bool HiveCSVOptions::operator!=(const HiveCSVOptions &other) const {
@@ -45,9 +50,11 @@ void HiveCSVOptions::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(104, "null_string", null_string);
 	serializer.WriteProperty(105, "serde_fields", serde_fields);
 	serializer.WritePropertyWithDefault<bool>(106, "null_for_invalid_data", null_for_invalid_data, true);
-	serializer.WritePropertyWithDefault<bool>(107, "false_unless_true", false_unless_true, false);
-	serializer.WritePropertyWithDefault<bool>(108, "epoch_fields", epoch_fields, false);
 	serializer.WritePropertyWithDefault<string>(109, "field_escape", field_escape, string());
+	serializer.WritePropertyWithDefault<vector<string>>(110, "timestamp_formats", timestamp_formats);
+	serializer.WritePropertyWithDefault<bool>(111, "timestamp_millis", timestamp_millis, false);
+	serializer.WritePropertyWithDefault<uint8_t>(112, "serde", static_cast<uint8_t>(serde),
+	                                             static_cast<uint8_t>(HiveSerDe::LAZY_SIMPLE));
 }
 
 HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
@@ -60,9 +67,11 @@ HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
 	result.serde_fields = deserializer.ReadProperty<bool>(105, "serde_fields");
 	result.null_for_invalid_data =
 	    deserializer.ReadPropertyWithExplicitDefault<bool>(106, "null_for_invalid_data", true);
-	result.false_unless_true = deserializer.ReadPropertyWithExplicitDefault<bool>(107, "false_unless_true", false);
-	result.epoch_fields = deserializer.ReadPropertyWithExplicitDefault<bool>(108, "epoch_fields", false);
 	result.field_escape = deserializer.ReadPropertyWithExplicitDefault<string>(109, "field_escape", string());
+	result.timestamp_formats = deserializer.ReadPropertyWithDefault<vector<string>>(110, "timestamp_formats");
+	result.timestamp_millis = deserializer.ReadPropertyWithExplicitDefault<bool>(111, "timestamp_millis", false);
+	result.serde = static_cast<HiveSerDe>(deserializer.ReadPropertyWithExplicitDefault<uint8_t>(
+	    112, "serde", static_cast<uint8_t>(HiveSerDe::LAZY_SIMPLE)));
 	return result;
 }
 

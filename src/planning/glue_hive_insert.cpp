@@ -1,4 +1,5 @@
 #include "planning/glue_hive_insert.hpp"
+#include "planning/hive_field_conversion.hpp"
 
 #include "api/glue_api_util.hpp"
 
@@ -52,19 +53,6 @@ static string DelimiterToString(const string &delimiter) {
 	for (auto c : delimiter) {
 		auto byte = static_cast<uint8_t>(c);
 		result += byte < 0x20 ? StringUtil::Format("\\%03o", byte) : string(1, c);
-	}
-	return result;
-}
-
-//! The scalar function 'name' bound to 'children'
-static unique_ptr<Expression> BindFunction(ClientContext &context, const string &name,
-                                           vector<unique_ptr<Expression>> children) {
-	FunctionBinder function_binder(context);
-	ErrorData error;
-	auto result =
-	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier(name), std::move(children), error);
-	if (!result) {
-		error.Throw();
 	}
 	return result;
 }

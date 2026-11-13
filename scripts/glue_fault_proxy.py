@@ -31,6 +31,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # GetTables on a database with this prefix fails with this error, nothing is forwarded
 LISTING_FAULTS = {"fault_access_denied": "AccessDeniedException", "fault_invalid_input": "InvalidInputException"}
+# a table with this prefix is one Lake Formation does not let the caller describe: GetTable on it fails with
+# AccessDeniedException, and GetTables leaves it out
+DENIED_TABLE_PREFIX = "fault_denied_"
 # CreateDatabase / CreateTable on a database with this prefix is forwarded and then reported as lost to another client
 RACED_CREATE_PREFIX = "fault_already_exists"
 # UpdateTable on a database with this prefix races another client's update of the same table
@@ -74,6 +77,16 @@ def listing_error(target, database):
     if target != "AWSGlue.GetTables":
         return None
     return next((error for prefix, error in LISTING_FAULTS.items() if database.startswith(prefix)), None)
+
+
+def is_denied_table(target, request):
+    return target == "AWSGlue.GetTable" and request.get("Name", "").startswith(DENIED_TABLE_PREFIX)
+
+
+def without_denied_tables(data):
+    result = json.loads(data)
+    result["TableList"] = [t for t in result.get("TableList", []) if not t["Name"].startswith(DENIED_TABLE_PREFIX)]
+    return json.dumps(result).encode()
 
 
 def is_raced_create(target, database):
@@ -173,6 +186,8 @@ class Handler(BaseHTTPRequestHandler):
         database = request_database(target, request)
         reset_get_table_once(target, request)
         error = listing_error(target, database)
+        if not error and is_denied_table(target, request):
+            error = "AccessDeniedException"
         if not error and is_throttled(database, self.headers.get("amz-sdk-request")):
             error = "ThrottlingException"
         if not error and fails_get_table_once(target, database, request):
@@ -205,6 +220,8 @@ class Handler(BaseHTTPRequestHandler):
             # the object exists now, but as far as this client can tell another client created it first
             self.reply_error("AlreadyExistsException")
             return
+        if target == "AWSGlue.GetTables" and status == 200:
+            data = without_denied_tables(data)
         self.reply(status, headers, data)
 
     def forward(self, target, body):

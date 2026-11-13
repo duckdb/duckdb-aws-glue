@@ -1,5 +1,6 @@
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "planning/hive_query_cache.hpp"
 
 #include "duckdb/common/atomic.hpp"

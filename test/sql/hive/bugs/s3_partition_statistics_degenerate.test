@@ -15,6 +15,9 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
+statement ok
+SET glue_enable_partition_key_statistics = true;
+
 # ---- zero partitions -------------------------------------------------------------------------------
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.deg_none;

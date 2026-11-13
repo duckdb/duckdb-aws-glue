@@ -24,6 +24,7 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "catalog/glue_view.hpp"
 #include "catalog/scan_filter_equality.hpp"
 #include "planning/glue_hive_insert.hpp"
 
@@ -343,7 +344,7 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 		case TableLookup::TABLE_NOT_FOUND:
 		case TableLookup::SCHEMA_NOT_FOUND:
 			// 'result' holds the table and its schema, the schema alone, or neither
-			return result;
+			return ViewForReading(transaction, result);
 		case TableLookup::SKIPPED:
 			break;
 		}
@@ -352,6 +353,47 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 	if (schema) {
 		result.schema = &schema->Cast<SchemaCatalogEntry>();
 		result.entry = result.schema->LookupEntry(transaction, lookup_info);
+	}
+	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		return ViewForReading(transaction, result);
+	}
+	return result;
+}
+
+bool GlueCatalog::IsIcebergCatalog(Catalog &catalog) {
+	auto &iceberg_catalog_name = options.iceberg_catalog;
+	if (iceberg_catalog_name.empty() || catalog.GetName() != iceberg_catalog_name) {
+		return false;
+	}
+	if (catalog.GetCatalogType() != "iceberg") {
+		throw BinderException("ICEBERG_CATALOG \"%s\" of Glue catalog \"%s\" is a %s catalog, not an Iceberg catalog",
+		                      iceberg_catalog_name.GetIdentifierName(), GetName().GetIdentifierName(),
+		                      catalog.GetCatalogType());
+	}
+	auto warehouse = catalog.GetDBPath();
+	auto catalog_id = KnownCatalogId();
+	if (!StringUtil::CIEquals(warehouse, options.path) && !StringUtil::CIEquals(warehouse, catalog_id)) {
+		throw BinderException("ICEBERG_CATALOG \"%s\" reads warehouse '%s', not Glue catalog \"%s\" ('%s')",
+		                      iceberg_catalog_name.GetIdentifierName(), warehouse, GetName().GetIdentifierName(),
+		                      catalog_id.empty() ? options.path : catalog_id);
+	}
+	return true;
+}
+
+bool GlueCatalog::IsIcebergTable(ClientContext &context, const Identifier &schema_name, const Identifier &table_name) {
+	auto schema = schemas.GetEntry(context, schema_name.GetIdentifierName());
+	if (!schema) {
+		return false;
+	}
+	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(table_name));
+	auto entry = schema->Cast<SchemaCatalogEntry>().LookupEntry(GetCatalogTransaction(context), lookup);
+	return entry && entry->type == CatalogType::TABLE_ENTRY &&
+	       entry->Cast<GlueTable>().table_info.GetFormat().format == GlueFormat::ICEBERG;
+}
+
+CatalogEntryLookup GlueCatalog::ViewForReading(CatalogTransaction transaction, CatalogEntryLookup result) {
+	if (result.entry && result.entry->type == CatalogType::VIEW_ENTRY) {
+		result.entry = &result.entry->Cast<GlueView>().ForReading(transaction.GetContext());
 	}
 	return result;
 }

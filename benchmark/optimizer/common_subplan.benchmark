@@ -70,6 +70,7 @@ DROP TABLE web_site;
 CREATE TABLE glue_optimizer_tpcds_sf1_loaded AS SELECT 1 AS loaded;
 USE my_datalake.bench_optimizer_tpcds_sf1;
 SET enable_external_file_cache=false;
+SET glue_enable_partition_key_statistics=false;
 
 reload
 CREATE SECRET (
@@ -88,6 +89,7 @@ ATTACH '123456789012' AS my_datalake (
 );
 USE my_datalake.bench_optimizer_tpcds_sf1;
 SET enable_external_file_cache=false;
+SET glue_enable_partition_key_statistics=false;
 
 run
 SELECT *

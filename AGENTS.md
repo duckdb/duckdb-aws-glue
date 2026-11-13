@@ -29,8 +29,8 @@ BUILD_BENCHMARK=1 ... make relassert                                            
 `ASAN_OPTIONS=detect_container_overflow=0` (otherwise false-positive container-overflow on secret/credential code).
 Each `src/` subdirectory has its own `CMakeLists.txt` (an `add_library_unity` object library appended to
 `GLUE_EXTENSION_FILES`, like DuckDB's own source tree): add new `.cpp` files there, and a new directory with
-`add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds` and `avro` (avro is
-loaded on demand for AvroSerDe tables).
+`add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds`, `avro` (avro is
+loaded on demand for AvroSerDe tables) and `iceberg` (for `ICEBERG_CATALOG`; needs `roaring` from vcpkg).
 
 Run `make format-fix` (clang-format over `src` and `test`, via the duckdb submodule) before committing.
 
@@ -43,8 +43,11 @@ SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CAT
   `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything through DuckDB's
   `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially in batches of 10 tests per process, retrying a
   failing batch twice: against the local servers a read right after a write occasionally comes back empty.
-- `test/configs/cloud_glue.json`: live AWS (credential chain, eu-central-1). `test/sql/cloud/` only runs here
-  (`require-env GLUE_TEST_CONFIG cloud`) and reads pre-existing tables in the account.
+- `test/configs/cloud_glue.json`: live AWS (credential chain, eu-west-1). `test/sql/cloud_glue/` only runs here
+  (`require-env GLUE_TEST_CONFIG cloud`) and attaches the Glue catalog both as `TYPE glue` and `TYPE iceberg`;
+  `skip_error_messages` is empty, so HTTP errors fail instead of skip.
+  A `credential_process` profile isn't resolved under the runner's HOME: export its credentials first
+  (`eval "$(aws configure export-credentials --profile <p> --format env)"`).
 
 Single test:
 

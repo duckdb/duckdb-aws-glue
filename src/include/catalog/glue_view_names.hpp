@@ -36,6 +36,9 @@ struct GlueViewNames {
 	//! reading: db.t -> catalog.db.t, as DuckDB binds x.t to a catalog x when one is attached under that name; a bare
 	//! t (not a CTE) -> catalog.schema.t
 	static void PinToCatalog(QueryNode &query, const Identifier &catalog_name, const Identifier &schema_name);
+	//! reading: catalog.db.t of an Iceberg table in Glue -> iceberg_catalog.db.t; whether any was mapped
+	static bool MapIcebergTables(ClientContext &context, GlueCatalog &view_catalog, const string &view_name,
+	                             QueryNode &query);
 };
 
 } // namespace duckdb

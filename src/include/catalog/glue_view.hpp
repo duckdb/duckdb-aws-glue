@@ -19,6 +19,9 @@ public:
 
 public:
 	const SelectStatement &GetQuery() override;
+	//! The view as this transaction reads it: Iceberg tables from the catalog ICEBERG_CATALOG names
+	CatalogEntry &ForReading(ClientContext &context);
+	void BindView(ClientContext &context, BindViewAction action = BindViewAction::BIND_IF_UNBOUND) override;
 	unique_ptr<CatalogEntry> Copy(ClientContext &context) const override;
 	//! The stored text, without parsing it
 	string ToSQL() const override;
@@ -43,6 +46,10 @@ public:
 	GlueTableInfo table_info;
 	//! The SELECT text handed to the parser
 	string select_sql;
+
+private:
+	//! GetQuery(), with the alias mapping the copy was resolved for (empty when the view reads only its own catalog)
+	const SelectStatement &ResolveQuery(string &signature);
 
 private:
 	bool is_duckdb_view;
