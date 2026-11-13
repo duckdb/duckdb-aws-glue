@@ -13,6 +13,8 @@ struct GlueTypes {
 	static LogicalType ToLogicalType(const string &glue_type);
 	//! Produce a Glue column type string from a DuckDB logical type
 	static string FromLogicalType(const LogicalType &type);
+	//! A view column's Glue type: the closest type Hive, Trino and Spark all parse, else 'string'. Never throws.
+	static string FromLogicalTypeForView(const LogicalType &type);
 
 	//! HivePartitioning::GetValue without the unescaping: Glue stores the raw value, so 'a%20b' stays 'a%20b', not 'a
 	//! b'. Throws if the value can't be cast to the key's type.
