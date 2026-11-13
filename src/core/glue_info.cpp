@@ -246,6 +246,9 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		if (GetQuoteCharacter().size() > 1 || GetEscapeCharacter().size() > 1) {
 			refuse("has a quoteChar or escapeChar of more than one byte");
 		}
+		if (GetFieldDelimiter() == GetQuoteCharacter()) {
+			refuse("has the same separatorChar and quoteChar");
+		}
 		return;
 	}
 	string value;
@@ -355,12 +358,19 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
 	options.serde = GetSerDe();
-	// without escapeChar OpenCSVSerde reads with a '\' escape, which read_csv, given the quote character, would keep;
-	// an explicit escapeChar '"', which this extension writes, is read as it is
+	// without escapeChar OpenCSVSerde reads with a '\' escape, as with escapeChar '\', which read_csv does not apply as
+	// it does: the lines are split by SplitOpenCSVLine instead; an explicit escapeChar '"', which this extension
+	// writes, is read as it is
 	string escape_char;
 	auto escape_set = TryGetProperty("escapeChar", escape_char) && !escape_char.empty();
-	if (GetSerDe() == HiveSerDe::OPEN_CSV && !escape_set && options.delimiter != "\\" && options.quote != "\\") {
-		options.field_escape = "\\";
+	if (GetSerDe() == HiveSerDe::OPEN_CSV && (!escape_set || options.escape == "\\") && options.delimiter != "\\" &&
+	    options.quote != "\\") {
+		if (!escape_set) {
+			// written with the quote character as the escape, so a '\' is doubled
+			options.field_escape = "\\";
+		}
+		options.line_fields = true;
+		options.escape = "\\";
 	}
 	string timestamp_formats;
 	if (GetSerDe() == HiveSerDe::LAZY_SIMPLE && TryGetProperty("timestamp.formats", timestamp_formats)) {

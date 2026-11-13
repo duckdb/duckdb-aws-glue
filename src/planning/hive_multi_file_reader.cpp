@@ -23,6 +23,8 @@
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/vector/vector_iterator.hpp"
+#include "duckdb/common/vector/vector_writer.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/operator/csv_scanner/csv_reader_options.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -60,6 +62,7 @@
 #include "duckdb/planner/sql_export_helpers.hpp"
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
+#include "planning/opencsv_line_reader.hpp"
 #include "functions/hive_reader_call.hpp"
 
 namespace duckdb {
@@ -1109,9 +1112,17 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["auto_detect"] = Value::BOOLEAN(false);
 		param_map["header"] = Value::BOOLEAN(false);
 		param_map["skip"] = Value::BIGINT(NumericCast<int64_t>(scan_info->csv_options.skip_lines));
-		param_map["delim"] = Value(scan_info->csv_options.delimiter);
-		param_map["quote"] = Value(scan_info->csv_options.quote);
-		param_map["escape"] = Value(scan_info->csv_options.escape);
+		if (scan_info->csv_options.line_fields) {
+			// '\r' ends a row before it is a delimiter, so each line is one field, NUL bytes and all, split by
+			// FinalizeChunk
+			param_map["delim"] = Value("\r");
+			param_map["quote"] = Value("");
+			param_map["escape"] = Value("");
+		} else {
+			param_map["delim"] = Value(scan_info->csv_options.delimiter);
+			param_map["quote"] = Value(scan_info->csv_options.quote);
+			param_map["escape"] = Value(scan_info->csv_options.escape);
+		}
 		param_map["nullstr"] = Value(scan_info->csv_options.null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
@@ -1133,7 +1144,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);
 			param_map["strict_mode"] = Value::BOOLEAN(false);
-			if (!scan_info->csv_options.quote.empty()) {
+			if (!scan_info->csv_options.quote.empty() && !scan_info->csv_options.line_fields) {
 				// the parallel scanner refuses null_padding together with a quoted line break (hive_csv_parallel)
 				Value parallel;
 				if (context.TryGetCurrentSetting("hive_csv_parallel", parallel) && !parallel.IsNull() &&
@@ -1653,6 +1664,18 @@ static void DecodeBlobAsText(ClientContext &context, unique_ptr<Expression> &exp
 	expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, "decode", std::move(children));
 }
 
+void HiveMultiFileReader::FinalizeChunk(ClientContext &context, const MultiFileBindData &bind_data,
+                                        BaseFileReader &reader, const MultiFileReaderData &reader_data,
+                                        DataChunk &input_chunk, DataChunk &output_chunk, ExpressionExecutor &executor,
+                                        optional_ptr<MultiFileReaderGlobalState> global_state) {
+	auto &options = ScanInfo().csv_options;
+	if (options.serde_fields && options.line_fields) {
+		SplitOpenCSVLines(reader, reader_data, input_chunk, options);
+	}
+	MultiFileReader::FinalizeChunk(context, bind_data, reader, reader_data, input_chunk, output_chunk, executor,
+	                               global_state);
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1685,6 +1708,9 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 		throw InternalException("Hive text table '%s': a filter was pushed into read_csv", ScanInfo().Describe());
 	}
 	auto &csv_options = ScanInfo().csv_options;
+	if (csv_options.line_fields) {
+		ReadOpenCSVLines(*reader_data.reader);
+	}
 	for (auto &expr : reader_data.expressions) {
 		if (!expr) {
 			continue;
@@ -1749,6 +1775,37 @@ static bool ScanTypeIsTableType(const HiveScanInfo &info, const MultiFileBindDat
 	return false;
 }
 
+//! With line_fields, a field of the files as the reader call reads it: hive_opencsv_field splitting the line read_csv
+//! returns as the first column, as FinalizeChunk does; otherwise nullptr
+static unique_ptr<ParsedExpression> LineField(const HiveScanInfo &info, const Identifier &name) {
+	auto &options = info.csv_options;
+	if (!options.line_fields) {
+		return nullptr;
+	}
+	optional<Identifier> line;
+	int64_t field = 0;
+	int64_t file_column = 0;
+	for (auto &column : info.names) {
+		if (info.GetPartitionKeyIndex(column.GetIdentifierName()) != DConstants::INVALID_INDEX) {
+			continue;
+		}
+		if (!line) {
+			line = column;
+		}
+		if (StringUtil::CIEquals(column.GetIdentifierName(), name.GetIdentifierName())) {
+			field = file_column;
+		}
+		file_column++;
+	}
+	vector<unique_ptr<ParsedExpression>> children;
+	children.push_back(make_uniq<ColumnRefExpression>(*line));
+	children.push_back(ConstantExpression::FromValue(Value::BIGINT(field)));
+	children.push_back(ConstantExpression::FromValue(Value(options.delimiter)));
+	children.push_back(ConstantExpression::FromValue(Value(options.quote)));
+	children.push_back(ConstantExpression::FromValue(Value(options.escape)));
+	return make_uniq<FunctionExpression>(Identifier("hive_opencsv_field"), std::move(children));
+}
+
 //! A data column of the scan, of the table's type, as an expression over the reader's column: the conversion of a field
 //! read as text that InitializeReader gives the scan (HiveCSVOptions::FieldConversion)
 static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const Identifier &name,
@@ -1756,7 +1813,7 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 	if (info.file_format != HiveFileFormat::CSV || !info.csv_options.serde_fields) {
 		return make_uniq<ColumnRefExpression>(name);
 	}
-	return info.csv_options.GetFieldReaderExpression(name, type);
+	return info.csv_options.GetFieldReaderExpression(name, type, LineField(info, name));
 }
 
 optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get) {

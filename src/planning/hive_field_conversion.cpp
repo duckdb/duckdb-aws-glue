@@ -143,35 +143,11 @@ static void MakeTimestampFormats(ClientContext &context, unique_ptr<Expression> 
 	    std::move(too_short), make_uniq<BoundConstantExpression>(Value(LogicalType::TIMESTAMP)), std::move(value));
 }
 
-//! Drop the escape character read_csv does not apply from a field's text, before the text is converted; only a field
-//! that holds it goes through regexp_replace
-static void UnescapeField(ClientContext &context, unique_ptr<Expression> &expr, const HiveCSVOptions &options) {
-	auto &text = BoundCastExpression::IsCast(*expr)
-	                 ? BoundCastExpression::ChildMutable(expr->Cast<BoundFunctionExpression>())
-	                 : expr;
-	if (text->GetReturnType() != LogicalType::VARCHAR || text->IsFoldable()) {
-		return;
-	}
-	vector<unique_ptr<Expression>> contains;
-	contains.push_back(text->Copy());
-	contains.push_back(make_uniq<BoundConstantExpression>(Value(options.field_escape)));
-	vector<unique_ptr<Expression>> replace;
-	replace.push_back(text->Copy());
-	replace.push_back(make_uniq<BoundConstantExpression>(Value(options.FieldEscapePattern())));
-	replace.push_back(make_uniq<BoundConstantExpression>(Value("\\1")));
-	replace.push_back(make_uniq<BoundConstantExpression>(Value("g")));
-	text = make_uniq<BoundCaseExpression>(BindFunction(context, "contains", std::move(contains)),
-	                                      BindFunction(context, "regexp_replace", std::move(replace)), std::move(text));
-}
-
 void HiveCSVOptions::ConvertField(ClientContext &context, unique_ptr<Expression> &expr) const {
 	D_ASSERT(serde_fields);
 	auto &options = *this;
 	if (!expr) {
 		return;
-	}
-	if (!options.field_escape.empty()) {
-		UnescapeField(context, expr, options);
 	}
 	switch (options.FieldConversion(expr->GetReturnType())) {
 	case HiveFieldConversion::NONE:
@@ -203,43 +179,21 @@ static unique_ptr<ParsedExpression> BarredField(const Identifier &name) {
 	return make_uniq<FunctionExpression>(Identifier("__internal_barrier"), std::move(field));
 }
 
-//! A field's text with the escape character read_csv does not apply dropped, as ConvertField reads it
-static unique_ptr<ParsedExpression> UnescapedField(const HiveCSVOptions &options, unique_ptr<ParsedExpression> field) {
-	if (options.field_escape.empty()) {
-		return field;
-	}
-	vector<unique_ptr<ParsedExpression>> contains;
-	contains.push_back(field->Copy());
-	contains.push_back(ConstantExpression::FromValue(Value(options.field_escape)));
-	vector<unique_ptr<ParsedExpression>> replace;
-	replace.push_back(field->Copy());
-	replace.push_back(ConstantExpression::FromValue(Value(options.FieldEscapePattern())));
-	replace.push_back(ConstantExpression::FromValue(Value("\\1")));
-	replace.push_back(ConstantExpression::FromValue(Value("g")));
-	auto unescaped = make_uniq<CaseExpression>();
-	CaseCheck check;
-	check.when_expr = make_uniq<FunctionExpression>(Identifier("contains"), std::move(contains));
-	check.then_expr = make_uniq<FunctionExpression>(Identifier("regexp_replace"), std::move(replace));
-	unescaped->CaseChecksMutable().push_back(std::move(check));
-	unescaped->ElseMutable() = std::move(field);
-	return std::move(unescaped);
-}
-
-unique_ptr<ParsedExpression> HiveCSVOptions::GetFieldReaderExpression(const Identifier &name,
-                                                                      const LogicalType &type) const {
+unique_ptr<ParsedExpression> HiveCSVOptions::GetFieldReaderExpression(const Identifier &name, const LogicalType &type,
+                                                                      unique_ptr<ParsedExpression> line_field) const {
 	D_ASSERT(serde_fields);
 	auto &options = *this;
-	auto field = [&]() {
-		return UnescapedField(options, BarredField(name));
+	auto field = [&]() -> unique_ptr<ParsedExpression> {
+		return line_field ? line_field->Copy() : BarredField(name);
 	};
 	unique_ptr<ParsedExpression> column;
 	auto conversion = options.FieldConversion(type);
 	switch (conversion) {
 	case HiveFieldConversion::NONE:
-		if (options.field_escape.empty()) {
+		if (!line_field) {
 			return make_uniq<ColumnRefExpression>(name);
 		}
-		column = UnescapedField(options, make_uniq<ColumnRefExpression>(name));
+		column = std::move(line_field);
 		break;
 	case HiveFieldConversion::CAST:
 		column = make_uniq<CastExpression>(type, field(), false);

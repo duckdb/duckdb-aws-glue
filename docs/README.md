@@ -62,20 +62,21 @@ Text tables are read the way their SerDe reads them:
   - A timestamp field is a number of milliseconds since the epoch (`1579059880000` is `2020-01-15 03:44:40`) and a date
     field a number of days since the epoch (`18276` is `2020-01-15`); text such as `2020-01-15 03:44:40` or
     `2020-01-15` does not parse.
-  - Escapes: without `escapeChar` a field is read with `\` as the escape, as the SerDe reads it: the `\` is dropped and
-    the `\` or quote character after it is kept, in a quoted field or not (`\` is an empty field, `a\x` is `ax`,
-    `a\\b` is `a\b`), and outside quotes it does not escape the separator (`a\,b` is the fields `a` and `b`). Doubled
-    quotes are one quote either way. As `read_csv` splits the fields first, two cases differ: `\"` inside a quoted field
-    ends the quote, so the field and the following lines run together until the next quote (the SerDe: `"`), and an
-    unquoted field starting with `\\` keeps one `\` (the SerDe: none). An `escapeChar` the table records, such as the
-    `"` of the tables this extension creates, is applied by `read_csv` (the SerDe reads `"` as `\` too).
+  - Escapes: without `escapeChar`, as with `escapeChar` `\`, each line is split into its fields as the SerDe splits it
+    (`SplitOpenCSVLine`): the `\` is dropped and the `\` or quote character after it is kept, in a quoted field or not
+    (`\` is an empty field, `a\x` is `ax`, `a\\b` is `a\b`, `"a\"b"` is `a"b`), and a `\` before the separator or the
+    end of the line is dropped too (`a\,b` is the fields `a` and `b`). Doubled quotes are one quote either way. A
+    separator of more than one byte (a non-ASCII character such as `¦`) is split on as any other, and a NUL byte is data,
+    as in any field. Another `escapeChar`, such as the `"` of the tables this extension creates, is applied by
+    `read_csv` (the SerDe reads `"` as `\` too).
   - Line breaks: the SerDe reads a file line by line (TextInputFormat), so a line break inside a quoted field splits the
-    record into two broken rows, and a quote that is never closed (`2,"abc`) makes only that field NULL. The extension
+    record into two broken rows, and a quote that is never closed (`2,"abc`) makes only that field NULL. Without
+    `escapeChar`, and with `escapeChar` `\`, the extension reads the lines the same way. With another `escapeChar` it
     reads CSV as `read_csv` does: a quoted field continues across line breaks, so a quoted line break is read as one
-    value, and the lines after an unclosed quote are read into that one value without an error. A quoted line break
-    fails a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner
-    does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per
-    file. `SET hive_csv_parallel = false` reads one thread per file in every scan.
+    value, and the lines after an unclosed quote are read into that one value without an error. There, a quoted line
+    break fails a scan of at most twice `threads` files, which reads each file with several threads (`The parallel
+    scanner does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one
+    thread per file. `SET hive_csv_parallel = false` reads one thread per file in every scan.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
   are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property; OpenCSVSerde booleans, timestamps
@@ -99,7 +100,8 @@ Text tables are read the way their SerDe reads them:
   as an empty field, which reads back as an empty string in a string column, false in a boolean column and NULL
   elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
 - Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables, nested
-  columns, multi-byte quote or escape characters, and for LazySimpleSerDe `serialization.escape.crlf`, an `escape.delim`
+  columns, multi-byte quote or escape characters, an OpenCSVSerde separator that is the quote character, and for
+  LazySimpleSerDe `serialization.escape.crlf`, an `escape.delim`
   that is the delimiter or longer than one byte, a non-UTF-8 `serialization.encoding`,
   `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the NULL string. Writes need a
   single-byte delimiter.
@@ -389,8 +391,10 @@ of a Glue table or of a `hive_scan()` call, using only core DuckDB types:
   `hive_partitioning := false`. A column of a SerDe text table is the field read as text and converted with `TRY_CAST`
   (`CAST` without `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde
   boolean), of the field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into
-  `read_csv`, which would convert the text itself and strictly. A field of an OpenCSVSerde table without
-  `escapeChar` that holds a `\` is first passed through `regexp_replace`, which drops the escape.
+  `read_csv`, which would convert the text itself and strictly. In an OpenCSVSerde table without `escapeChar`, or with
+  `escapeChar` `\`, `read_csv` returns each line as the first column (its delimiter is `\r`, which ends a line before
+  it can split one), and a field is `hive_opencsv_field(<first column>, <index>, ...)`, which splits the line as the
+  scan does.
 - `HiveScanGetFilePartitionValues(get, path)`: the values of the partition a listed file belongs to, as constants of
   the partition columns' types. The path is the file's as the scan listed it, or another spelling of it that DuckDB's
   `Path` normalizes to it (`s3://b//x` or `s3://b/./x` for `s3://b/x`).
@@ -712,8 +716,9 @@ TPC-H and TPC-DS benchmarks on native tables, the reference for these, run with
 their timings (5 runs each) in two jobs of about three minutes, so it runs only a few join-heavy TPC-H and TPC-DS
 queries. The parquet job runs `benchmark/*.benchmark`, the parquet benchmarks of `benchmark/pushdown/` and
 `benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
-`benchmark/pushdown/` and `benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
-other queries and the json and avro TPC benchmarks only run locally.
+`benchmark/pushdown/` and `benchmark/optimizer/`, the OpenCSVSerde benchmarks of `benchmark/text/` (a table without
+`escapeChar`, read whole and by its last column), TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at
+SF0.01 on csv tables. The other queries and the json and avro TPC benchmarks only run locally.
 
 ## Building
 

@@ -1,0 +1,59 @@
+# name: benchmark/text/opencsv_no_escape_last_column.benchmark
+# description: read the last column of an OpenCSVSerde table without escapeChar, which splits each line to its end
+# group: [text]
+
+# 300,000 rows of an id and 19 text columns. The table has no escapeChar, so OpenCSVSerde reads it with a
+# '\' escape. The data holds no '\', so every version reads the same rows. The load skips a table that already exists.
+
+name OpenCSVSerde table without escapeChar, last column
+group text
+
+require httpfs
+
+require glue
+
+cache glue_text_opencsv_no_escape.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_text;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_text.opencsv_no_escape (id INTEGER, c1 VARCHAR, c2 VARCHAR, c3 VARCHAR, c4 VARCHAR, c5 VARCHAR, c6 VARCHAR, c7 VARCHAR, c8 VARCHAR, c9 VARCHAR, c10 VARCHAR, c11 VARCHAR, c12 VARCHAR, c13 VARCHAR, c14 VARCHAR, c15 VARCHAR, c16 VARCHAR, c17 VARCHAR, c18 VARCHAR, c19 VARCHAR) WITH (format = 'csv', quote = '"');
+ALTER TABLE my_datalake.bench_text.opencsv_no_escape SET ('escapeChar' = '');
+INSERT INTO my_datalake.bench_text.opencsv_no_escape
+SELECT i, 'v1_' || i, 'v2_' || i, 'v3_' || i, 'v4_' || i, 'v5_' || i, 'v6_' || i, 'v7_' || i, 'v8_' || i, 'v9_' || i, 'v10_' || i, 'v11_' || i, 'v12_' || i, 'v13_' || i, 'v14_' || i, 'v15_' || i, 'v16_' || i, 'v17_' || i, 'v18_' || i, 'v19_' || i FROM range(0, 300000) t(i)
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.bench_text.opencsv_no_escape);
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+
+run
+SELECT count(*), max(c19) FROM my_datalake.bench_text.opencsv_no_escape;
+
+result II
+300000	v19_99999

@@ -52,8 +52,7 @@ struct HiveCSVOptions {
 	bool serde_fields = false;
 	//! With serde_fields: a field that does not parse as its column type is NULL (TRY_CAST), else the query fails
 	bool null_for_invalid_data = true;
-	//! With serde_fields: an escape character read_csv does not apply, dropped from a field's text; the escape or quote
-	//! character after it is kept
+	//! With serde_fields: an escape character the table is read with but not written with, doubled in a written value
 	string field_escape;
 	//! With serde_fields: the SerDe the fields are converted as. OpenCSVSerde reads a boolean as true for 'true' in
 	//! any case and false otherwise, a timestamp or date as milliseconds or days since the epoch, and an integer as
@@ -64,6 +63,9 @@ struct HiveCSVOptions {
 	vector<string> timestamp_formats;
 	//! With serde_fields: a timestamp field may be milliseconds since the epoch (timestamp.formats 'millis')
 	bool timestamp_millis = false;
+	//! With serde_fields: read_csv reads each line as one field, which is split as OpenCSVSerde splits it
+	//! (SplitOpenCSVLine) with the delimiter, quote and escape character
+	bool line_fields = false;
 
 public:
 	//! With serde_fields: how a field becomes a value of a column of 'type', in the scan and in its reader call
@@ -72,10 +74,10 @@ public:
 	//! (planning/hive_field_conversion.cpp)
 	void ConvertField(ClientContext &context, unique_ptr<Expression> &expr) const;
 	//! With serde_fields: the same conversion over the reader's column 'name', aliased as the column (the column itself
-	//! for NONE), in the scan's reader call (planning/hive_field_conversion.cpp)
-	unique_ptr<ParsedExpression> GetFieldReaderExpression(const Identifier &name, const LogicalType &type) const;
-	//! The regexp_replace pattern that drops field_escape from a field's text, with '\1' the character it escapes
-	string FieldEscapePattern() const;
+	//! for NONE), in the scan's reader call (planning/hive_field_conversion.cpp); with line_fields 'line_field' is the
+	//! field as the reader call splits it from the line
+	unique_ptr<ParsedExpression> GetFieldReaderExpression(const Identifier &name, const LogicalType &type,
+	                                                      unique_ptr<ParsedExpression> line_field) const;
 	bool operator==(const HiveCSVOptions &other) const;
 	bool operator!=(const HiveCSVOptions &other) const;
 	void Serialize(Serializer &serializer) const;

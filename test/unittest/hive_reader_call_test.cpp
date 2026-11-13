@@ -484,6 +484,36 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	REQUIRE(StringUtil::Contains(read, "\"parallel\" := false"));
 	REQUIRE(StringUtil::Contains(ReadError(con, query), "parallel scanner does not support null_padding"));
 	REQUIRE(Rows(con, read) == 7);
+	// OpenCSVSerde with escapeChar '\' or without escapeChar: read_csv returns each line as one column, which the
+	// reader call splits with hive_opencsv_field as the scan does
+	for (auto escape_set : {true, false}) {
+		auto escaped = tables.Add(escape_set ? "backslash" : "no_escape");
+		Run(con, "CREATE TABLE lake.default." + escaped +
+		             " (id INTEGER, val VARCHAR, n INTEGER) WITH (format = 'csv', quote = '\"', escape = '\\')");
+		if (!escape_set) {
+			Run(con, "ALTER TABLE lake.default." + escaped + " SET ('escapeChar' = '')");
+		}
+		WriteLines(con, {"1,\"a\\\"b\",1", "2,a\\\\b,2", "3,\"x,y\",3", "4,\\,4", "5", "6,\"open"},
+		           location + "/default/" + escaped + "/data.csv");
+		Run(con, "INSERT INTO lake.default." + escaped + " VALUES (7, 'a' || chr(0) || 'b', 7), (8, 'c\\d', 8)");
+		auto escaped_query = "SELECT * FROM lake.default." + escaped;
+		{
+			PlannedScan scan(con, escaped_query);
+			auto call = Call(scan);
+			REQUIRE(Parameter(call, "delim") == "'\r'");
+			REQUIRE(Parameter(call, "quote") == "''");
+			REQUIRE(Parameter(call, "escape") == "''");
+			auto columns = Columns(call);
+			REQUIRE(columns.size() == 3);
+			REQUIRE(StringUtil::Contains(columns[1], "hive_opencsv_field(id, "));
+		}
+		auto escaped_read = Restate(con, escaped_query);
+		REQUIRE(Scalar(con, "SELECT string_agg(id || ':' || coalesce(replace(val, chr(0), '<0>'), 'NULL') || ':' || "
+		                    "coalesce(n::VARCHAR, 'NULL'), ' ' ORDER BY id) FROM (" +
+		                        escaped_read + ")")
+		            .ToString() == "1:a\"b:1 2:a\\b:2 3:x,y:3 4::4 5:NULL:NULL 6:NULL:NULL 7:a<0>b:7 8:c\\d:8");
+		REQUIRE(Differences(con, escaped_query, escaped_read) == 0);
+	}
 	// json and avro
 	auto json = tables.Add("json");
 	Run(con, "CREATE TABLE lake.default." + json +

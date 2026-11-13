@@ -11,6 +11,7 @@
 #include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
 #include "functions/glue_repair_table.hpp"
+#include "functions/hive_opencsv_field.hpp"
 #include "grammar/glue_grammar.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
@@ -179,6 +180,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// ATTACH '<catalog id>' (TYPE GLUE)
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
 
+	loader.RegisterFunction(GetHiveOpenCSVFieldFunction());
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());
 	loader.RegisterFunction(GetGlueGetDatabaseResponseFunction());
 	loader.RegisterFunction(GetGlueGetPartitionResponseFunction());
