@@ -163,7 +163,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
-	RegisterGlueHttpClientFactory();
+	RegisterGlueHttpClientFactory(instance);
 	RegisterGlueLogTypes(instance);
 
 	// Hive tables are read with read_parquet. A linked parquet is loaded as linked: autoloading would install it first
