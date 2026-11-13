@@ -30,6 +30,8 @@ bool IsDataFile(const OpenFileInfo &file, const string &prefix);
 //! Whether listing a location would read it as a glob pattern (*, ? or [), which misses its own files and matches
 //! those of other prefixes
 bool LocationHasGlob(const string &location);
+//! The glob of every file below a location (without a trailing '/'), recursively
+string LocationGlob(const string &location);
 //! Every file below a location, recursively; empty when there are none. Check LocationHasGlob first
 unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location);
 

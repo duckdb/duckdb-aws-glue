@@ -1,0 +1,75 @@
+# name: benchmark/range_listing.benchmark
+# description: read the 1st and 15th of each month, 132 of 2000 daily partitions of two files each, with file opens and reads delayed by 20 ms, in the local Glue (moto) + S3: the sample lists the first year's key prefix range and the other five years are listed at the same time, two rounds of listing requests rather than the location's four pages one after another
+# group: [file_pruning_benchmarks]
+
+name Read 132 of 2000 partitions in six ranges
+group file_pruning_benchmarks
+subgroup range_listing
+
+require parquet
+
+require httpfs
+
+require glue
+
+cache range_listing_2000.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE TABLE IF NOT EXISTS my_datalake.default.range_listing_2000 (
+    id BIGINT,
+    value DOUBLE,
+    dt VARCHAR
+) PARTITIONED BY (dt);
+INSERT INTO my_datalake.default.range_listing_2000
+SELECT
+    d * 100 + r                                                  AS id,
+    random() * 1000                                              AS value,
+    strftime(DATE '2020-01-01' + d::INTEGER, '%Y-%m-%d')         AS dt
+FROM range(0, 2000) AS t(d)
+CROSS JOIN range(0, 25) AS u(r)
+WHERE (SELECT count(*) FROM my_datalake.default.range_listing_2000) = 0;
+INSERT INTO my_datalake.default.range_listing_2000
+SELECT
+    d * 100 + r                                                  AS id,
+    random() * 1000                                              AS value,
+    strftime(DATE '2020-01-01' + d::INTEGER, '%Y-%m-%d')         AS dt
+FROM range(0, 2000) AS t(d)
+CROSS JOIN range(0, 25) AS u(r)
+WHERE (SELECT count(*) FROM my_datalake.default.range_listing_2000) = 50000;
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+
+run
+SET enable_external_file_cache = false;
+SET glue_enable_partition_key_statistics = false;
+SET debug_fs_delay_mean_ms = 20;
+SELECT count(*), sum(value) > 0 FROM my_datalake.default.range_listing_2000
+WHERE substr(dt, 9, 2) IN ('01', '15');

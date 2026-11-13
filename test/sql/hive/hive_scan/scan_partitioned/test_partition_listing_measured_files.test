@@ -1,0 +1,325 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_listing_measured_files.test
+# description: The choice between listing the table location and each partition read counts the keys the sample lists per partition, unless hive_partition_listing_measure_files is off
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mk_multi;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mk_single;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mk_flat;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mk_sparse;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mk_hidden;
+
+# 400 partitions of three files each: 1200 keys, two pages of the location rather than the one of a file each
+statement ok
+CREATE TABLE my_datalake.default.mk_multi (v INTEGER, part INTEGER) PARTITIONED BY (part);
+
+statement ok
+INSERT INTO my_datalake.default.mk_multi SELECT i, i FROM range(400) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.mk_multi SELECT i + 400, i FROM range(400) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.mk_multi SELECT i + 800, i FROM range(400) t(i);
+
+# 400 partitions of one file each: one page
+statement ok
+CREATE TABLE my_datalake.default.mk_single (v INTEGER, part INTEGER) PARTITIONED BY (part);
+
+statement ok
+INSERT INTO my_datalake.default.mk_single SELECT i, i FROM range(400) t(i);
+
+# 100 partitions of three files each and 300 without files: 300 keys, one page
+statement ok
+CREATE TABLE my_datalake.default.mk_sparse (v INTEGER, part INTEGER) PARTITIONED BY (part);
+
+statement ok
+INSERT INTO my_datalake.default.mk_sparse SELECT i, i FROM range(100) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.mk_sparse SELECT i, i FROM range(100) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.mk_sparse SELECT i, i FROM range(100) t(i);
+
+loop i 100 400
+
+statement ok
+CALL glue_add_partition('my_datalake.default.mk_sparse', {part: {i}});
+
+endloop
+
+# 400 partitions of one data file and two keys no scan reads: 1200 keys, two pages
+statement ok
+CREATE TABLE my_datalake.default.mk_hidden (v INTEGER, part INTEGER) PARTITIONED BY (part);
+
+statement ok
+INSERT INTO my_datalake.default.mk_hidden SELECT i, i FROM range(400) t(i);
+
+statement ok
+COPY (SELECT i AS v, i AS part FROM range(400) t(i)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/mk_hidden'
+    (FORMAT parquet, PARTITION_BY (part), APPEND, FILENAME_PATTERN '_SUCCESS_{uuid}');
+
+statement ok
+COPY (SELECT i AS v, i AS part FROM range(400) t(i)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/mk_hidden'
+    (FORMAT parquet, PARTITION_BY (part), APPEND, FILENAME_PATTERN '.crc_{uuid}');
+
+statement ok
+CREATE TABLE my_datalake.default.mk_flat (v INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.mk_flat SELECT i FROM range(10) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.mk_flat SELECT i FROM range(10) t(i);
+
+# measured keys choose between the location and one listing per partition, without prefix ranges
+statement ok
+SET hive_partition_listing_ranges = false;
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CREATE MACRO listings(tbl) AS TABLE
+    SELECT count(*) FILTER (WHERE prefix LIKE '%/' || tbl || '/part=%') AS partition_scoped,
+           count(*) FILTER (WHERE prefix LIKE '%/' || tbl || '/') AS root_scoped
+    FROM (
+        SELECT url_decode(regexp_extract(request.url, 'prefix=([^&]*)', 1)) AS prefix
+        FROM duckdb_logs_parsed('HTTP')
+        WHERE request.url LIKE '%list-type=2%'
+    );
+
+statement ok
+SET threads = 16;
+
+# 12 partitions are one round, as many as the one page a file per partition makes, and the location is planned. The
+# sample, its first page, holds three files a partition: two pages, so the 12 are listed on their own instead
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_multi WHERE part BETWEEN 100 AND 111;
+----
+36	18198
+
+query II
+SELECT * FROM listings('mk_multi');
+----
+12	1
+
+# 40 partitions are three rounds, more than the two pages: the location stays
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_multi WHERE part BETWEEN 100 AND 139;
+----
+120	62340
+
+query II
+SELECT * FROM listings('mk_multi');
+----
+0	2
+
+# with one file a partition the sample changes nothing: the location's first page is the whole listing
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_single WHERE part BETWEEN 100 AND 111;
+----
+12	1266
+
+query II
+SELECT * FROM listings('mk_single');
+----
+0	1
+
+# the sample counts the partitions without files: one file a partition on average, so the location stays
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_sparse WHERE part BETWEEN 50 AND 61;
+----
+36	1998
+
+query II
+SELECT * FROM listings('mk_sparse');
+----
+0	1
+
+# the keys no scan reads count as well: two pages, so the 12 partitions are listed on their own
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_hidden WHERE part BETWEEN 100 AND 111;
+----
+12	1266
+
+query II
+SELECT * FROM listings('mk_hidden');
+----
+12	1
+
+# a prepared statement measures again when it runs again: with two more files a partition written since, the 12
+# partitions are listed on their own
+statement ok
+PREPARE mk_single_query AS SELECT count(*), sum(v) FROM my_datalake.default.mk_single WHERE part BETWEEN 100 AND 111;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+EXECUTE mk_single_query;
+----
+12	1266
+
+query II
+SELECT * FROM listings('mk_single');
+----
+0	1
+
+statement ok
+COPY (SELECT i AS v, i AS part FROM range(400) t(i)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/mk_single'
+    (FORMAT parquet, PARTITION_BY (part), APPEND, FILENAME_PATTERN 'second_{uuid}');
+
+statement ok
+COPY (SELECT i AS v, i AS part FROM range(400) t(i)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/mk_single'
+    (FORMAT parquet, PARTITION_BY (part), APPEND, FILENAME_PATTERN 'third_{uuid}');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+EXECUTE mk_single_query;
+----
+36	3798
+
+query II
+SELECT * FROM listings('mk_single');
+----
+12	1
+
+statement ok
+DEALLOCATE mk_single_query;
+
+# an unpartitioned table lists its location once
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_flat;
+----
+20	90
+
+query II
+SELECT * FROM listings('mk_flat');
+----
+0	1
+
+# hive_partition_listing_measure_files off counts one file per partition: the 12 partitions list the location
+statement ok
+SET hive_partition_listing_measure_files = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_multi WHERE part BETWEEN 100 AND 111;
+----
+36	18198
+
+query II
+SELECT * FROM listings('mk_multi');
+----
+0	2
+
+statement ok
+RESET hive_partition_listing_measure_files;
+
+# hive_partition_listing_threshold fixes the choice, whatever the sample holds
+statement ok
+SET hive_partition_listing_threshold = 10;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_multi WHERE part BETWEEN 100 AND 111;
+----
+36	18198
+
+query II
+SELECT * FROM listings('mk_multi');
+----
+0	2
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+# with ranges, the location of one page planned for 20 partitions takes two once measured: the ranges part=1 and
+# part=4 take one round, and part=1 comes from the sample's first page
+statement ok
+RESET hive_partition_listing_ranges;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.mk_multi WHERE part BETWEEN 10 AND 19 OR part BETWEEN 40 AND 49;
+----
+60	25770
+
+query I
+SELECT regexp_extract(url_decode(regexp_extract(request.url, 'prefix=([^&]*)', 1)), '/mk_multi/(.*)$', 1) AS prefix
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.url LIKE '%list-type=2%' AND url_decode(request.url) LIKE '%/mk_multi/%'
+ORDER BY prefix;
+----
+(empty)
+part=4
+
+statement ok
+RESET threads;
+
+statement ok
+DROP TABLE my_datalake.default.mk_multi;
+
+statement ok
+DROP TABLE my_datalake.default.mk_single;
+
+statement ok
+DROP TABLE my_datalake.default.mk_sparse;
+
+statement ok
+DROP TABLE my_datalake.default.mk_flat;
+
+statement ok
+DROP TABLE my_datalake.default.mk_hidden;

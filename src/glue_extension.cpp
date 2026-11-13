@@ -136,6 +136,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "the location is listed when that takes fewer rounds of requests than listing the "
 	                          "partitions read, or as many rounds and a tenth of the requests.",
 	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
+	config.AddExtensionOption("hive_partition_listing_measure_files",
+	                          "Count the keys the scan's sample lists per partition, and size the table location's "
+	                          "listing by them rather than one key per partition. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("hive_partition_listing_ranges",
+	                          "List the partitions below the table location in ranges that share a key prefix, all "
+	                          "ranges at the same time, when that takes fewer rounds of requests than listing the "
+	                          "location or each partition read. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	config.AddExtensionOption("hive_footer_statistics_max_files",
 	                          "An unpartitioned parquet scan that reads at most this many files gives the optimizer "

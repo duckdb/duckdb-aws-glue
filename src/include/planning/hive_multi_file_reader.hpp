@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
@@ -12,6 +13,7 @@
 #include "duckdb/function/table_function.hpp"
 
 #include "core/glue_info.hpp"
+#include "planning/hive_listing_plan.hpp"
 
 namespace duckdb {
 
@@ -45,6 +47,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The keys the listing holds for a sampled partition on average, 0 until measured
+	atomic<idx_t> keys_per_partition {0};
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
@@ -93,10 +97,10 @@ private:
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so
-//! only the partitions a query reads are ever listed. When at least 'hive_partition_listing_threshold' of those
-//! partitions live below the table root, the root is listed once (recursively, one request per 1000 keys on S3) and
-//! the files are matched to their partitions by prefix; otherwise, and for partitions elsewhere, every partition is
-//! one listing of its location, 16 at a time as tasks on DuckDB's threads. An unpartitioned table is one listing of the
+//! only the partitions a query reads are ever listed. The partitions below the table root are listed as
+//! HiveListingPlanner chooses: the root once (recursively, one request per 1000 keys on S3) or its prefix ranges, with
+//! the files matched to their partitions by prefix, or each partition on its own, as the partitions elsewhere are.
+//! Listings run at the same time as tasks on DuckDB's threads. An unpartitioned table is one listing of the
 //! root location. A directory is listed once per query (scans and the sample share the listing); with
 //! glue_cache_listings the listings of Glue tables are kept for later statements of the connection as well.
 class HiveMultiFileList : public LazyMultiFileList {
@@ -131,20 +135,42 @@ protected:
 	bool ExpandNextPath() const override;
 
 private:
-	//! A listing we still have to do: either the table root (covering the partitions under it) or a batch of
-	//! partitions that each get their own listing
+	//! A listing we still have to do, of the partitions the job reads
 	struct ListingJob {
-		bool root;
+		HiveListingMode mode;
 		vector<idx_t> partitions;
+		vector<HiveListingRange> ranges;
 	};
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
+	//! Log the plan, once, when the first listing runs: measuring the sample may plan again before
+	void LogPlan() const;
+	//! 'partition_indexes' as a set, refusing a partition with another number of values than the table has keys
+	unordered_set<idx_t> ReadingSet(const vector<idx_t> &partition_indexes) const;
+	//! The partition owning a data file listed below the root, if any
+	optional_idx RootFileOwner(const OpenFileInfo &file) const;
+	//! Add the data files of 'reading' among 'files', listed below the root
+	void AddRootFiles(vector<OpenFileInfo> &files, const unordered_set<idx_t> &reading) const;
 	void ListRoot(const vector<idx_t> &partitions) const;
+	//! Lists 'ranges' at the same time, keeping the files of 'partitions'
+	void ListRanges(const vector<HiveListingRange> &ranges, const vector<idx_t> &partitions) const;
+	//! Lists the globs at the same time (an empty one lists nothing); the first error stops the rest and is thrown
+	vector<vector<OpenFileInfo>> ListGlobs(const vector<string> &globs) const;
 	//! Lists the directories of 'partition_indexes' in parallel
 	void ListPartitions(const vector<idx_t> &partition_indexes) const;
-	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until
-	//! they hold one of 'partitions'
-	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
+	//! What the first listing of the plan gives the sample
+	struct ListingSample {
+		vector<OpenFileInfo> files;
+		//! The partitions whose keys it holds completely, also those without files
+		unordered_set<idx_t> partitions;
+		//! Their keys, data files or not
+		idx_t keys = 0;
+	};
+	bool BoolSetting(const char *name, bool default_value) const;
+	//! The partitions the fetched pages of the listing below 'prefix' hold, fetching more only until one is read
+	ListingSample SampleListing(const string &glob, const string &prefix, const vector<idx_t> &partitions) const;
+	//! Called with the lock held
+	ListingSample SampleFromPlan() const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
 	//! Refuse to read a file attributed to 'owner' when its location is one two or more partitions are registered at
@@ -182,6 +208,13 @@ private:
 	//! which files there are attributed to) to all of them
 	mutable unordered_map<idx_t, vector<idx_t>> shared_locations;
 	mutable bool partition_locations_built = false;
+	//! The table location with a trailing '/', and the length of its ComparableLocation with it: set with the locations
+	mutable string root_prefix;
+	mutable idx_t comparable_root_size = 0;
+	mutable bool plan_logged = false;
+	//! The sample's files, and the partitions it holds completely, which a plan of ranges does not list again
+	mutable vector<OpenFileInfo> sampled_files;
+	mutable unordered_set<idx_t> sampled_partitions;
 };
 
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of
