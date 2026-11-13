@@ -49,10 +49,12 @@ SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response(
 ----
 [{'Name': id, 'Type': int}, {'Name': twice, 'Type': double}]
 
-query I
-SELECT response.StorageDescriptor.Location IS NULL FROM glue_get_table_response('my_datalake.default.gr_view');
+# an empty SerdeInfo and Location, as other engines write a view
+query II
+SELECT response.StorageDescriptor.SerdeInfo::VARCHAR, response.StorageDescriptor.Location
+FROM glue_get_table_response('my_datalake.default.gr_view');
 ----
-true
+{}	(empty)
 
 statement ok
 CREATE OR REPLACE VIEW my_datalake.default.gr_view AS SELECT id FROM gr_orders;
@@ -71,6 +73,12 @@ query I
 SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response('my_datalake.default.gr_view');
 ----
 [{'Name': id, 'Type': 'decimal(38,0)'}]
+
+query II
+SELECT response.StorageDescriptor.SerdeInfo::VARCHAR, response.StorageDescriptor.Location
+FROM glue_get_table_response('my_datalake.default.gr_view');
+----
+{}	(empty)
 
 # a column stores the closest Hive type other engines read, else string
 statement ok

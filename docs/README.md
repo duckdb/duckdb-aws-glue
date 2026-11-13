@@ -341,7 +341,7 @@ this connection's cache: a write through it, a rollback, or DETACH.
   names in the SELECT refer to the view's own database.
 - A view column's Glue type is its Hive type, or the closest one other engines read (`decimal(38,0)` for `HUGEINT`,
   `timestamp` for `TIMESTAMP_NS`), or `string` when there is none (e.g. `TIME`, `UUID`). DuckDB uses only the
-  column names and binds the view's SQL for the types.
+  column names and binds the view's SQL for the types. Other engines don't query DuckDB views; Spark refuses them.
 - `CREATE VIEW ... WITH (DEFER_BINDING)` is not supported yet: the tables a view reads must exist when it is created.
 - A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
   `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
