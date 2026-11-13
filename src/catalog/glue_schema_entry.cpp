@@ -633,7 +633,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		GlueColumn column;
 		auto aliased = i < info.aliases.size() && !info.aliases[i].GetIdentifierName().empty();
 		column.name = (aliased ? info.aliases[i] : info.names[i]).GetIdentifierName();
-		column.type = info.types[i].ToString();
+		column.type = GlueTypes::FromLogicalType(info.types[i]);
 		view.columns.push_back(std::move(column));
 	}
 	// re-fetch so the entry reflects what Glue stored
