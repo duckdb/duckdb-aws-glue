@@ -1,5 +1,5 @@
 # name: test/sql/hive/dml/insert/insert_written_files.test
-# description: glue_store_written_files adds the data files an INSERT or CREATE TABLE AS wrote to temp.main.glue_written_files, and GlueDataFileWritten logs them
+# description: glue_store_written_files adds the data files an INSERT or CREATE TABLE AS wrote to temp.main.glue_written_files
 # group: [insert]
 
 require httpfs
@@ -46,9 +46,6 @@ statement ok
 SET glue_store_written_files = true;
 
 statement ok
-CALL enable_logging('GlueDataFileWritten', storage := 'memory');
-
-statement ok
 INSERT INTO my_datalake.default.written_files SELECT i FROM range(10) t(i);
 
 # one row per file, from the INSERT's query: all the table's files
@@ -67,23 +64,6 @@ SELECT count(*) FROM (
 );
 ----
 0
-
-# the GlueDataFileWritten log has the same files, from this connection
-query I
-SELECT count(*) FROM (
-    (SELECT file_path FROM temp.main.glue_written_files
-     EXCEPT SELECT file_path FROM duckdb_logs_parsed('GlueDataFileWritten'))
-    UNION ALL
-    (SELECT file_path FROM duckdb_logs_parsed('GlueDataFileWritten')
-     EXCEPT SELECT file_path FROM temp.main.glue_written_files)
-);
-----
-0
-
-query I
-SELECT bool_and(connection_id = current_connection_id()) FROM duckdb_logs_parsed('GlueDataFileWritten');
-----
-true
 
 # each connection has its own table
 statement error con2

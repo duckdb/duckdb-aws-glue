@@ -22,7 +22,6 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/parsed_data/copy_info.hpp"
 #include "duckdb/planner/operator/logical_copy_to_file.hpp"
@@ -32,7 +31,6 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
-#include "core/glue_log_types.hpp"
 #include "core/glue_types.hpp"
 #include "core/hive_location.hpp"
 #include "execution/glue_written_files.hpp"
@@ -762,12 +760,8 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 }
 
 void GlueHiveInsert::RecordWrittenFiles(ClientContext &context, const vector<string> &files) const {
-	auto table = table_info.schema_name + "." + table_info.name;
 	if (!files.empty() && GlueWrittenFiles::IsEnabled(context)) {
-		GlueWrittenFiles::Append(context, table, files);
-	}
-	for (auto &file : files) {
-		DUCKDB_LOG(context, GlueDataFileWrittenLogType, table, file);
+		GlueWrittenFiles::Append(context, table_info.schema_name + "." + table_info.name, files);
 	}
 }
 

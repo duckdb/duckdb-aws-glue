@@ -557,16 +557,6 @@ SELECT "table", scan_id, event, partitions, partitions_read, listings, files, du
 FROM duckdb_logs_parsed('GlueScan');
 ```
 
-The `GlueDataFileWritten` log type (`INFO`) records the same files `glue_store_written_files` stores, one entry per data file
-with the `table` and the `file_path`, logged once the write is complete.
-
-```sql
-CALL enable_logging('GlueDataFileWritten', storage = 'memory');
-INSERT INTO lake.db.events SELECT ...;
-SELECT query_id, "table", file_path FROM duckdb_logs_parsed('GlueDataFileWritten')
-WHERE connection_id = current_connection_id() ORDER BY timestamp;
-```
-
 The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry strategy decides on for a Glue API call,
 before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
 the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got

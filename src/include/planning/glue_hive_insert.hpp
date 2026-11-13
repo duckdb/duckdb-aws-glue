@@ -60,8 +60,7 @@ private:
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
-	//! Records the files of a write whose partitions are registered: in the glue_written_files temporary table, and
-	//! one GlueDataFileWritten log entry per file
+	//! Adds the files of a write whose partitions are registered to the glue_written_files temporary table
 	void RecordWrittenFiles(ClientContext &context, const vector<string> &files) const;
 	//! Throws when a partition registration skipped as existing is registered at another location than its files
 	void CheckExistingPartitionLocations(ClientContext &context,

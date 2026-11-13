@@ -50,18 +50,6 @@ public:
 	static string ConstructLogMessage(const GlueScanEvent &event);
 };
 
-//! A data file an INSERT or CREATE TABLE AS into a Hive table wrote, logged once its partitions are registered
-class GlueDataFileWrittenLogType : public LogType {
-public:
-	static constexpr const char *NAME = "GlueDataFileWritten";
-	static constexpr LogLevel LEVEL = LogLevel::LOG_INFO;
-
-	GlueDataFileWrittenLogType();
-
-	static LogicalType GetLogType();
-	static string ConstructLogMessage(const string &table, const string &file_path);
-};
-
 //! A Glue API call the AWS SDK's retry strategy decided to retry, logged as GlueRetry before the wait. 'status' is NULL
 //! when the request got no response, 'error' and 'request_id' when the SDK has none (e.g. a dropped connection).
 struct GlueRetryEvent {
