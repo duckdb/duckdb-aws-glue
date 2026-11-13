@@ -32,8 +32,8 @@ public:
 	static void OnDetach(ClientContext &context, Catalog &catalog);
 	//! Whether glue_metadata_cache_scope is 'connection'
 	static bool ConnectionScoped(ClientContext &context);
-	//! Whether a statement runs on the connection: only a lookup within one keeps a table Glue reports missing
-	static bool InStatement(ClientContext &context);
+	//! Core's number of the running statement, MAXIMUM_QUERY_ID outside one: a miss only serves the statement it was in
+	static transaction_t ActiveQuery(ClientContext &context);
 	//! Clear the cache when the enclosing Glue mutation returns or throws
 	struct InvalidateOnExit {
 		InvalidateOnExit(ClientContext &context, Catalog &catalog) : context(context), catalog(catalog) {
@@ -44,10 +44,9 @@ public:
 		Catalog &catalog;
 	};
 
-	//! 'keep_miss' false: a table Glue reports missing is not kept (a lookup outside a statement, which no hook ends)
 	shared_ptr<const GlueTableInfo> GetTable(const string &database_name, const string &table_name,
 	                                         const std::function<shared_ptr<const GlueTableInfo>()> &load,
-	                                         bool keep_miss = true);
+	                                         transaction_t query = MAXIMUM_QUERY_ID);
 	shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(const string &database_name, const string &table_name,
 	              const std::function<shared_ptr<const vector<GluePartitionInfo>>()> &load) {
@@ -56,29 +55,16 @@ public:
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			entry = FindEntry(partitions, Key(database_name, table_name));
 		}
-		return Resolve(*entry, load);
+		return Resolve(*entry, load, MAXIMUM_QUERY_ID);
 	}
 	//! Store a table Glue just returned: it replaces a kept miss, a cached table stays
 	void PutTable(const string &database_name, const string &table_name, shared_ptr<const GlueTableInfo> table);
-	//! Whether GetTable answers from the cache, a known miss included, without calling Glue
-	bool IsTableResolved(const string &database_name, const string &table_name) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto slot = tables.find(Key(database_name, table_name));
-		return slot != tables.end() && slot->second->loaded;
-	}
+	//! Whether GetTable answers from the cache, a miss of the same query included, without calling Glue
+	bool IsTableResolved(const string &database_name, const string &table_name, transaction_t query = MAXIMUM_QUERY_ID);
 	void Clear() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
-		missing_tables.clear();
-	}
-	//! Forget the tables Glue reported missing; the tables it returned stay
-	void ClearMissingTables() {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		for (auto &key : missing_tables) {
-			tables.erase(key);
-		}
-		missing_tables.clear();
 	}
 	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
 	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
@@ -94,10 +80,15 @@ private:
 	template <class T>
 	struct CacheEntry {
 		annotated_mutex load_lock;
-		//! Null until a load succeeds, and after one that found nothing
+		//! Null until a load finds the object; a load that throws or finds nothing leaves it null
 		shared_ptr<const T> value DUCKDB_GUARDED_BY(load_lock);
-		//! Set when a load returns, a miss included; a load that throws leaves it unset
-		atomic<bool> loaded {false};
+		atomic<bool> found {false};
+		//! The query whose load found nothing; MAXIMUM_QUERY_ID (outside a statement) matches no query
+		atomic<transaction_t> miss_query {MAXIMUM_QUERY_ID};
+
+		bool IsResolved(transaction_t query) const {
+			return found || (query != MAXIMUM_QUERY_ID && miss_query == query);
+		}
 	};
 
 	//! Glue database and table names are case-insensitive, so keys fold case
@@ -117,28 +108,30 @@ private:
 		return slot;
 	}
 	template <class T>
-	static shared_ptr<const T> Resolve(CacheEntry<T> &entry, const std::function<shared_ptr<const T>()> &load) {
+	static shared_ptr<const T> Resolve(CacheEntry<T> &entry, const std::function<shared_ptr<const T>()> &load,
+	                                   transaction_t query) {
 		annotated_lock_guard<annotated_mutex> guard(entry.load_lock);
-		if (entry.loaded) {
+		if (entry.IsResolved(query)) {
 			return entry.value;
 		}
 		entry.value = load();
-		entry.loaded = true;
+		if (entry.value) {
+			entry.found = true;
+		} else {
+			entry.miss_query = query;
+		}
 		return entry.value;
 	}
 
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
-	//! The keys of 'tables' whose entry is a miss
-	unordered_set<string> missing_tables DUCKDB_GUARDED_BY(lock);
 	const idx_t id = NextId();
 };
 
-//! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog, and the
-//! default-scope caches of its transactions, whose misses it clears. Lives in the connection's registered state, so two
-//! connections never share a cache. A rollback clears the connection's caches: a failed statement must not leave
-//! metadata it resolved behind.
+//! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
+//! the connection's registered state, so two connections never share a cache. A rollback clears the caches held
+//! here: a failed statement must not leave metadata it resolved behind.
 class GlueMetadataCacheState : public ClientContextState {
 public:
 	static constexpr const char *NAME = "glue_metadata_cache";
@@ -175,27 +168,14 @@ public:
 		ClearAll();
 	}
 
-	//! Under the default scope a transaction's own cache, so that the misses in it end with the statement too
-	void TrackTransactionCache(const shared_ptr<GlueTransactionCache> &cache);
-
-	//! A miss only serves the statement that looked the table up; a statement that expands into several (PIVOT,
-	//! PRAGMA) runs them as one query, with a StatementBegin and StatementEnd for each
-	void StatementBegin(ClientContext &context) override;
-	void StatementEnd(ClientContext &context) override;
-
 private:
 	struct CatalogCache {
 		idx_t attach_oid;
 		shared_ptr<GlueTransactionCache> cache;
 	};
 
-	void ClearMisses();
-	void PruneTransactionCaches() DUCKDB_REQUIRES(lock);
-
 	annotated_mutex lock;
 	unordered_map<string, CatalogCache> caches DUCKDB_GUARDED_BY(lock);
-	//! Not owned: a transaction's cache ends with its transaction
-	vector<weak_ptr<GlueTransactionCache>> transaction_caches DUCKDB_GUARDED_BY(lock);
 };
 
 //! Glue has no transactional semantics in this extension: every DDL statement is executed against the Glue API

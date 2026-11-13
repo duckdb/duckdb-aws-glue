@@ -9,8 +9,6 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 
-#include <algorithm>
-
 namespace duckdb {
 
 GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &manager, ClientContext &context)
@@ -21,7 +19,6 @@ GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &
 		                                                       glue_catalog.GetAttached().oid);
 	} else {
 		cache = make_shared_ptr<GlueTransactionCache>();
-		GlueMetadataCacheState::Get(context)->TrackTransactionCache(cache);
 	}
 }
 
@@ -109,41 +106,6 @@ shared_ptr<GlueMetadataCacheState> GlueMetadataCacheState::Get(ClientContext &co
 	return context.registered_state->GetOrCreate<GlueMetadataCacheState>(NAME);
 }
 
-void GlueMetadataCacheState::TrackTransactionCache(const shared_ptr<GlueTransactionCache> &cache) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	PruneTransactionCaches();
-	transaction_caches.push_back(cache);
-}
-
-void GlueMetadataCacheState::StatementBegin(ClientContext &context) {
-	ClearMisses();
-}
-
-void GlueMetadataCacheState::StatementEnd(ClientContext &context) {
-	ClearMisses();
-}
-
-void GlueMetadataCacheState::ClearMisses() {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	for (auto &entry : caches) {
-		entry.second.cache->ClearMissingTables();
-	}
-	PruneTransactionCaches();
-	for (auto &weak : transaction_caches) {
-		auto cache = weak.lock();
-		if (cache) {
-			cache->ClearMissingTables();
-		}
-	}
-}
-
-void GlueMetadataCacheState::PruneTransactionCaches() {
-	transaction_caches.erase(
-	    std::remove_if(transaction_caches.begin(), transaction_caches.end(),
-	                   [](const weak_ptr<GlueTransactionCache> &cache) { return cache.expired(); }),
-	    transaction_caches.end());
-}
-
 idx_t GlueTransactionCache::NextId() {
 	static atomic<idx_t> next_id {0};
 	return ++next_id;
@@ -151,27 +113,13 @@ idx_t GlueTransactionCache::NextId() {
 
 shared_ptr<const GlueTableInfo>
 GlueTransactionCache::GetTable(const string &database_name, const string &table_name,
-                               const std::function<shared_ptr<const GlueTableInfo>()> &load, bool keep_miss) {
-	auto key = Key(database_name, table_name);
+                               const std::function<shared_ptr<const GlueTableInfo>()> &load, transaction_t query) {
 	shared_ptr<CacheEntry<GlueTableInfo>> entry;
 	{
 		annotated_lock_guard<annotated_mutex> guard(lock);
-		entry = FindEntry(tables, key);
+		entry = FindEntry(tables, Key(database_name, table_name));
 	}
-	auto table = Resolve(*entry, load);
-	if (!table) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		// only the slot still in the map: a clear may have replaced it while Glue was asked
-		auto slot = tables.find(key);
-		if (slot != tables.end() && slot->second == entry) {
-			if (keep_miss) {
-				missing_tables.insert(key);
-			} else {
-				tables.erase(slot);
-			}
-		}
-	}
-	return table;
+	return Resolve(*entry, load, query);
 }
 
 void GlueTransactionCache::PutTable(const string &database_name, const string &table_name,
@@ -179,29 +127,23 @@ void GlueTransactionCache::PutTable(const string &database_name, const string &t
 	if (!table) {
 		return;
 	}
-	auto key = Key(database_name, table_name);
 	shared_ptr<CacheEntry<GlueTableInfo>> entry;
 	{
 		annotated_lock_guard<annotated_mutex> guard(lock);
-		entry = FindEntry(tables, key);
+		entry = FindEntry(tables, Key(database_name, table_name));
 	}
-	bool replaced_miss;
-	{
-		annotated_lock_guard<annotated_mutex> guard(entry->load_lock);
-		if (entry->loaded && entry->value) {
-			return;
-		}
-		replaced_miss = entry->loaded;
-		entry->value = std::move(table);
-		entry->loaded = true;
+	annotated_lock_guard<annotated_mutex> guard(entry->load_lock);
+	if (entry->found) {
+		return;
 	}
-	if (replaced_miss) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto slot = tables.find(key);
-		if (slot != tables.end() && slot->second == entry) {
-			missing_tables.erase(key);
-		}
-	}
+	entry->value = std::move(table);
+	entry->found = true;
+}
+
+bool GlueTransactionCache::IsTableResolved(const string &database_name, const string &table_name, transaction_t query) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	auto slot = tables.find(Key(database_name, table_name));
+	return slot != tables.end() && slot->second->IsResolved(query);
 }
 
 optional_ptr<GlueTransactionCache> GlueTransactionCache::Of(ClientContext &context, Catalog &catalog) {
@@ -225,9 +167,8 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 	ClearHiveListingCache(context);
 }
 
-bool GlueTransactionCache::InStatement(ClientContext &context) {
-	// core's active query number: set for each statement, the connection's first one included, and reset between them
-	return context.transaction.HasActiveTransaction() && context.transaction.GetActiveQuery() != MAXIMUM_QUERY_ID;
+transaction_t GlueTransactionCache::ActiveQuery(ClientContext &context) {
+	return context.transaction.HasActiveTransaction() ? context.transaction.GetActiveQuery() : MAXIMUM_QUERY_ID;
 }
 
 bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {

@@ -8,12 +8,11 @@ TEST_CASE("A definition a listing stores replaces a kept miss but not a cached t
 	auto none = []() -> shared_ptr<const GlueTableInfo> {
 		return nullptr;
 	};
-	REQUIRE(!cache.GetTable("db", "m", none));
+	REQUIRE(!cache.GetTable("db", "m", none, 1));
 	auto listed = make_shared_ptr<const GlueTableInfo>();
 	cache.PutTable("db", "m", listed);
-	REQUIRE(cache.GetTable("db", "m", none) == listed);
-	cache.ClearMissingTables();
-	REQUIRE(cache.GetTable("db", "m", none) == listed);
+	REQUIRE(cache.GetTable("db", "m", none, 1) == listed);
+	REQUIRE(cache.GetTable("db", "m", none, 2) == listed);
 
 	auto cached = make_shared_ptr<const GlueTableInfo>();
 	REQUIRE(cache.GetTable("db", "t", [&]() { return cached; }) == cached);
@@ -29,7 +28,7 @@ TEST_CASE("A definition a listing stores replaces a kept miss but not a cached t
 	}) == fresh);
 }
 
-TEST_CASE("A table lookup that throws is not kept and a miss is kept until cleared", "[glue_catalog]") {
+TEST_CASE("A table lookup that throws is not kept and a miss only serves its own query", "[glue_catalog]") {
 	GlueTransactionCache cache;
 	auto table = make_shared_ptr<const GlueTableInfo>();
 	REQUIRE_THROWS(
@@ -42,13 +41,20 @@ TEST_CASE("A table lookup that throws is not kept and a miss is kept until clear
 		loads++;
 		return nullptr;
 	};
-	REQUIRE(!cache.GetTable("db", "m", miss));
-	REQUIRE(cache.IsTableResolved("DB", "M"));
-	REQUIRE(!cache.GetTable("db", "m", miss));
+	REQUIRE(!cache.GetTable("db", "m", miss, 1));
+	REQUIRE(cache.IsTableResolved("DB", "M", 1));
+	REQUIRE(!cache.GetTable("db", "m", miss, 1));
 	REQUIRE(loads == 1);
-	cache.ClearMissingTables();
+	REQUIRE(!cache.IsTableResolved("db", "m", 2));
 	REQUIRE(!cache.IsTableResolved("db", "m"));
-	REQUIRE(cache.IsTableResolved("db", "t"));
+	REQUIRE(cache.IsTableResolved("db", "t", 2));
+	REQUIRE(!cache.GetTable("db", "m", miss, 2));
+	REQUIRE(loads == 2);
+
+	// outside a statement a miss is never kept
+	REQUIRE(!cache.GetTable("db", "o", miss));
+	REQUIRE(!cache.GetTable("db", "o", miss));
+	REQUIRE(loads == 4);
 }
 
 TEST_CASE("A table miss from an API lookup does not outlive it", "[glue_catalog]") {
@@ -67,7 +73,7 @@ TEST_CASE("A table miss from an API lookup does not outlive it", "[glue_catalog]
 	auto table = tables.Add("t");
 	Run(con, "SET glue_metadata_cache_scope = 'connection'");
 
-	// TableInfo looks the table up outside a statement, so no StatementEnd follows it
+	// TableInfo looks the table up outside a statement
 	REQUIRE(!con.TableInfo(Identifier("lake"), Identifier("default"), Identifier(table)));
 	Run(other, "CREATE TABLE lake.default." + table + " (id INTEGER)");
 	Run(con, "DROP TABLE IF EXISTS lake.default." + table);

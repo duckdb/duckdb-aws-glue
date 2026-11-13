@@ -140,6 +140,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	// is started before entry_lock is taken, the order RetireEntry takes the locks in
 	Transaction::Get(context, catalog);
 	auto cache = GlueTransactionCache::Of(context, catalog);
+	auto query = GlueTransactionCache::ActiveQuery(context);
 	bool cached;
 	string glue_name;
 	{
@@ -153,7 +154,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		// page warms the cache, at most once per instance - under the default scope that is once per transaction.
 		// A name the cache already resolved, a known miss included, needs no page.
 		if (!cached && cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
-		    !cache->IsTableResolved(schema.GetDatabaseName(), glue_name) && BatchTableLookups(context)) {
+		    !cache->IsTableResolved(schema.GetDatabaseName(), glue_name, query) && BatchTableLookups(context)) {
 			BulkLoadTableInfo(context, *cache);
 		}
 	}
@@ -168,9 +169,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	};
 	// the definition Glue holds, fetched once per transaction (GlueTransactionCache) and outside entry_lock, so that a
 	// Glue round trip does not hold up the lookups of other tables
-	auto table =
-	    cache ? cache->GetTable(schema.GetDatabaseName(), glue_name, load, GlueTransactionCache::InStatement(context))
-	          : load();
+	auto table = cache ? cache->GetTable(schema.GetDatabaseName(), glue_name, load, query) : load();
 	lock_guard<mutex> guard(entry_lock);
 	if (!cached && asked_glue) {
 		// counts the round trips of misses, not lookups: a cache hit (including a bulk-warmed one) costs nothing and
