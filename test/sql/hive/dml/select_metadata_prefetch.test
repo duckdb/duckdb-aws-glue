@@ -52,12 +52,13 @@ CREATE MACRO glue_calls(api) AS (
     SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
 );
 
-# whether every GetPartitions of the query was answered before its first S3 listing: one table after the other, a
-# table's sample is listed before the next table's partitions are asked for
+# whether every GetPartitions of the query was answered before the first S3 listing of a partitioned table: one table
+# after the other, a table's sample is listed before the next table's partitions are asked for. An unpartitioned table
+# of a few files is listed at bind, for the statistics in its footers
 statement ok
 CREATE MACRO partitions_before_listings() AS (
     SELECT max(timestamp) FILTER (WHERE request.headers['x-amz-target'] = 'AWSGlue.GetPartitions')
-        < min(timestamp) FILTER (WHERE request.url LIKE '%list-type=2%')
+        < min(timestamp) FILTER (WHERE request.url LIKE '%list-type=2%' AND request.url NOT LIKE '%prefetch_flat%')
     FROM duckdb_logs_parsed('HTTP')
 );
 
@@ -114,6 +115,12 @@ query II
 SELECT s3_listings('prefetch_many'), s3_listings('prefetch_few');
 ----
 2	1
+
+# filtered on both tables, their partitions are fetched together too
+query I
+SELECT partitions_overlap();
+----
+true
 
 # a table pruned to no partition is not listed
 statement ok

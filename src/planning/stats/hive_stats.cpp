@@ -304,6 +304,10 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = hive_list.ScanInfo();
+	if (!info.partition_keys.empty()) {
+		// the other tables of the query are fetched along with this one
+		HiveQueryCache::Get(context)->PrefetchPartitions(context);
+	}
 	// pruning has already happened by the time the cardinality is asked for, so these are the partitions read
 	auto partitions = info.partition_keys.empty() ? idx_t(1) : hive_list.PartitionIndexes()->size();
 	if (partitions == 0) {

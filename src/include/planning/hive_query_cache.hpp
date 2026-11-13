@@ -36,6 +36,8 @@ struct HiveDirectoryListingEntry {
 	annotated_mutex lock;
 	//! Null until some scan first asks for this directory
 	shared_ptr<MultiFileList> listing DUCKDB_GUARDED_BY(lock);
+	//! Why listing it failed in this query, which every later scan of it gets
+	ErrorData error DUCKDB_GUARDED_BY(lock);
 };
 
 //! A file list of a Hive scan in the running query, as the prefetches see it: what they need to list ahead of the scan
@@ -53,7 +55,7 @@ struct HiveFileListEntry {
 	//! Null for every partition of the table
 	const shared_ptr<const vector<idx_t>> partition_indexes;
 	//! Set once the optimizer pushed the scan's filters into the list: before that, its partitions are not the ones
-	//! the scan reads, and a filter on the partition keys may still let Glue return fewer
+	//! the scan reads
 	atomic<bool> filters_pushed {false};
 	//! Set once a prefetch took up listing the sample directory
 	atomic<bool> sample_prefetched {false};
@@ -90,8 +92,7 @@ public:
 	shared_ptr<HiveFileListEntry> RegisterFileList(shared_ptr<HiveScanInfo> scan_info,
 	                                               shared_ptr<const vector<idx_t>> partition_indexes);
 	//! Fetch the partitions of the partitioned Glue tables the query scans at the same time, rather than one table
-	//! after the other as planning reaches each scan: those of every scan whose filters were pushed down, each table
-	//! once per query
+	//! after the other as planning reaches each scan, each table once per query
 	void PrefetchPartitions(ClientContext &context);
 	//! List the sample directory of the tables the query scans once at the same time, before their cardinality is
 	//! measured: those of every scan whose filters were pushed down, each once. Only fills the query's caches, so every

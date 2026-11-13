@@ -5,7 +5,8 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/parallel/task_executor.hpp"
+#include "duckdb/parallel/async_result.hpp"
+#include "duckdb/parallel/callback_async_task.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
@@ -20,11 +21,23 @@ static constexpr const char *HIVE_LISTING_CACHE = "glue_listing_cache";
 //! The listing of a directory, started under the entry's own lock: starting it fetches the first page, which must
 //! not hold up the listings of other directories
 static shared_ptr<MultiFileList> GetListing(ClientContext &context, HiveDirectoryListingEntry &entry,
-                                            const string &directory) {
+                                            const string &directory, bool remember_error) {
 	annotated_lock_guard<annotated_mutex> guard(entry.lock);
+	if (entry.error.HasError()) {
+		entry.error.Throw();
+	}
 	if (!entry.listing) {
 		auto &fs = FileSystem::GetFileSystem(context);
-		entry.listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
+		try {
+			entry.listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (remember_error && error.Type() != ExceptionType::INTERRUPT) {
+				// for this query only: every later scan of the directory gets the error without listing it again
+				entry.error = error;
+			}
+			throw;
+		}
 	}
 	return entry.listing;
 }
@@ -49,7 +62,7 @@ public:
 			annotated_lock_guard<annotated_mutex> guard(lock);
 			entry = FindListing(listings, directory);
 		}
-		return duckdb::GetListing(context, *entry, directory);
+		return duckdb::GetListing(context, *entry, directory, false);
 	}
 
 	void Clear() {
@@ -143,7 +156,7 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		entry = FindListing(directory_listings, key);
 	}
-	return duckdb::GetListing(context, *entry, key);
+	return duckdb::GetListing(context, *entry, key, true);
 }
 
 ErrorData HiveFileListEntry::SampleListingError() {
@@ -179,47 +192,27 @@ vector<shared_ptr<HiveFileListEntry>> HiveQueryCache::LiveFileLists() {
 	return result;
 }
 
-namespace {
-
-//! Metadata fetched ahead of the scan that needs it. A failure is remembered where the result would have been and
-//! reported to that scan; an interrupt ends the query
-class HivePrefetchTask : public BaseExecutorTask {
-public:
-	HivePrefetchTask(TaskExecutor &executor, ClientContext &context, std::function<void()> fetch_p)
-	    : BaseExecutorTask(executor), context(context), fetch(std::move(fetch_p)) {
-	}
-
-	void ExecuteTask() override {
-		if (context.IsInterrupted()) {
-			throw InterruptException();
-		}
-		try {
-			fetch();
-		} catch (std::exception &ex) {
-			ErrorData error(ex);
-			if (error.Type() == ExceptionType::INTERRUPT) {
-				throw;
-			}
-		}
-	}
-	string TaskType() const override {
-		return "HivePrefetchTask";
-	}
-
-private:
-	ClientContext &context;
-	std::function<void()> fetch;
-};
-
-void RunPrefetchTasks(ClientContext &context, vector<std::function<void()>> fetches) {
-	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+//! Run the fetches side by side. A failure is remembered where the result would have been and reported to the scan
+//! that needs it; an interrupt ends the query
+static void RunPrefetchTasks(ClientContext &context, vector<std::function<void()>> fetches) {
+	vector<unique_ptr<AsyncTask>> tasks;
 	for (auto &fetch : fetches) {
-		executor.ScheduleTask(make_uniq<HivePrefetchTask>(executor, context, std::move(fetch)));
+		tasks.push_back(make_uniq<CallbackAsyncTask>([&context, fetch]() {
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			try {
+				fetch();
+			} catch (std::exception &ex) {
+				if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+					throw;
+				}
+			}
+		}));
 	}
-	executor.WorkOnTasks();
+	auto result = AsyncResult::FromTasks(std::move(tasks), TaskSchedulerType::ASYNC);
+	result.ExecuteTasksSynchronously(context);
 }
-
-} // namespace
 
 void HiveQueryCache::PrefetchPartitions(ClientContext &context) {
 	vector<shared_ptr<HiveFileListEntry>> lists;
@@ -231,8 +224,7 @@ void HiveQueryCache::PrefetchPartitions(ClientContext &context) {
 	unordered_map<string, shared_ptr<HiveScanInfo>> tables;
 	for (auto &list : lists) {
 		auto &info = *list->scan_info;
-		if (!list->filters_pushed || info.partition_keys.empty() || info.catalog_name.empty() ||
-		    info.PartitionsLoaded()) {
+		if (info.partition_keys.empty() || info.catalog_name.empty() || info.PartitionsLoaded()) {
 			continue;
 		}
 		tables.emplace(TableKey(info.catalog_name, info.database_name, info.table_name), list->scan_info);

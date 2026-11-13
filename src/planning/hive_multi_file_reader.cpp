@@ -91,10 +91,6 @@ idx_t HiveScanInfo::GetPartitionKeyIndex(const string &name) const {
 }
 
 shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientContext &context) const {
-	if (!partition_keys.empty() && !catalog_name.empty() && !PartitionsLoaded()) {
-		// the other tables of the query are fetched along with this one
-		HiveQueryCache::Get(context)->PrefetchPartitions(context);
-	}
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
 	if (!partitions) {
 		if (partition_keys.empty() || catalog_name.empty()) {
@@ -1456,6 +1452,8 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// hive partitioning does: kept, the optimizer would cost it a second time (a range filter keeps a fifth of the
 	// rows the pruning already narrowed down).
 	// first use of the partitions: loaded here, with the filters known
+	// the other tables of the query are fetched along with this one
+	HiveQueryCache::Get(context)->PrefetchPartitions(context);
 	auto candidates = hive_list.PartitionIndexes();
 	auto partitions = info.Partitions(context);
 	unordered_set<idx_t> pruning_filters;

@@ -140,6 +140,10 @@ DROP TABLE IF EXISTS missing_dl.default.pf_missing;
 statement ok
 CREATE TABLE missing_dl.default.pf_missing (id BIGINT);
 
+# read at bind, the footers of a small table would fail the query before any prefetch
+statement ok con2
+SET hive_footer_statistics_max_files = 0;
+
 statement ok con2
 CALL truncate_duckdb_logs();
 
@@ -150,6 +154,12 @@ SELECT count(*) FROM my_datalake.default.pf_missing;
 
 statement ok con2
 SET VARIABLE missing_listings = s3_listings('pf_missing');
+
+# once for the sample: the scan gets the same error without listing again
+query I con2
+SELECT getvariable('missing_listings');
+----
+1
 
 statement ok con2
 CALL truncate_duckdb_logs();
@@ -163,6 +173,9 @@ query I con2
 SELECT s3_listings('pf_missing') = getvariable('missing_listings');
 ----
 true
+
+statement ok con2
+RESET hive_footer_statistics_max_files;
 
 statement ok
 DROP TABLE missing_dl.default.pf_missing;
