@@ -3,8 +3,8 @@
 # no SQL shows; built only on request (make test-cpp)
 add_executable(
   unittest_glue EXCLUDE_FROM_ALL
-  main.cpp glue_partitions_test.cpp hive_reader_call_test.cpp
-  hive_scan_copy_test.cpp glue_view_iceberg_test.cpp)
+  main.cpp glue_partitions_test.cpp glue_cached_miss_test.cpp
+  hive_reader_call_test.cpp hive_scan_copy_test.cpp glue_view_iceberg_test.cpp)
 target_include_directories(unittest_glue
                            PRIVATE ${CMAKE_SOURCE_DIR}/third_party/catch)
 set_target_properties(unittest_glue PROPERTIES RUNTIME_OUTPUT_DIRECTORY

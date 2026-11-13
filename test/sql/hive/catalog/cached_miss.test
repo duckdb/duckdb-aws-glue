@@ -1,0 +1,249 @@
+# name: test/sql/hive/catalog/cached_miss.test
+# description: a table Glue reports missing is remembered only until its statement ends, under either cache scope: a table another client creates is found by the next statement
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS mutator (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+# the database name is unique to the run, so that runs against the same Glue do not drop each other's tables
+# another client: every change to Glue below goes through con2, so only the end of a statement clears this connection's misses
+statement ok con2
+DROP SCHEMA IF EXISTS mutator."cached_miss_{RUN_ID}" CASCADE;
+
+statement ok con2
+CREATE SCHEMA mutator."cached_miss_{RUN_ID}";
+
+statement ok con2
+CREATE TABLE mutator."cached_miss_{RUN_ID}".present (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/present');
+
+statement ok con2
+INSERT INTO mutator."cached_miss_{RUN_ID}".present VALUES (1);
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+# --- a miss does not outlive the statement that looked it up: after a successful DROP TABLE IF EXISTS of a missing
+# --- table, a table another client creates is found, and a second DROP TABLE IF EXISTS drops it
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g5 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+DROP TABLE IF EXISTS g5."cached_miss_{RUN_ID}".m5;
+
+statement ok con2
+CREATE TABLE mutator."cached_miss_{RUN_ID}".m5 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m5');
+
+statement ok con2
+INSERT INTO mutator."cached_miss_{RUN_ID}".m5 VALUES (5);
+
+statement ok
+DROP TABLE IF EXISTS g5."cached_miss_{RUN_ID}".m5;
+
+statement error con2
+SELECT * FROM glue_get_table_response('mutator."cached_miss_{RUN_ID}".m5');
+----
+<REGEX>:.*does not exist.*
+
+# the same for a read: a table created after a miss is found by the next statement
+statement ok
+DROP TABLE IF EXISTS g5."cached_miss_{RUN_ID}".m5r;
+
+statement ok con2
+CREATE TABLE mutator."cached_miss_{RUN_ID}".m5r (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m5r');
+
+statement ok con2
+INSERT INTO mutator."cached_miss_{RUN_ID}".m5r VALUES (55);
+
+query I
+SELECT id FROM g5."cached_miss_{RUN_ID}".m5r;
+----
+55
+
+# --- a listing after a miss: the table another client created since is listed and readable
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g2 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+DROP TABLE IF EXISTS g2."cached_miss_{RUN_ID}".m2;
+
+statement ok con2
+CREATE TABLE mutator."cached_miss_{RUN_ID}".m2 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m2');
+
+statement ok con2
+INSERT INTO mutator."cached_miss_{RUN_ID}".m2 VALUES (2);
+
+query I
+SELECT count(*) FROM (SHOW TABLES FROM g2."cached_miss_{RUN_ID}") WHERE name = 'm2';
+----
+1
+
+query I
+SELECT id FROM g2."cached_miss_{RUN_ID}".m2;
+----
+2
+
+# --- a GetTables page after a miss: once the schema is loaded the miss counts as a round trip, so the next uncached
+# --- lookup fetches a page, which holds the table created since; reading it then needs no GetTable
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g3 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+# a lookup in a database not loaded yet loads it from the table lookup and does not count towards batching
+statement ok
+DROP TABLE IF EXISTS g3."cached_miss_{RUN_ID}".m3_schema;
+
+statement ok
+DROP TABLE IF EXISTS g3."cached_miss_{RUN_ID}".m3;
+
+statement ok con2
+CREATE TABLE mutator."cached_miss_{RUN_ID}".m3 (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m3');
+
+statement ok con2
+INSERT INTO mutator."cached_miss_{RUN_ID}".m3 VALUES (3);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM g3."cached_miss_{RUN_ID}".present;
+----
+1
+
+query I
+SELECT glue_calls('GetTables');
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM g3."cached_miss_{RUN_ID}".m3;
+----
+3
+
+query I
+SELECT glue_calls('GetTable');
+----
+0
+
+# --- under the default scope a miss ends with its statement too, within an explicit transaction. Glue DDL is refused
+# --- there, so the miss comes from the search path: a bare duckdb_tables is first looked up as a table of g6's database
+statement ok
+SET glue_metadata_cache_scope = 'transaction';
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS g6 (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+USE g6."cached_miss_{RUN_ID}";
+
+statement ok
+BEGIN;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) > 0 FROM duckdb_tables;
+----
+true
+
+# the bare name was looked up in g6's database first: the miss this case is about
+query I
+SELECT memory.glue_calls('GetTable') > 0;
+----
+true
+
+statement ok con2
+CREATE TABLE mutator."cached_miss_{RUN_ID}".duckdb_tables (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/m6');
+
+statement ok con2
+INSERT INTO mutator."cached_miss_{RUN_ID}".duckdb_tables VALUES (6);
+
+query I
+SELECT id FROM g6."cached_miss_{RUN_ID}".duckdb_tables;
+----
+6
+
+statement ok
+COMMIT;
+
+# --- a statement that expands into several runs them as one query: a miss ends with each of them. A PIVOT without
+# --- IN runs CREATE TYPE ... AS ENUM (SELECT DISTINCT k FROM src) and then the pivot; the bare src is looked up as a
+# --- table of g6's database in both, and the second asks Glue again
+statement ok
+CREATE TABLE memory.main.cached_miss_pivot_src AS SELECT * FROM (VALUES ('a', 1), ('b', 2)) t(k, v);
+
+statement ok
+SET glue_batch_table_lookup = false;
+
+statement ok
+SET search_path = 'g6."cached_miss_{RUN_ID}",memory.main';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+PIVOT cached_miss_pivot_src ON k USING sum(v);
+----
+1	2
+
+query I
+SELECT memory.glue_calls('GetTable');
+----
+2
+
+# the same under the connection scope, whose cache outlives the query
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+PIVOT cached_miss_pivot_src ON k USING sum(v);
+----
+1	2
+
+query I
+SELECT memory.glue_calls('GetTable');
+----
+2
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+statement ok
+RESET search_path;
+
+statement ok
+RESET glue_batch_table_lookup;
+
+statement ok
+USE memory.main;
+
+statement ok
+DROP TABLE memory.main.cached_miss_pivot_src;
+
+statement ok con2
+DROP SCHEMA mutator."cached_miss_{RUN_ID}" CASCADE;
