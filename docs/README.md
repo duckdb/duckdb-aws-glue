@@ -170,7 +170,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   file is skipped. The optimizer prunes on these statistics and orders joins by them: the minimum and maximum of a
   dimension's key let it see how much a join on that key keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
-  query scans the table.
+  query scans the table. A query over several tables fetches their partition lists, and lists the directories their
+  row counts are estimated from, at the same time rather than one table after the other: those of each table once its
+  filters are known, so that they narrow down what is fetched. A scan does not repeat a request made ahead of it,
+  also when it failed.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.

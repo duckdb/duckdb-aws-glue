@@ -331,12 +331,27 @@ private:
 //===--------------------------------------------------------------------===//
 HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p,
                                      vector<idx_t> partition_indexes_p)
-    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)),
-      partition_indexes(make_shared_ptr<const vector<idx_t>>(std::move(partition_indexes_p))) {
+    : HiveMultiFileList(context, std::move(scan_info_p),
+                        make_shared_ptr<const vector<idx_t>>(std::move(partition_indexes_p)), true) {
 }
 
 HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p)
-    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)) {
+    : HiveMultiFileList(context, std::move(scan_info_p), nullptr, true) {
+}
+
+HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p,
+                                     shared_ptr<const vector<idx_t>> partition_indexes_p, bool registered)
+    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)),
+      partition_indexes(std::move(partition_indexes_p)) {
+	if (registered) {
+		cache_entry = HiveQueryCache::Get(context)->RegisterFileList(scan_info, partition_indexes);
+	}
+}
+
+void HiveMultiFileList::MarkFiltersPushed() const {
+	if (cache_entry) {
+		cache_entry->filters_pushed = true;
+	}
 }
 
 shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {
@@ -700,6 +715,13 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 }
 
 vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
+	if (cache_entry) {
+		// listed ahead of the scan already, and failed: not asked again
+		auto error = cache_entry->SampleListingError();
+		if (error.HasError()) {
+			error.Throw();
+		}
+	}
 	lock_guard<mutex> lck(lock);
 	PlanListings();
 	vector<OpenFileInfo> files;
@@ -839,10 +861,11 @@ unique_ptr<MultiFileList> HiveMultiFileList::Copy() const {
 		annotated_lock_guard<annotated_mutex> guard(indexes_lock);
 		indexes = partition_indexes;
 	}
-	if (!indexes) {
-		return make_uniq<HiveMultiFileList>(client_context, scan_info);
-	}
-	return make_uniq<HiveMultiFileList>(client_context, scan_info, *indexes);
+	// the same list to the query cache: a copy counts as no second scan of the table, and reports the error of a
+	// sample listing fetched ahead rather than listing again
+	auto result = make_uniq<HiveMultiFileList>(client_context, scan_info, std::move(indexes), false);
+	result->cache_entry = cache_entry;
+	return std::move(result);
 }
 
 //===--------------------------------------------------------------------===//
@@ -1414,6 +1437,8 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
                                                                      const MultiFileOptions &options,
                                                                      MultiFilePushdownInfo &pushdown_info,
                                                                      vector<unique_ptr<Expression>> &filters) {
+	auto &hive_list = files.Cast<HiveMultiFileList>();
+	hive_list.MarkFiltersPushed();
 	auto &info = ScanInfo();
 	if (info.partition_keys.empty() || filters.empty()) {
 		return nullptr;
@@ -1427,7 +1452,8 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// hive partitioning does: kept, the optimizer would cost it a second time (a range filter keeps a fifth of the
 	// rows the pruning already narrowed down).
 	// first use of the partitions: loaded here, with the filters known
-	auto &hive_list = files.Cast<HiveMultiFileList>();
+	// the other tables of the query are fetched along with this one
+	HiveQueryCache::Get(context)->PrefetchPartitions(context);
 	auto candidates = hive_list.PartitionIndexes();
 	auto partitions = info.Partitions(context);
 	unordered_set<idx_t> pruning_filters;
@@ -1453,7 +1479,9 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	if (kept.size() == candidates->size()) {
 		return nullptr;
 	}
-	return make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));
+	auto result = make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));
+	result->MarkFiltersPushed();
+	return std::move(result);
 }
 
 unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const {
@@ -1506,7 +1534,9 @@ unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDyna
 	if (kept.size() == candidates->size()) {
 		return nullptr;
 	}
-	return make_uniq<HiveMultiFileList>(info.context, scan_info, std::move(kept));
+	// the scan is starting: past the prefetches, which need not know the list
+	return make_uniq<HiveMultiFileList>(info.context, scan_info, make_shared_ptr<const vector<idx_t>>(std::move(kept)),
+	                                    false);
 }
 
 //===--------------------------------------------------------------------===//

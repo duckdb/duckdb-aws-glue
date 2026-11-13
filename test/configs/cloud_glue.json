@@ -71,7 +71,8 @@
 				"test/sql/hive/catalog/connection_cache.test",
 				"test/sql/hive/catalog/bare_statement_cache.test",
 				"test/sql/hive/hive_scan/scan_partitioned/test_lazy_partitions.test",
-				"test/sql/hive/ddl/glue_calls_per_ddl.test"
+				"test/sql/hive/ddl/glue_calls_per_ddl.test",
+				"test/sql/hive/dml/select_metadata_prefetch.test"
 			]
 		},
 		{

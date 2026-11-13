@@ -14,6 +14,7 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
+struct HiveFileListEntry;
 
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
@@ -105,6 +106,10 @@ public:
 	HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info, vector<idx_t> partition_indexes);
 	//! Every partition of the table, resolved when PartitionIndexes() is first asked
 	HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info);
+	//! 'partition_indexes' null for every partition. Unless 'registered', the query cache does not know the list and
+	//! prefetches nothing for it
+	HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
+	                  shared_ptr<const vector<idx_t>> partition_indexes, bool registered);
 
 	//! The partitions to read, as indexes into HiveScanInfo::Partitions()
 	shared_ptr<const vector<idx_t>> PartitionIndexes() const;
@@ -114,6 +119,9 @@ public:
 	ClientContext &Context() const {
 		return client_context;
 	}
+	//! The optimizer pushed the scan's filters into the list (HiveMultiFileReader::ComplexFilterPushdown): its
+	//! partitions are the ones the scan reads, which the query cache may now fetch ahead of the scan
+	void MarkFiltersPushed() const;
 	FileExpandResult GetExpandResult() const override;
 	//! Prune on the table filters pushed in when the scan starts
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
@@ -166,6 +174,8 @@ private:
 	//! members
 	ClientContext &client_context;
 	shared_ptr<HiveScanInfo> scan_info;
+	//! What the query cache knows of the list, null when it is not registered
+	shared_ptr<HiveFileListEntry> cache_entry;
 	mutable annotated_mutex indexes_lock;
 	//! Null for every partition of the table until PartitionIndexes() resolves it
 	mutable shared_ptr<const vector<idx_t>> partition_indexes DUCKDB_GUARDED_BY(indexes_lock);
