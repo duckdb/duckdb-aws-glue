@@ -28,6 +28,8 @@ struct GlueAttachOptions {
 	Identifier default_schema;
 	//! Run the ATTACH-time GetDatabases reachability probe (default true); false defers the first Glue call
 	bool verify_connection = true;
+	//! The attached Iceberg catalog that reads this catalog's Iceberg tables in Glue views
+	Identifier iceberg_catalog;
 };
 
 } // namespace duckdb

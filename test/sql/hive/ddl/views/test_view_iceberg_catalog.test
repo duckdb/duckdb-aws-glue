@@ -1,0 +1,96 @@
+# name: test/sql/hive/ddl/views/test_view_iceberg_catalog.test
+# description: A Glue view joins a Hive and an Iceberg table, reading the Iceberg table through ICEBERG_CATALOG
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_TEST_CONFIG cloud
+
+require-env GLUE_CATALOG_ID
+
+require iceberg
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
+    TYPE glue,
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    ICEBERG_CATALOG 'my_datalake_iceberg'
+);
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS my_datalake_iceberg (TYPE iceberg, ENDPOINT_TYPE glue);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.glue_iceberg_views CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.glue_iceberg_views;
+
+statement ok
+CREATE TABLE my_datalake.glue_iceberg_views.customers AS SELECT 1 AS id, 'Ada' AS name;
+
+statement ok
+CREATE TABLE my_datalake_iceberg.glue_iceberg_views.orders
+WITH ('location' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/iceberg_orders')
+AS SELECT 1 AS id, 42 AS amount;
+
+statement ok
+CREATE VIEW my_datalake.glue_iceberg_views.orders_by_customer AS
+SELECT c.name, o.amount
+FROM my_datalake.glue_iceberg_views.customers c
+JOIN my_datalake_iceberg.glue_iceberg_views.orders o ON c.id = o.id;
+
+query II
+SELECT * FROM my_datalake.glue_iceberg_views.orders_by_customer;
+----
+Ada	42
+
+# the stored SQL names both tables by their Glue names
+query I
+SELECT contains(response.ViewExpandedText::VARCHAR, 'my_datalake_iceberg')
+FROM glue_get_table_response('my_datalake.glue_iceberg_views.orders_by_customer');
+----
+false
+
+query TT
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND schema_name = 'glue_iceberg_views' AND table_name = 'orders_by_customer'
+ORDER BY column_index;
+----
+name	VARCHAR
+amount	INTEGER
+
+statement error
+SELECT * FROM my_datalake.glue_iceberg_views.orders;
+----
+can not be read yet
+
+# another session can attach the Iceberg catalog under any name
+statement ok
+DETACH my_datalake;
+
+statement ok
+DETACH my_datalake_iceberg;
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS lake (TYPE glue, ICEBERG_CATALOG 'ice');
+
+statement error
+SELECT * FROM lake.glue_iceberg_views.orders_by_customer;
+----
+attach the Iceberg catalog "ice"
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS ice (TYPE iceberg, ENDPOINT_TYPE glue);
+
+query II
+SELECT * FROM lake.glue_iceberg_views.orders_by_customer;
+----
+Ada	42
+
+statement ok
+DROP SCHEMA lake.glue_iceberg_views CASCADE;

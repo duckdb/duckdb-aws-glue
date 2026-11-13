@@ -1,6 +1,6 @@
 # name: test/sql/hive/dml/select_metadata_prefetch.test
 # description: a query over several Hive tables fetches their partitions and sample listings together, and reads the same
-# group: [hive]
+# group: [dml]
 
 require httpfs
 

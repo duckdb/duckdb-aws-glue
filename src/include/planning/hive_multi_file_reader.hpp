@@ -49,6 +49,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
+	//! The cardinality function of the bound file format reader, used when it read the footers of every file at bind
+	table_function_cardinality_t format_cardinality = nullptr;
 	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
 	//! columns
 	table_function_get_virtual_columns_t format_virtual_columns = nullptr;
@@ -89,10 +91,6 @@ private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
 };
-
-//! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with
-//! '_' or '.', as Spark's _SUCCESS), not a directory marker (_$folder$) and not empty
-bool IsDataFile(const OpenFileInfo &file, const string &prefix);
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so
@@ -163,6 +161,10 @@ private:
 	//! The partition of the deepest registered location containing the file, searching no shorter than
 	//! 'min_directory_size' characters of its ComparableLocation
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
+	//! IsDataFile below the deepest registered partition location containing the file (see OwningPartition), or below
+	//! the root when there is none, so a partition key such as '_k' is not read as a hidden directory
+	bool IsRootListedDataFile(const OpenFileInfo &file, const string &root_prefix, idx_t comparable_root_size,
+	                          const vector<GluePartitionInfo> &partitions) const;
 	//! Add a listed file of the partition unless this list already has it. Called with
 	//! HiveScanInfo::file_partitions_lock held.
 	void AddFile(OpenFileInfo file, idx_t partition_index) const;
@@ -194,7 +196,8 @@ private:
 
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of
 //! 'scan_info' with the HiveMultiFileReader. Returns the bound table function and fills in 'bind_data'; the scan
-//! produces exactly the columns of 'scan_info'. No file is listed or opened here.
+//! produces exactly the columns of 'scan_info'. Only an unpartitioned parquet scan lists and opens files here, for
+//! their footers (maximum_files_for_stats).
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
 //! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan

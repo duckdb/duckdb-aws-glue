@@ -1,0 +1,122 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_footer_statistics_glue.test
+# description: The scan of an unpartitioned Glue parquet table of at most hive_footer_statistics_max_files files gives each data column its files' footer statistics, merged, and its footers' row count; a partitioned table's data columns get none, and its partition keys keep the exact statistics of the partition values
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table fsg_dim fsg_fact fsg_text
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+# an unpartitioned table of two files, one per INSERT
+statement ok
+CREATE TABLE my_datalake.default.fsg_dim (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.fsg_dim SELECT i, 'n' || i FROM range(1, 6) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.fsg_dim SELECT i, NULL FROM range(6, 11) t(i);
+
+query II
+SELECT stats(id), stats(name) FROM my_datalake.default.fsg_dim LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 10, 'min': 1}	{'has_no_null': true, 'has_null': true, 'has_unicode': true}
+
+query I
+SELECT count(*) FROM my_datalake.default.fsg_dim WHERE id > 8;
+----
+2
+
+# the footers' row counts add up to the table's row count
+query II
+EXPLAIN SELECT id FROM my_datalake.default.fsg_dim;
+----
+physical_plan	<REGEX>:.*Hive Scan.*~10 rows.*
+
+query I
+SELECT count(*) FROM (SELECT id FROM my_datalake.default.fsg_dim LIMIT 100);
+----
+10
+
+# two scans of the table, as q85 joins customer_demographics with itself
+query II rowsort
+SELECT a.id, b.name FROM my_datalake.default.fsg_dim a JOIN my_datalake.default.fsg_dim b ON a.id = b.id WHERE a.id IN (4, 5, 6);
+----
+4	n4
+5	n5
+6	NULL
+
+# a partitioned table: the data columns get none, so that a join's filter still prunes partitions before any of their
+# files is read; with glue_enable_partition_key_statistics the key keeps the exact statistics of its values
+statement ok
+CREATE TABLE my_datalake.default.fsg_fact (v BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.fsg_fact SELECT i, CASE WHEN i <= 100 THEN '2024-01-01' ELSE '2024-01-02' END FROM range(1, 201) t(i);
+
+statement ok
+SET glue_enable_partition_key_statistics = true;
+
+query II
+SELECT stats(v), stats(dt) FROM my_datalake.default.fsg_fact LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true}	{'approx_unique': 2, 'has_no_null': true, 'has_null': false, 'has_unicode': false, 'max': 2024-01-02, 'max_string_length': 10, 'min': 2024-01-01, 'min_string_length': 10}
+
+statement ok
+RESET glue_enable_partition_key_statistics;
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.fsg_fact WHERE v > 150;
+----
+50	8775
+
+# over the bound, the unpartitioned table's columns get none
+statement ok
+SET hive_footer_statistics_max_files = 1;
+
+query I
+SELECT stats(id) FROM my_datalake.default.fsg_dim LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true}
+
+query I
+SELECT count(*) FROM my_datalake.default.fsg_dim WHERE id > 8;
+----
+2
+
+statement ok
+RESET hive_footer_statistics_max_files;
+
+# a text table has no footers
+statement ok
+CREATE TABLE my_datalake.default.fsg_text (id INTEGER, name VARCHAR) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.fsg_text VALUES (1, 'a'), (2, 'b');
+
+query I
+SELECT stats(id) FROM my_datalake.default.fsg_text LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true}
+
+foreach table fsg_dim fsg_fact fsg_text
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

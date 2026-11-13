@@ -110,6 +110,10 @@ public:
 
 	//! the CatalogId Glue reports in the response of GetDatabases call (during attach probe or first usage)
 	string FetchCatalogId(ClientContext &context);
+	//! Whether 'catalog' is the one ICEBERG_CATALOG names; throws if it is not an Iceberg catalog over this one
+	bool IsIcebergCatalog(Catalog &catalog);
+	//! Whether Glue registers db.table of this catalog as an Iceberg table, looked up without expanding views
+	bool IsIcebergTable(ClientContext &context, const Identifier &schema_name, const Identifier &table_name);
 
 	//! The cached Glue client (managed by GlueAPI): rebuilt whenever the credentials it was built with change
 	mutex client_lock;
@@ -130,6 +134,8 @@ private:
 	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
 	TableLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
 	                                       const string &database_name, CatalogEntryLookup &result);
+	//! A Glue view found by a table lookup is read with its Iceberg tables mapped (GlueView::ForReading)
+	CatalogEntryLookup ViewForReading(CatalogTransaction transaction, CatalogEntryLookup result);
 
 private:
 	//! for reading - the fetched catalog id or account id from ATTACH

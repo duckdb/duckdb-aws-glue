@@ -1,5 +1,6 @@
 #include "catalog/glue_view.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "catalog/glue_view_names.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
@@ -19,6 +20,12 @@ GlueView::GlueView(Catalog &catalog, SchemaCatalogEntry &schema, CreateViewInfo 
 }
 
 const SelectStatement &GlueView::GetQuery() {
+	string signature;
+	return ResolveQuery(signature);
+}
+
+const SelectStatement &GlueView::ResolveQuery(string &signature) {
+	signature.clear();
 	if (!IsSupported()) {
 		throw BinderException("Glue view \"%s.%s\" can not be queried: %s", table_info.schema_name, table_info.name,
 		                      unsupported_reason);
@@ -63,7 +70,6 @@ const SelectStatement &GlueView::GetQuery() {
 	// map stored catalog ids to the aliases attached now
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, referenced_ids);
-	string signature;
 	for (auto &entry : aliases) {
 		signature += entry.first.GetIdentifierName() + "=" + entry.second.GetIdentifierName() + ";";
 	}
@@ -76,8 +82,64 @@ const SelectStatement &GlueView::GetQuery() {
 	                                 *copy->node);
 	GlueViewNames::PinToCatalog(*copy->node, catalog.GetName(), schema.name);
 	auto &result = *copy;
-	resolved.emplace(std::move(signature), std::move(copy));
+	resolved.emplace(signature, std::move(copy));
 	return result;
+}
+
+CatalogEntry &GlueView::ForReading(ClientContext &context) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	if (!IsSupported() || glue_catalog.options.iceberg_catalog.empty()) {
+		return *this;
+	}
+	string signature;
+	optional_ptr<const SelectStatement> query;
+	try {
+		query = &ResolveQuery(signature);
+	} catch (std::exception &) {
+		// binding the view reports the error
+		return *this;
+	}
+	auto iceberg_catalog = Catalog::GetCatalogEntry(context, glue_catalog.options.iceberg_catalog);
+	signature += "iceberg=" + (iceberg_catalog ? to_string(iceberg_catalog->GetOid()) : string());
+	auto &transaction = GlueTransaction::Get(context, catalog);
+	{
+		lock_guard<mutex> guard(transaction.iceberg_views_lock);
+		auto views = transaction.iceberg_views.find(*this);
+		if (views != transaction.iceberg_views.end()) {
+			auto existing = views->second.find(signature);
+			if (existing != views->second.end()) {
+				return existing->second ? *existing->second : *this;
+			}
+		}
+	}
+	unique_ptr<ViewCatalogEntry> view;
+	auto mapped = unique_ptr_cast<SQLStatement, SelectStatement>(query->Copy());
+	if (GlueViewNames::MapIcebergTables(context, glue_catalog, table_info.schema_name + "." + table_info.name,
+	                                    *mapped->node)) {
+		auto info = GetInfo();
+		auto &view_info = info->Cast<CreateViewInfo>();
+		view_info.query = std::move(mapped);
+		view_info.types.clear();
+		view_info.names.clear();
+		view = make_uniq<ViewCatalogEntry>(catalog, schema, view_info);
+	}
+	lock_guard<mutex> guard(transaction.iceberg_views_lock);
+	auto &stored = transaction.iceberg_views[*this].emplace(signature, std::move(view)).first->second;
+	return stored ? *stored : *this;
+}
+
+void GlueView::BindView(ClientContext &context, BindViewAction action) {
+	auto &reading = ForReading(context);
+	if (&reading == this) {
+		ViewCatalogEntry::BindView(context, action);
+		return;
+	}
+	auto &view = reading.Cast<ViewCatalogEntry>();
+	view.BindView(context, action);
+	auto columns = view.GetColumnInfo();
+	if (columns) {
+		UpdateBinding(columns->types, columns->names);
+	}
 }
 
 string GlueView::ToSQL() const {

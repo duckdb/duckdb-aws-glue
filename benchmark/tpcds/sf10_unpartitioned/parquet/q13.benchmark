@@ -1,0 +1,10 @@
+# name: benchmark/tpcds/sf10_unpartitioned/parquet/q13.benchmark
+# description: Run query 13 from the TPC-DS benchmark at SF10 on unpartitioned parquet Hive tables in the local Glue
+# group: [parquet]
+
+template benchmark/tpcds/tpcds_unpartitioned.benchmark.in
+QUERY_NUMBER=13
+QUERY_NUMBER_PADDED=13
+FORMAT=parquet
+SF=10
+SF_NAME=sf10

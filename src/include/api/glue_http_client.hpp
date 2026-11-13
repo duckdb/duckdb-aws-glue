@@ -10,8 +10,9 @@ class DatabaseInstance;
 //! This unifies proxy / certificate handling and makes the Glue API calls show up in DuckDB's HTTP log
 //! (`CALL enable_logging('HTTP')`). Call at extension load, after Aws::InitAPI and before any AWS client is
 //! constructed; only the first call installs it. NOTE: the factory is process global, every AWS SDK client in the
-//! process uses it, and only clients built inside a GlueHttpClientContextScope use DuckDB's HTTP layer.
-void RegisterGlueHttpClientFactory();
+//! process uses it, and only clients built inside a GlueHttpClientContextScope use DuckDB's HTTP layer. Where the SDK
+//! has no transport of its own (wasm), clients built outside a scope go through `db` (the last database to load).
+void RegisterGlueHttpClientFactory(DatabaseInstance &db);
 
 //! Whether the bridge is enabled for the current connection (see the 'glue_network_calls_via_duckdb' setting)
 bool GlueNetworkCallsViaDuckDB(DatabaseInstance &db);

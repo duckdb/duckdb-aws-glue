@@ -17,6 +17,7 @@
 #include "catalog/glue_file_credentials.hpp"
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
+#include "core/hive_location.hpp"
 #include "functions/glue_functions.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 

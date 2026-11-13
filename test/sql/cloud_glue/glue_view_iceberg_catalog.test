@@ -1,0 +1,172 @@
+# name: test/sql/cloud_glue/glue_view_iceberg_catalog.test
+# description: A Glue view joins a Hive table of a Glue attachment with an Iceberg table of an Iceberg attachment over the same Glue catalog
+# group: [cloud_glue]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_TEST_CONFIG cloud
+
+require-env GLUE_CATALOG_ID
+
+require iceberg
+
+statement error
+ATTACH '{GLUE_CATALOG_ID}' AS lake (TYPE glue, ICEBERG_CATALOG 'LAKE');
+----
+ICEBERG_CATALOG must name an Iceberg catalog, not the Glue catalog "lake" itself
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS lake (
+    TYPE glue,
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    ICEBERG_CATALOG 'lake_ice'
+);
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS lake_ice (TYPE iceberg, ENDPOINT_TYPE glue);
+
+statement ok
+DROP SCHEMA IF EXISTS lake.cloud_glue_iceberg_views CASCADE;
+
+statement ok
+CREATE SCHEMA lake.cloud_glue_iceberg_views;
+
+statement ok
+CREATE TABLE lake.cloud_glue_iceberg_views.customers AS SELECT * FROM (VALUES (1, 'Ada'), (2, 'Bob')) t(id, name);
+
+# Glue's Iceberg endpoint needs a table location: the Glue database has none
+statement ok
+CREATE TABLE lake_ice.cloud_glue_iceberg_views.orders (id INTEGER, amount INTEGER)
+WITH ('location' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/iceberg_orders');
+
+statement ok
+INSERT INTO lake_ice.cloud_glue_iceberg_views.orders VALUES (1, 42), (1, 8), (2, 5);
+
+# the Glue attachment lists the Iceberg table but does not read it
+query T
+SELECT tags['table_type'] FROM duckdb_tables()
+WHERE database_name = 'lake' AND schema_name = 'cloud_glue_iceberg_views' AND table_name = 'orders';
+----
+ICEBERG
+
+statement error
+SELECT * FROM lake.cloud_glue_iceberg_views.orders;
+----
+can not be read yet
+
+statement ok
+CREATE VIEW lake.cloud_glue_iceberg_views.orders_by_customer AS
+SELECT c.name, sum(o.amount) AS total
+FROM lake.cloud_glue_iceberg_views.customers c
+JOIN lake_ice.cloud_glue_iceberg_views.orders o ON c.id = o.id
+GROUP BY c.name;
+
+query IT
+SELECT * FROM lake.cloud_glue_iceberg_views.orders_by_customer ORDER BY name;
+----
+Ada	50
+Bob	5
+
+# the executable SQL names both tables by their Glue names, the original SQL keeps the aliases
+query II
+SELECT contains(response.ViewExpandedText::VARCHAR, 'lake_ice'), contains(response.ViewOriginalText::VARCHAR, 'lake_ice')
+FROM glue_get_table_response('lake.cloud_glue_iceberg_views.orders_by_customer');
+----
+false	true
+
+query TT
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'lake' AND schema_name = 'cloud_glue_iceberg_views' AND table_name = 'orders_by_customer'
+ORDER BY column_index;
+----
+name	VARCHAR
+total	HUGEINT
+
+# a write to the Iceberg table is seen by the next read of the view
+statement ok
+INSERT INTO lake_ice.cloud_glue_iceberg_views.orders VALUES (2, 10);
+
+query IT
+SELECT * FROM lake.cloud_glue_iceberg_views.orders_by_customer ORDER BY name;
+----
+Ada	50
+Bob	15
+
+# a Glue attachment without ICEBERG_CATALOG can not read the view
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS lake_plain (TYPE glue);
+
+statement error
+SELECT * FROM lake_plain.cloud_glue_iceberg_views.orders_by_customer;
+----
+
+statement ok
+DETACH lake_plain;
+
+statement ok
+DETACH lake;
+
+statement ok
+DETACH lake_ice;
+
+# ICEBERG_CATALOG names a catalog that is not an Iceberg catalog
+statement ok
+ATTACH ':memory:' AS not_ice;
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS lake (TYPE glue, ICEBERG_CATALOG 'not_ice');
+
+statement error
+SELECT * FROM lake.cloud_glue_iceberg_views.orders_by_customer;
+----
+ICEBERG_CATALOG "not_ice" of Glue catalog "lake" is a duckdb catalog, not an Iceberg catalog
+
+statement ok
+DETACH lake;
+
+statement ok
+DETACH not_ice;
+
+# another session can attach both catalogs under other names
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS other_lake (TYPE glue, ICEBERG_CATALOG 'ice');
+
+statement error
+SELECT * FROM other_lake.cloud_glue_iceberg_views.orders_by_customer;
+----
+attach the Iceberg catalog "ice" that ICEBERG_CATALOG names
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS ice (TYPE iceberg, ENDPOINT_TYPE glue);
+
+query IT
+SELECT * FROM other_lake.cloud_glue_iceberg_views.orders_by_customer ORDER BY name;
+----
+Ada	50
+Bob	15
+
+# the Iceberg catalog goes away while the Glue catalog stays attached, and comes back
+statement ok
+DETACH ice;
+
+statement error
+SELECT * FROM other_lake.cloud_glue_iceberg_views.orders_by_customer;
+----
+attach the Iceberg catalog "ice" that ICEBERG_CATALOG names
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS ice (TYPE iceberg, ENDPOINT_TYPE glue);
+
+query IT
+SELECT * FROM other_lake.cloud_glue_iceberg_views.orders_by_customer ORDER BY name;
+----
+Ada	50
+Bob	15
+
+# DROP TABLE through the Iceberg catalog asks Glue to purge, which Glue refuses
+statement ok
+DROP SCHEMA other_lake.cloud_glue_iceberg_views CASCADE;

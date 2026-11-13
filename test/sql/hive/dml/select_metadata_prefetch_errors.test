@@ -1,6 +1,6 @@
 # name: test/sql/hive/dml/select_metadata_prefetch_errors.test
 # description: a Glue error while fetching the partitions of several tables at the same time fails the query once per table, without asking Glue again
-# group: [hive]
+# group: [dml]
 
 # GLUE_FAULT_ENDPOINT must be scripts/glue_fault_proxy.py of this revision, which fails GetPartitions on a fault_*
 # database as well as GetTables

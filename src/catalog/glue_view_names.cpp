@@ -288,6 +288,19 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 				throw BinderException("Glue view references table \"%s\", which was not found", name.ToString());
 			}
 			auto &catalog = entry->ParentCatalog();
+			if (view_catalog.IsIcebergCatalog(catalog)) {
+				auto &schema_name = entry->ParentSchema().name;
+				if (!view_catalog.IsIcebergTable(context, schema_name, entry->name)) {
+					throw BinderException("Glue view references \"%s\", but Glue catalog \"%s\" has no Iceberg table "
+					                      "%s.%s: ICEBERG_CATALOG \"%s\" must read the same Glue catalog",
+					                      name.ToString(), view_catalog_name.GetIdentifierName(),
+					                      schema_name.GetIdentifierName(), entry->name.GetIdentifierName(),
+					                      catalog.GetName().GetIdentifierName());
+				}
+				catalogs.insert(catalog_name);
+				ref.SetQualifiedName(Identifier(), schema_name, entry->name);
+				return;
+			}
 			if (catalog.GetCatalogType() != "glue") {
 				if (!ExternalCatalogTypes(DatabaseInstance::GetDatabase(context)).count(catalog.GetCatalogType())) {
 					throw BinderException("Glue view references \"%s\" in catalog \"%s\" of type %s, which is not in "
@@ -440,6 +453,34 @@ void GlueViewNames::PinToCatalog(QueryNode &query, const Identifier &catalog_nam
 		}
 	});
 	walker.Walk(query);
+}
+
+bool GlueViewNames::MapIcebergTables(ClientContext &context, GlueCatalog &view_catalog, const string &view_name,
+                                     QueryNode &query) {
+	auto &iceberg_catalog = view_catalog.options.iceberg_catalog;
+	if (iceberg_catalog.empty()) {
+		return false;
+	}
+	bool mapped = false;
+	ViewBodyWalker walker([&](BaseTableRef &ref, const case_insensitive_set_t &) {
+		auto name = ref.GetQualifiedName();
+		if (name.Catalog() != view_catalog.GetName() ||
+		    !view_catalog.IsIcebergTable(context, name.Schema(), name.Name())) {
+			return;
+		}
+		auto catalog = Catalog::GetCatalogEntry(context, iceberg_catalog);
+		if (!catalog) {
+			throw BinderException("Glue view \"%s\" reads Iceberg table %s.%s: attach the Iceberg catalog \"%s\" that "
+			                      "ICEBERG_CATALOG names",
+			                      view_name, name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(),
+			                      iceberg_catalog.GetIdentifierName());
+		}
+		view_catalog.IsIcebergCatalog(*catalog);
+		ref.SetQualifiedName(iceberg_catalog, name.Schema(), name.Name());
+		mapped = true;
+	});
+	walker.Walk(query);
+	return mapped;
 }
 
 } // namespace duckdb
