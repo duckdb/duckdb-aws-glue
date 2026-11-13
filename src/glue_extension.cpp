@@ -11,6 +11,7 @@
 #include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
 #include "functions/glue_repair_table.hpp"
+#include "execution/glue_written_files.hpp"
 #include "grammar/glue_grammar.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
@@ -67,6 +68,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "has no HTTP client of its own.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	config.AddExtensionOption(
+	    GlueWrittenFiles::SETTING,
+	    "Add the data files each INSERT or CREATE TABLE AS into a Hive table wrote to the temporary "
+	    "table glue_written_files",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	config.AddExtensionOption("glue_get_partitions_segments",
 	                          "How many GetPartitions requests to run at the same time when listing the partitions of "
 	                          "a table (Glue's Segment API splits them over non overlapping segments). 0, the "

@@ -299,6 +299,21 @@ their codec themselves.
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
 
+With `SET glue_store_written_files = true`, every `INSERT` or `CREATE TABLE ... AS` into a Hive table adds the data
+files it wrote to the temporary table `temp.main.glue_written_files`, one row per file with the `query_id` of the
+statement, the `table` (`database.table`) and the `file_path`, for example to give a manifest of what a query wrote. The
+table is created by the first write that stores its files. Its rows are added once the write's partitions are
+registered, in the write's transaction, so a write that fails adds none. Like any temporary table, it belongs to the
+connection.
+
+```sql
+SET glue_store_written_files = true;
+INSERT INTO lake.db.events SELECT ...;
+SELECT file_path FROM temp.main.glue_written_files WHERE query_id = (SELECT max(query_id) FROM temp.main.glue_written_files);
+-- s3://bucket/db/events/day=2026-11-09/<write id>_<file id>.snappy.parquet
+-- s3://bucket/db/events/day=2026-11-10/<write id>_<file id>.snappy.parquet
+```
+
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
 of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
