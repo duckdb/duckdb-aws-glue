@@ -1,5 +1,5 @@
 # name: test/sql/hive/catalog/listing_refresh.test
-# description: a listing (duckdb_tables/duckdb_columns/duckdb_schemas) is taken from Glue once per metadata cache id, so tables and databases another session created, replaced or dropped show up on the next statement
+# description: a listing (duckdb_tables/duckdb_columns/duckdb_schemas) is taken from Glue once per metadata cache id, so tables another session created, replaced or dropped, and databases it created or dropped, show up on the next statement
 # group: [catalog]
 
 require httpfs
@@ -428,43 +428,6 @@ SELECT glue_calls('GetTables'), glue_calls('GetDatabases');
 
 statement ok
 RESET catalog_error_max_schemas;
-
-# 12. a database dropped and recreated elsewhere under its name is replaced by the next listing, with its new location
-statement ok
-attach '{GLUE_CATALOG_ID}' as location_reader (
-    TYPE glue,
-    ENDPOINT '{GLUE_ENDPOINT}'
-);
-
-statement ok
-CREATE SCHEMA writer.lr_loc WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/old');
-
-query I
-SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'location_reader' AND schema_name = 'lr_loc';
-----
-1
-
-statement ok
-DROP SCHEMA writer.lr_loc;
-
-statement ok
-CREATE SCHEMA writer.lr_loc WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/new');
-
-query I
-SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'location_reader' AND schema_name = 'lr_loc';
-----
-1
-
-statement ok
-CREATE TABLE location_reader.lr_loc.t (i INTEGER);
-
-query I
-SELECT location LIKE '%/new/t' FROM glue_get_table_response('writer.lr_loc.t');
-----
-true
-
-statement ok
-DROP SCHEMA writer.lr_loc CASCADE;
 
 statement ok
 DROP SCHEMA writer.lr_db CASCADE;

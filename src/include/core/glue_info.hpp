@@ -47,11 +47,6 @@ struct GlueDatabaseInfo {
 	//! Optional S3 location tables of this database default to
 	string location_uri;
 	unordered_map<string, string> parameters;
-
-	//! Whether 'other' is this definition: a database dropped and recreated under its name differs in its location
-	bool IsSameDefinition(const GlueDatabaseInfo &other) const {
-		return location_uri == other.location_uri;
-	}
 };
 
 //! The file format of a Hive table's data files, decided by its SerDe

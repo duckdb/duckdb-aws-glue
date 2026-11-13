@@ -1118,16 +1118,15 @@ const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
 	return database_info;
 }
 
-bool GlueSchemaEntry::MergeSchemaInfo(const GlueDatabaseInfo &database) {
+void GlueSchemaEntry::SetSchemaInfo(const GlueDatabaseInfo &database) {
 	lock_guard<mutex> guard(schema_info_lock);
 	if (schema_info_loaded) {
-		return database_info.IsSameDefinition(database);
+		return;
 	}
 	database_info.description = database.description;
 	database_info.location_uri = database.location_uri;
 	database_info.parameters = database.parameters;
 	schema_info_loaded = true;
-	return true;
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,

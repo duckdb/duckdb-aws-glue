@@ -6,6 +6,7 @@
 #include "duckdb/common/mutex.hpp"
 
 #include "core/glue_info.hpp"
+#include "catalog/glue_entry_set.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_view.hpp"
 
@@ -54,8 +55,7 @@ private:
 	GlueCatalog &catalog;
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
-	//! Identifies this set among the sets a GlueTransactionCache has listed
-	const idx_t id;
+	const glue_entry_set_id_t id;
 	//! Direct-lookup round trips since the last bulk fetch: bulk pays off from the second one on
 	idx_t direct_lookups = 0;
 	//! The GlueTransactionCache::Id() the last successful bulk fetch warmed (0 = none yet)

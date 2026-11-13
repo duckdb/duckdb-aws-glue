@@ -6,6 +6,7 @@
 #include "duckdb/common/enums/on_entry_not_found.hpp"
 
 #include "core/glue_info.hpp"
+#include "catalog/glue_entry_set.hpp"
 #include "catalog/glue_schema_entry.hpp"
 
 namespace duckdb {
@@ -47,8 +48,7 @@ private:
 	GlueCatalog &catalog;
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<GlueSchemaEntry>> entries;
-	//! Identifies this set among the sets a GlueTransactionCache has listed
-	const idx_t id;
+	const glue_entry_set_id_t id;
 };
 
 } // namespace duckdb

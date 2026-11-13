@@ -101,8 +101,9 @@ void GlueTableSet::LoadEntries(ClientContext &context, GlueTransactionCache &cac
 			// must not break listing the other tables: leave it out and log why. Looking the table up by name
 			// still reports the error to the user.
 			ErrorData error(ex);
-			DUCKDB_LOG_ERROR(context, "Glue table '%s.%s' is not listed: %s", schema.GetDatabaseName(), info->name,
-			                 error.RawMessage());
+			DUCKDB_LOG_ERROR(
+			    context, "Glue table '%s.%s' could not be converted from the GetTables response and is not listed: %s",
+			    schema.GetDatabaseName(), info->name, error.RawMessage());
 			RetireEntry(info->name);
 			continue;
 		}
@@ -110,13 +111,7 @@ void GlueTableSet::LoadEntries(ClientContext &context, GlueTransactionCache &cac
 		entries.emplace(info->name, std::move(entry));
 	}
 	// what Glue no longer returns was dropped by another client
-	vector<string> gone;
-	for (auto &entry : entries) {
-		if (!listed.count(entry.first)) {
-			gone.push_back(entry.first);
-		}
-	}
-	for (auto &name : gone) {
+	for (auto &name : UnlistedNames(entries, listed)) {
 		RetireEntry(name);
 	}
 	cache.MarkListed(id);

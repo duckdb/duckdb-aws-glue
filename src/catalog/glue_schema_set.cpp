@@ -33,22 +33,13 @@ void GlueSchemaSet::LoadEntries(ClientContext &context, GlueTransactionCache &ca
 		auto entry = entries.find(database.name);
 		if (entry != entries.end()) {
 			// already loaded through a direct lookup, possibly from a table lookup that only knew the name
-			if (entry->second->MergeSchemaInfo(database)) {
-				continue;
-			}
-			// another client dropped and recreated the database under its name: the entry and its tables are stale
-			RetireEntry(database.name);
+			entry->second->SetSchemaInfo(database);
+			continue;
 		}
 		entries.emplace(database.name, CreateSchemaEntry(database));
 	}
 	// what Glue no longer returns was dropped by another client
-	vector<string> gone;
-	for (auto &entry : entries) {
-		if (!listed.count(entry.first)) {
-			gone.push_back(entry.first);
-		}
-	}
-	for (auto &name : gone) {
+	for (auto &name : UnlistedNames(entries, listed)) {
 		RetireEntry(name);
 	}
 	cache.MarkListed(id);

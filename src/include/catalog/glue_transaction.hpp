@@ -12,6 +12,7 @@
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_entry_set.hpp"
 #include "execution/glue_hive_write.hpp"
 
 #include <functional>
@@ -76,13 +77,13 @@ public:
 	idx_t Id() const {
 		return id;
 	}
-	//! Whether the entry set with this id (GlueTableSet / GlueSchemaSet) was listed from Glue under this cache; the
-	//! listing holds until the cache is cleared
-	bool HasListed(idx_t set_id) {
+	//! Whether the entry set with this id was listed from Glue under this cache; the listing holds until the cache is
+	//! cleared
+	bool HasListed(glue_entry_set_id_t set_id) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		return listed_sets.count(set_id) > 0;
 	}
-	void MarkListed(idx_t set_id) {
+	void MarkListed(glue_entry_set_id_t set_id) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		listed_sets.insert(set_id);
 	}
@@ -124,7 +125,7 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
-	unordered_set<idx_t> listed_sets DUCKDB_GUARDED_BY(lock);
+	unordered_set<glue_entry_set_id_t> listed_sets DUCKDB_GUARDED_BY(lock);
 	const idx_t id = NextId();
 };
 
