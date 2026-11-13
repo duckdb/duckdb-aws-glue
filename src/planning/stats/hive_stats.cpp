@@ -270,20 +270,33 @@ static unique_ptr<NodeStatistics> UnsampledCardinality(ClientContext &context, c
 	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
+//! MeasureTable, logged as the table's sample event
+static shared_ptr<const HiveTableSample> MeasureAndLog(ClientContext &context, const MultiFileBindData &bind_data,
+                                                       const HiveMultiFileList &files) {
+	auto &info = files.ScanInfo();
+	GlueScanEvent event(info.Describe(), info.scan_id, "sample");
+	auto sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, files));
+	if (sample->listed) {
+		event.files = sample->files;
+	}
+	event.Finish();
+	DUCKDB_LOG(context, GlueScanLogType, event);
+	return sample;
+}
+
 //! The sample of the table 'hive_list' reads, measured by the first scan of the table in this query to ask
 static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, const MultiFileBindData &bind_data,
                                                      const HiveMultiFileList &hive_list) {
 	auto &info = hive_list.ScanInfo();
 	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->sample && entry->prefetched &&
+	    hive_list.PartitionIndexes()->size() == info.Partitions(context)->size()) {
+		// measured over every partition, which is what this scan reads: the same listing and the same file
+		entry->sample = entry->prefetched;
+	}
 	if (!entry->sample) {
-		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
-		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
-		if (entry->sample->listed) {
-			event.files = entry->sample->files;
-		}
-		event.Finish();
-		DUCKDB_LOG(context, GlueScanLogType, event);
+		entry->sample = MeasureAndLog(context, bind_data, hive_list);
 	}
 	return entry->sample;
 }
@@ -295,6 +308,21 @@ idx_t HiveFooterStatisticsMaxFiles(ClientContext &context) {
 		return MinValue<idx_t>(setting.GetValue<idx_t>(), HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT);
 	}
 	return HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES;
+}
+
+bool HiveScanCountedFromFooters(const MultiFileBindData &bind_data) {
+	return !bind_data.union_readers.empty() &&
+	       bind_data.file_list->Cast<HiveMultiFileList>().ScanInfo().format_cardinality;
+}
+
+void PrefetchTableSample(ClientContext &context, const MultiFileBindData &bind_data) {
+	auto &files = bind_data.file_list->Cast<HiveMultiFileList>();
+	auto &info = files.ScanInfo();
+	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->sample && !entry->prefetched && files.PartitionIndexes()->size() == info.Partitions(context)->size()) {
+		entry->prefetched = MeasureAndLog(context, bind_data, files);
+	}
 }
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
@@ -309,7 +337,7 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
 	}
-	if (!bind_data.union_readers.empty() && info.format_cardinality) {
+	if (HiveScanCountedFromFooters(bind_data)) {
 		// the reader opened every file for its footer at bind (maximum_files_for_stats): their row counts
 		return info.format_cardinality(context, bind_data_p);
 	}

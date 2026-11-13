@@ -1,0 +1,409 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_prefetch_scan_metadata.test
+# description: glue_prefetch_scan_metadata fetches a statement's Glue partitions and samples before it is optimized: the same results, estimates, errors and requests, except for a scan the optimizer drops
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pf_sales;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pf_returns;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pf_stock;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pf_item;
+
+statement ok
+CREATE TABLE my_datalake.default.pf_sales (item INTEGER, qty INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CREATE TABLE my_datalake.default.pf_returns (item INTEGER, qty INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CREATE TABLE my_datalake.default.pf_stock (item INTEGER, qty INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.pf_sales SELECT i % 50, i % 7, 'd' || (i % 12) FROM range(4000) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.pf_returns SELECT i % 50, i % 3, 'd' || (i % 4) FROM range(400) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.pf_stock SELECT i % 50, i % 11, 'd' || (i % 2) FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE my_datalake.default.pf_item AS SELECT range AS item, 'item ' || range AS name FROM range(50);
+
+statement ok
+SET enable_external_file_cache = false;
+
+# the Glue operation is in the x-amz-target header and the S3 listing in the query string, which HTTP logs redact
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
+
+# requests since the logs were truncated: Glue by operation, S3 by method, a GET with a query string is a listing
+statement ok
+CREATE MACRO pf_requests() AS TABLE
+    SELECT coalesce(request.headers['x-amz-target'],
+                    request.type || CASE WHEN contains(request.url, '?') THEN ' list' ELSE '' END) AS request,
+           count(*) AS n
+    FROM duckdb_logs_parsed('HTTP')
+    GROUP BY 1;
+
+statement ok
+CREATE MACRO pf_query() AS TABLE
+    SELECT s.dt, i.name, sum(s.qty) AS sold, sum(r.qty) AS returned, count(DISTINCT k.qty) AS stocked
+    FROM my_datalake.default.pf_sales s
+    JOIN my_datalake.default.pf_returns r ON s.item = r.item AND s.dt = r.dt
+    JOIN my_datalake.default.pf_stock k ON k.item = s.item
+    JOIN my_datalake.default.pf_item i ON i.item = s.item
+    WHERE i.item < 3
+    GROUP BY ALL ORDER BY ALL;
+
+# the first statement of the catalog looks the tables up in bulk; the ones after it are compared
+statement ok
+FROM pf_query();
+
+# The same rows and requests with and without the prefetch, and every partitioned table fetched and measured once
+statement ok
+SET glue_prefetch_scan_metadata = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query TTIII
+FROM pf_query();
+----
+d0	item 0	3360	840	11
+d0	item 2	3280	1040	11
+d1	item 1	3360	1120	11
+d2	item 0	3360	1400	11
+d2	item 2	3360	1400	11
+d3	item 1	3360	840	11
+
+statement ok
+CREATE TEMP TABLE pf_off AS FROM pf_requests();
+
+statement ok
+RESET glue_prefetch_scan_metadata;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query TTIII
+FROM pf_query();
+----
+d0	item 0	3360	840	11
+d0	item 2	3280	1040	11
+d1	item 1	3360	1120	11
+d2	item 0	3360	1400	11
+d2	item 2	3360	1400	11
+d3	item 1	3360	840	11
+
+query TI
+(FROM pf_requests() EXCEPT FROM pf_off) UNION ALL (FROM pf_off EXCEPT FROM pf_requests());
+----
+
+query I
+SELECT n FROM pf_requests() WHERE request = 'AWSGlue.GetPartitions';
+----
+3
+
+# pf_item is counted from its footer, so it is not sampled
+query TI
+SELECT "table", count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'sample' GROUP BY ALL ORDER BY ALL;
+----
+default.pf_returns	1
+default.pf_sales	1
+default.pf_stock	1
+
+# without footer statistics pf_item is sampled once, with or without the prefetch
+statement ok
+SET hive_footer_statistics_max_files = 0;
+
+foreach setting false true
+
+statement ok
+SET glue_prefetch_scan_metadata = {setting};
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pf_item;
+----
+50
+
+query TI
+SELECT "table", count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'sample' GROUP BY ALL;
+----
+default.pf_item	1
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pf_{setting} AS FROM pf_requests();
+
+endloop
+
+query TI
+(FROM pf_true EXCEPT FROM pf_false) UNION ALL (FROM pf_false EXCEPT FROM pf_true);
+----
+
+statement ok
+RESET hive_footer_statistics_max_files;
+
+statement ok
+RESET glue_prefetch_scan_metadata;
+
+# a table scanned twice is fetched once
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pf_sales a JOIN my_datalake.default.pf_sales b ON a.item = b.item AND a.dt = b.dt WHERE a.qty = 0 AND b.qty = 1;
+----
+1088
+
+query TI
+SELECT request, n FROM pf_requests() WHERE request LIKE 'AWSGlue.%' ORDER BY ALL;
+----
+AWSGlue.GetPartitions	1
+AWSGlue.GetTable	1
+
+# A filter on a partition key (also above a CTE or subquery) may prune the scan, so only its partitions are prefetched
+foreach setting false true
+
+statement ok
+SET glue_prefetch_scan_metadata = {setting};
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.pf_sales WHERE dt = 'd1';
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*~334 rows.*
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT sum(qty) FROM my_datalake.default.pf_sales WHERE dt = 'd1';
+----
+1000
+
+query I
+WITH s AS (FROM my_datalake.default.pf_sales) SELECT sum(qty) FROM s WHERE dt = 'd2';
+----
+998
+
+query I
+SELECT sum(qty) FROM (SELECT qty, dt FROM my_datalake.default.pf_sales) WHERE dt = 'd3';
+----
+1003
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pf_{setting} AS FROM pf_requests();
+
+endloop
+
+query TI
+(FROM pf_true EXCEPT FROM pf_false) UNION ALL (FROM pf_false EXCEPT FROM pf_true);
+----
+
+# Two catalogs, a prepared statement and a transaction make the same requests with and without the prefetch
+statement ok
+attach '{GLUE_CATALOG_ID}' as pf_other (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+CREATE MACRO pf_statements() AS TABLE
+    SELECT count(*) AS n FROM my_datalake.default.pf_sales s JOIN pf_other.default.pf_returns r USING (item, dt);
+
+foreach setting false true
+
+statement ok
+SET glue_prefetch_scan_metadata = {setting};
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+FROM pf_statements();
+----
+5344
+
+statement ok
+PREPARE pf_whole AS SELECT count(*) FROM my_datalake.default.pf_sales s JOIN my_datalake.default.pf_stock k USING (item);
+
+query I
+EXECUTE pf_whole;
+----
+80000
+
+statement ok
+DEALLOCATE pf_whole;
+
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) FROM my_datalake.default.pf_sales s JOIN my_datalake.default.pf_returns r USING (item, dt);
+----
+5344
+
+query I
+SELECT count(*) FROM my_datalake.default.pf_stock k JOIN my_datalake.default.pf_returns r USING (item, dt);
+----
+4000
+
+statement ok
+COMMIT;
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pf_{setting} AS FROM pf_requests();
+
+endloop
+
+query TI
+(FROM pf_true EXCEPT FROM pf_false) UNION ALL (FROM pf_false EXCEPT FROM pf_true);
+----
+
+statement ok
+RESET glue_prefetch_scan_metadata;
+
+# A statement that is not optimized fetches no partitions
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DESCRIBE SELECT * FROM my_datalake.default.pf_sales s JOIN my_datalake.default.pf_returns r USING (item);
+
+statement ok
+DESCRIBE my_datalake.default.pf_sales;
+
+statement ok
+PREPARE pf_prepared AS SELECT count(*) FROM my_datalake.default.pf_sales WHERE dt = ?;
+
+query I
+SELECT count(*) FROM pf_requests() WHERE request = 'AWSGlue.GetPartitions' OR request LIKE 'GET%';
+----
+0
+
+query I
+EXECUTE pf_prepared('d2');
+----
+334
+
+# A failing GetPartitions fails the statement with the same error, asked once
+statement ok
+attach '{GLUE_CATALOG_ID}' as pf_fault (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_partitions_denied_pf CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_slow_get_partitions_pf CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_partitions_denied_pf;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_slow_get_partitions_pf;
+
+statement ok
+CREATE TABLE my_datalake.fault_partitions_denied_pf.t (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.fault_partitions_denied_pf.t SELECT range, (range % 2)::VARCHAR FROM range(10);
+
+statement ok
+CREATE TABLE my_datalake.fault_slow_get_partitions_pf.t (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.fault_slow_get_partitions_pf.t SELECT range, (range % 2)::VARCHAR FROM range(10);
+
+foreach setting false true
+
+statement ok
+SET glue_prefetch_scan_metadata = {setting};
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT count(*) FROM pf_fault.fault_partitions_denied_pf.t JOIN my_datalake.default.pf_item i ON i.item = t.id;
+----
+<REGEX>:.*GetPartitions 'fault_partitions_denied_pf.t'.*AccessDenied.*
+
+query I
+SELECT n FROM pf_requests() WHERE request = 'AWSGlue.GetPartitions';
+----
+1
+
+endloop
+
+# The optimizer drops this scan, and the statement ends during the first page of a slow GetPartitions (0.5 s a page;
+# the sum gives the prefetch time to start): the fetch stops there, and the next statement reads every partition
+statement ok
+RESET glue_prefetch_scan_metadata;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT sum(id) FROM (SELECT id FROM pf_fault.fault_slow_get_partitions_pf.t WHERE false UNION ALL SELECT range FROM range(5000000));
+----
+12499997500000
+
+query I
+SELECT n FROM pf_requests() WHERE request = 'AWSGlue.GetPartitions';
+----
+1
+
+query I
+SELECT count(*) FROM pf_fault.fault_slow_get_partitions_pf.t;
+----
+10
+
+statement ok
+DETACH pf_fault;
+
+statement ok
+DETACH pf_other;
+
+statement ok
+DROP SCHEMA my_datalake.fault_partitions_denied_pf CASCADE;
+
+statement ok
+DROP SCHEMA my_datalake.fault_slow_get_partitions_pf CASCADE;
+
+statement ok
+DROP TABLE my_datalake.default.pf_sales;
+
+statement ok
+DROP TABLE my_datalake.default.pf_returns;
+
+statement ok
+DROP TABLE my_datalake.default.pf_stock;
+
+statement ok
+DROP TABLE my_datalake.default.pf_item;
