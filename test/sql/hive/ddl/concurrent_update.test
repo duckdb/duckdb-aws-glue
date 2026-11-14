@@ -1,0 +1,102 @@
+# name: test/sql/hive/ddl/concurrent_update.test
+# description: A table rewrite whose definition another client changed since it was read fails instead of overwriting that change
+# group: [ddl]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# through the fault proxy, every UpdateTable on a fault_concurrent_update* database is preceded by another client's
+# update, which sets the table parameter 'changed_by_another_client'
+statement ok
+attach '{GLUE_CATALOG_ID}' as raced_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_concurrent_update CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_concurrent_update;
+
+statement ok
+CREATE TABLE my_datalake.fault_concurrent_update.t (a INTEGER, b INTEGER);
+
+statement ok
+CREATE VIEW my_datalake.fault_concurrent_update.v AS SELECT 1 AS one;
+
+statement error
+ALTER TABLE raced_dl.fault_concurrent_update.t ADD COLUMN c INTEGER;
+----
+<REGEX>:.*Glue table "fault_concurrent_update.t" was changed by another client since it was read.*
+
+statement error
+COMMENT ON TABLE raced_dl.fault_concurrent_update.t IS 'sales data';
+----
+<REGEX>:.*Glue table "fault_concurrent_update.t" was changed by another client since it was read.*
+
+statement error
+COMMENT ON COLUMN raced_dl.fault_concurrent_update.t.a IS 'first';
+----
+<REGEX>:.*Glue table "fault_concurrent_update.t" was changed by another client since it was read.*
+
+statement error
+ALTER TABLE raced_dl.fault_concurrent_update.t SET (owner_team = 'x');
+----
+<REGEX>:.*Glue table "fault_concurrent_update.t" was changed by another client since it was read.*
+
+statement error
+CREATE OR REPLACE VIEW raced_dl.fault_concurrent_update.v AS SELECT 2 AS one;
+----
+<REGEX>:.*Glue table "fault_concurrent_update.v" was changed by another client since it was read.*
+
+# the other client's change is kept, none of the refused ones was written
+query III
+SELECT response.Parameters.changed_by_another_client, response.Description IS NULL,
+       response.StorageDescriptor.Columns[1].Comment IS NULL
+FROM glue_get_table_response('my_datalake.fault_concurrent_update.t');
+----
+true	true	true
+
+query I
+SELECT list(column_name) FROM (DESCRIBE my_datalake.fault_concurrent_update.t);
+----
+[a, b]
+
+query I
+SELECT one FROM my_datalake.fault_concurrent_update.v;
+----
+1
+
+# without the proxy's race the same statement goes through and keeps the other client's change
+statement ok
+ALTER TABLE my_datalake.fault_concurrent_update.t ADD COLUMN c INTEGER;
+
+query I
+SELECT list(column_name) FROM (DESCRIBE my_datalake.fault_concurrent_update.t);
+----
+[a, b, c]
+
+query I
+SELECT response.Parameters.changed_by_another_client FROM glue_get_table_response('my_datalake.fault_concurrent_update.t');
+----
+true
+
+statement ok
+DETACH raced_dl;
+
+statement ok
+DROP SCHEMA my_datalake.fault_concurrent_update CASCADE;
