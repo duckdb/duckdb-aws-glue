@@ -33,7 +33,7 @@ add_subdirectory(src)
 # target_link_libraries below does not reach it
 if(EMSCRIPTEN)
   set(DUCKDB_EXTENSION_GLUE_LINKED_LIBS
-      "../../vcpkg_installed/wasm32-emscripten/lib/lib*.a")
+      "../../vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/lib*.a")
 endif()
 
 build_static_extension(${TARGET_NAME} ${GLUE_EXTENSION_FILES})
