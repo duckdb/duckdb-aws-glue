@@ -17,6 +17,11 @@ constexpr idx_t REQUESTS_SAVED = 10;
 struct ListingCost {
 	idx_t rounds;
 	idx_t requests;
+
+	//! Fewer rounds, or as many and a tenth of the requests or fewer
+	bool operator<(const ListingCost &other) const {
+		return rounds < other.rounds || (rounds == other.rounds && other.requests >= REQUESTS_SAVED * requests);
+	}
 };
 
 idx_t PagesOf(idx_t keys) {
@@ -37,10 +42,6 @@ ListingCost CostOf(const vector<HiveListingRange> &ranges, idx_t at_a_time) {
 		longest = MaxValue(longest, range.pages);
 	}
 	return ListingCost {MaxValue(longest, CostOf(pages, at_a_time).rounds), pages};
-}
-
-bool Cheaper(const ListingCost &a, const ListingCost &b) {
-	return a.rounds < b.rounds || (a.rounds == b.rounds && b.requests >= REQUESTS_SAVED * a.requests);
 }
 
 bool PrefixHasGlob(const string &prefix) {
@@ -123,8 +124,8 @@ vector<HiveListingRange> HiveListingPlanner::PlanRanges(const vector<idx_t> &rea
 HiveListingPlan HiveListingPlanner::Plan(const vector<idx_t> &reading) const {
 	auto root_pages = PagesOf(partitions_below_root * keys_per_partition);
 	ListingCost root {root_pages, root_pages};
-	auto partitions = CostOf(reading.size(), listed_together);
-	bool list_root = threshold.IsValid() ? reading.size() >= threshold.GetIndex() : Cheaper(root, partitions);
+	auto per_partition = CostOf(reading.size(), listed_together);
+	bool list_root = threshold.IsValid() ? reading.size() >= threshold.GetIndex() : root < per_partition;
 	HiveListingPlan plan {list_root ? HiveListingMode::ROOT : HiveListingMode::PARTITIONS, {}};
 	// with a threshold, ranges only replace the root; and no ranges beat a root of one page
 	if (!ranges_enabled || root_pages <= 1 || (threshold.IsValid() && !list_root)) {
@@ -133,7 +134,7 @@ HiveListingPlan HiveListingPlanner::Plan(const vector<idx_t> &reading) const {
 	auto ranges = PlanRanges(reading);
 	auto range_cost = CostOf(ranges, listed_together);
 	// against one listing per partition, ranges must take fewer rounds: at as many, the small listings return sooner
-	if (ranges.empty() || !(list_root ? Cheaper(range_cost, root) : range_cost.rounds < partitions.rounds)) {
+	if (ranges.empty() || !(list_root ? range_cost < root : range_cost.rounds < per_partition.rounds)) {
 		return plan;
 	}
 	plan.mode = HiveListingMode::RANGES;

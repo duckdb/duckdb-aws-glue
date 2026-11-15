@@ -256,6 +256,12 @@ void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GlueParti
 	}
 }
 
+string HiveScanInfo::TableRoot() const {
+	auto root = root_location;
+	StringUtil::RTrim(root, "/");
+	return root;
+}
+
 string HiveScanInfo::Describe() const {
 	if (database_name.empty()) {
 		return table_name;
@@ -326,13 +332,6 @@ private:
 	vector<OpenFileInfo> &files;
 };
 
-//! The table location without a trailing '/'
-static string TableRoot(const HiveScanInfo &scan_info) {
-	auto root = scan_info.root_location;
-	StringUtil::RTrim(root, "/");
-	return root;
-}
-
 //===--------------------------------------------------------------------===//
 // HiveMultiFileList
 //===--------------------------------------------------------------------===//
@@ -400,7 +399,7 @@ void HiveMultiFileList::PlanListings() const {
 		}
 	}
 	HiveListingPlanner planner;
-	planner.root_prefix = TableRoot(*scan_info) + "/";
+	planner.root_prefix = scan_info->TableRoot() + "/";
 	planner.keys_per_partition = MaxValue<idx_t>(scan_info->keys_per_partition.load(), 1);
 	planner.listed_together = PartitionsListedTogether(client_context);
 	planner.threshold = ListingThreshold(client_context);
@@ -459,7 +458,7 @@ void HiveMultiFileList::BuildPartitionLocations() const {
 		return;
 	}
 	partition_locations_built = true;
-	auto root = TableRoot(*scan_info);
+	auto root = scan_info->TableRoot();
 	root_prefix = root + "/";
 	comparable_root_size = ComparableLocation(root).size() + 1;
 	auto partitions = scan_info->Partitions(client_context);
@@ -617,7 +616,7 @@ void HiveMultiFileList::AddRootFiles(vector<OpenFileInfo> &files, const unordere
 }
 
 void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
-	auto root = TableRoot(*scan_info);
+	auto root = scan_info->TableRoot();
 	if (root.empty()) {
 		throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 	}
@@ -768,9 +767,10 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	if (scan_info->partition_keys.empty() || listing_jobs.empty() || next_job != 0) {
 		return std::move(sample.files);
 	}
-	auto &spanned = sample.partitions;
-	if (sample.keys > 0 && !spanned.empty() && BoolSetting("hive_partition_listing_measure_files", true)) {
-		auto keys_per_partition = MaxValue<idx_t>((sample.keys + spanned.size() / 2) / spanned.size(), 1);
+	auto &partitions_in_sample = sample.partitions;
+	if (sample.keys > 0 && !partitions_in_sample.empty() && BoolSetting("hive_partition_listing_measure_files", true)) {
+		auto keys_per_partition =
+		    MaxValue<idx_t>((sample.keys + partitions_in_sample.size() / 2) / partitions_in_sample.size(), 1);
 		idx_t unmeasured = 0;
 		bool measured = scan_info->keys_per_partition.compare_exchange_strong(unmeasured, keys_per_partition);
 		// more keys per partition only lengthen the root's listing and its ranges
@@ -783,7 +783,7 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	if (listing_jobs[0].mode == HiveListingMode::RANGES) {
 		// the ranges take the partitions the sample holds completely from it rather than listing them again
 		sampled_files = sample.files;
-		sampled_partitions = std::move(spanned);
+		sampled_partitions = std::move(partitions_in_sample);
 	}
 	return std::move(sample.files);
 }
@@ -804,7 +804,7 @@ HiveMultiFileList::ListingSample HiveMultiFileList::SampleFromPlan() const {
 		return SampleListing(range.glob, range.prefix, range.partitions);
 	}
 	if (job.mode == HiveListingMode::ROOT) {
-		auto root = TableRoot(*scan_info);
+		auto root = scan_info->TableRoot();
 		return SampleListing(LocationGlob(root), root + "/", job.partitions);
 	}
 	auto partition_index = job.partitions[0];

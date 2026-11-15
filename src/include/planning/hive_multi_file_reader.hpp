@@ -84,6 +84,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	                           const vector<idx_t> &column_indexes) const;
 	//! A description of the table for error messages
 	string Describe() const;
+	//! The table location without a trailing '/'
+	string TableRoot() const;
 	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
 	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
