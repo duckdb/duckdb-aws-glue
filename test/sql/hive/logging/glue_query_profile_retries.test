@@ -1,0 +1,99 @@
+# name: test/sql/hive/logging/glue_query_profile_retries.test
+# description: The query profile counts the Glue requests the SDK sent again
+# group: [logging]
+
+require httpfs
+
+require glue
+
+require json
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.fault_throttled_gpr;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.fault_throttled_gpr.t;
+
+statement ok
+CREATE TABLE my_datalake.fault_throttled_gpr.t AS SELECT 42 AS id;
+
+# every request on a fault_throttled* database is refused once with ThrottlingException, then let through
+statement ok
+attach '{GLUE_CATALOG_ID}' as throttled_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_throttled_profile.json';
+
+query I
+SELECT id FROM throttled_dl.fault_throttled_gpr.t;
+----
+42
+
+statement ok
+SET enable_profiling = 'no_output';
+
+# the one throttled GetTable is one retry, and the retry is one of the requests
+query III
+SELECT glue.retries, glue.requests >= 2, glue.request_time > 0
+FROM read_json('{TEST_DIR}/glue_throttled_profile.json');
+----
+1	true	true
+
+# the same through the AWS SDK's own HTTP client, which counts the retry but not the requests
+statement ok
+SET glue_network_calls_via_duckdb = false;
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_throttled_sdk_profile.json';
+
+query I
+SELECT id FROM throttled_dl.fault_throttled_gpr.t;
+----
+42
+
+statement ok
+SET enable_profiling = 'no_output';
+
+query I
+SELECT glue.retries FROM read_json('{TEST_DIR}/glue_throttled_sdk_profile.json');
+----
+1
+
+query I
+SELECT count(*) FROM (SELECT unnest(json_keys(to_json(glue))) AS metric FROM read_json('{TEST_DIR}/glue_throttled_sdk_profile.json'))
+WHERE metric IN ('requests', 'request_time');
+----
+0
+
+statement ok
+RESET glue_network_calls_via_duckdb;
+
+statement ok
+DETACH throttled_dl;
+
+statement ok
+DROP TABLE my_datalake.fault_throttled_gpr.t;
+
+statement ok
+DROP SCHEMA my_datalake.fault_throttled_gpr;

@@ -17,6 +17,7 @@
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
 #include "core/glue_log_types.hpp"
+#include "api/glue_request_metrics.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
 #include <aws/core/Aws.h>
@@ -171,6 +172,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory(instance);
 	RegisterGlueLogTypes(instance);
+	GlueRequestMetrics::Register(loader);
 
 	// Hive tables are read with read_parquet. A linked parquet is loaded as linked: autoloading would install it first
 	if (!instance.ExtensionIsLoaded("parquet")) {

@@ -1,0 +1,79 @@
+# name: test/sql/hive/logging/glue_request_metrics.test
+# description: The profiler reports the Glue requests a query makes and the time they take
+# group: [logging]
+
+require httpfs
+
+require glue
+
+require json
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.grm_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.grm_orders (id BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.grm_orders SELECT i, 'd' || (i % 3)::VARCHAR FROM range(30) r(i);
+
+# the metrics are listed, so a profiling configuration can ask for them by name
+query II
+SELECT metric_name, metric_type FROM duckdb_available_metrics()
+WHERE metric_name LIKE 'glue.%' ORDER BY metric_name;
+----
+glue.request_time	double
+glue.requests	uint64
+glue.retries	uint64
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_request_metrics.json';
+
+# a fresh transaction looks the table up (GetTable) and fetches its partitions (GetPartitions)
+statement ok
+SELECT count(*) FROM my_datalake.default.grm_orders;
+
+statement ok
+SET enable_profiling = 'no_output';
+
+query III
+SELECT (j->>'$.glue.requests')::UBIGINT >= 2,
+       (j->>'$.glue.request_time')::DOUBLE > 0,
+       j->>'$.glue.retries' IS NULL
+FROM read_json_objects('{TEST_DIR}/glue_request_metrics.json') t(j);
+----
+true	true	true
+
+# a query that makes no Glue request reports none: the metrics are absent, not zero
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_request_metrics_none.json';
+
+statement ok
+SELECT 42;
+
+statement ok
+SET enable_profiling = 'no_output';
+
+query III
+SELECT j->>'$.glue.requests' IS NULL, j->>'$.glue.request_time' IS NULL, j->>'$.glue' IS NULL
+FROM read_json_objects('{TEST_DIR}/glue_request_metrics_none.json') t(j);
+----
+true	true	true
+
+statement ok
+DROP TABLE my_datalake.default.grm_orders;

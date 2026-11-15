@@ -577,6 +577,30 @@ where the SDK has none).
 `connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
 logged.
 
+With profiling enabled (`SET enable_profiling = 'json'`), the query profile reports what a query asked of Glue.
+`duckdb_available_metrics()` lists the metrics. A metric the query did not touch is absent.
+
+- `glue.requests`: requests the AWS SDK sent to the Glue API, retries and pages included. The count is per request the
+  SDK sends, not per HTTP attempt: if DuckDB's HTTP transport repeats a request by itself, it is still counted once.
+  Only Glue requests (those with an `x-amz-target` header starting with `AWSGlue.`) are counted, not other services such
+  as the credential calls of an AWS credential chain.
+- `glue.request_time`: time the Glue requests took, in seconds, summed over the requests, which may run at the same
+  time, so it can exceed the query's wall time.
+- `glue.retries`: Glue requests the AWS SDK sent again after a failed attempt. They are also counted in
+  `glue.requests`.
+
+`glue.requests` and `glue.request_time` are counted by the DuckDB HTTP client only, which the requests go through when
+`glue_network_calls_via_duckdb` is true. With `glue_network_calls_via_duckdb = false` the SDK's own client is used and
+they stay absent, while `glue.retries` is still counted. Per request and per table detail is in the `GlueScan` log
+below.
+
+```sql
+SET enable_profiling = 'json';
+SET profiling_output = 'profile.json';
+SELECT count(*) FROM my_datalake.default.orders;
+SELECT j->>'$.glue.requests', j->>'$.glue.request_time' FROM read_json_objects('profile.json') t(j);
+```
+
 The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
 `scan_id` that numbers the scans of a query from 1:
 
