@@ -18,6 +18,8 @@ jobs:
     with:
       ci_tools_version: c286b12cee2aa16b714e76d0b46e530fcdb6dc05 # v2.0-cyanoptera 2026-11-11 pin
       exclude_archs: 'windows_amd64_rtools;windows_amd64_mingw'
+      # PR checks run the reduced matrix, which leaves out wasm_threads, the only wasm build with its own vcpkg triplet
+      opt_in_archs: 'wasm_threads'
       extension_name: glue
 
   code-quality-check:
