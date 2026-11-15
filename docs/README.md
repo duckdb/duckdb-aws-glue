@@ -586,13 +586,13 @@ With profiling enabled (`SET enable_profiling = 'json'`), the query profile repo
   as the credential calls of an AWS credential chain.
 - `glue.request_time`: time the Glue requests took, in seconds, summed over the requests, which may run at the same
   time, so it can exceed the query's wall time.
-- `glue.retries`: Glue requests the AWS SDK sent again after a failed attempt. They are also counted in
-  `glue.requests`.
+- `glue.retries`: Glue requests the AWS SDK sent again after a failed attempt. Each of them is also counted in
+  `glue.requests`, except when `glue_network_calls_via_duckdb` is false, as described below.
 
 `glue.requests` and `glue.request_time` are counted by the DuckDB HTTP client only, which the requests go through when
 `glue_network_calls_via_duckdb` is true. With `glue_network_calls_via_duckdb = false` the SDK's own client is used and
-they stay absent, while `glue.retries` is still counted. Per request and per table detail is in the `GlueScan` log
-below.
+they stay absent, while `glue.retries` is still counted. Detail per request is in `glue_requests()`, and detail per
+table scan is in the `GlueScan` log, both below.
 
 ```sql
 SET enable_profiling = 'json';
