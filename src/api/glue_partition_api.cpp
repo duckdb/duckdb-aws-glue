@@ -374,8 +374,8 @@ public:
 
 	void ExecuteTask() override {
 		// thread local: without it a worker's requests use the database level HTTP settings and stay out of this
-		// connection's HTTP log
-		GlueHttpClientContextScope http_scope(context);
+		// connection's HTTP log. Not timed: the thread that waits for all segments times the whole call.
+		GlueHttpClientContextScope http_scope(context, false);
 		FetchPartitionSegment(client, catalog, database_name, table_name, segment_number, total_segments, result);
 	}
 	string TaskType() const override {

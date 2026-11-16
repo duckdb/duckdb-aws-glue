@@ -48,13 +48,14 @@ SELECT count(*) FROM my_datalake.default.grm_orders;
 statement ok
 SET enable_profiling = 'no_output';
 
-query II
-SELECT (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.retries IS NULL
+query III
+SELECT (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.request_time::DOUBLE > 0, (j::VARIANT).glue.retries IS NULL
 FROM read_json_objects('{TEST_DIR}/glue_request_metrics.json') t(j);
 ----
-2	true
+2	true	true
 
-# each parallel GetPartitions segment is a request of its own: 1 GetTable + 4 GetPartitions
+# each parallel GetPartitions segment is a request of its own: 1 GetTable + 4 GetPartitions. The time is the time the
+# query waited for the segments, which the worker threads do not add to.
 statement ok
 SET glue_get_partitions_segments = 4;
 
@@ -73,13 +74,13 @@ SET enable_profiling = 'no_output';
 statement ok
 RESET glue_get_partitions_segments;
 
-query I
-SELECT (j::VARIANT).glue.requests::UBIGINT
+query II
+SELECT (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.request_time::DOUBLE > 0
 FROM read_json_objects('{TEST_DIR}/glue_request_metrics_segments.json') t(j);
 ----
-5
+5	true
 
-# the requests are counted for the AWS SDK's own HTTP client too
+# the requests and their time are reported for the AWS SDK's own HTTP client too
 statement ok
 SET glue_network_calls_via_duckdb = false;
 
@@ -98,11 +99,11 @@ SET enable_profiling = 'no_output';
 statement ok
 RESET glue_network_calls_via_duckdb;
 
-query I
-SELECT (j::VARIANT).glue.requests::UBIGINT
+query II
+SELECT (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.request_time::DOUBLE > 0
 FROM read_json_objects('{TEST_DIR}/glue_request_metrics_sdk.json') t(j);
 ----
-2
+2	true
 
 # a query that makes no Glue request reports none: the metrics are absent, not zero
 statement ok

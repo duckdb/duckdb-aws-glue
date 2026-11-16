@@ -52,11 +52,11 @@ SET enable_profiling = 'no_output';
 
 # the one throttled GetTable is one retry, and two requests: the refused attempt and the retry. The table has no
 # partitions, so nothing else asks Glue.
-query II
-SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT
+query III
+SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.request_time::DOUBLE > 0
 FROM read_json_objects('{TEST_DIR}/glue_throttled_profile.json') t(j);
 ----
-1	2
+1	2	true
 
 # the same through the AWS SDK's own HTTP client
 statement ok
@@ -76,11 +76,11 @@ SELECT id FROM throttled_dl.fault_throttled_gpr.t;
 statement ok
 SET enable_profiling = 'no_output';
 
-query II
-SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT
+query III
+SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.request_time::DOUBLE > 0
 FROM read_json_objects('{TEST_DIR}/glue_throttled_sdk_profile.json') t(j);
 ----
-1	2
+1	2	true
 
 statement ok
 RESET glue_network_calls_via_duckdb;
