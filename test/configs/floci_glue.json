@@ -1,0 +1,27 @@
+{
+  "description": "Glue, S3 Tables and S3 of a local Floci seeded by scripts/floci_seed.sh: the child catalogs test/sql/child_catalogs reads, which moto does not model",
+  "on_init": "CREATE SECRET (TYPE S3, KEY_ID 'test', SECRET 'test', REGION 'us-east-1', ENDPOINT 'localhost:4566', USE_SSL false, URL_STYLE 'path');",
+  "statically_loaded_extensions": [
+    "core_functions",
+    "parquet",
+    "json",
+    "avro",
+    "httpfs",
+    "glue"
+  ],
+  "test_env": [
+    {
+      "env_name": "GLUE_FLOCI_CATALOG_ID",
+      "env_value": "000000000000"
+    },
+    {
+      "env_name": "GLUE_FLOCI_ENDPOINT",
+      "env_value": "http://localhost:4566"
+    },
+    {
+      "env_name": "GLUE_FLOCI_S3_LOCATION",
+      "env_value": "s3://glue-floci-test/warehouse"
+    }
+  ],
+  "skip_tests": []
+}

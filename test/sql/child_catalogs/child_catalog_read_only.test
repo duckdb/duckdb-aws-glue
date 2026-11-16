@@ -1,0 +1,221 @@
+# name: test/sql/child_catalogs/child_catalog_read_only.test
+# description: nothing changes below a child catalog: every statement and function that would otherwise reach the attached catalog's database or table of the same name is refused, and that one is left alone
+# group: [child_catalogs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_FLOCI_ENDPOINT
+
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FLOCI_ENDPOINT}',
+    DEFAULT_LOCATION '{GLUE_FLOCI_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+# the database and the table of the account's own catalog that share their names with the ones in the table bucket
+statement ok
+DROP SCHEMA IF EXISTS lake.retail CASCADE;
+
+statement ok
+CREATE SCHEMA lake.retail;
+
+statement ok
+CREATE TABLE lake.retail.widget_sales (i INTEGER, s VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO lake.retail.widget_sales VALUES (1, 'own catalog', 'keep');
+
+# DML
+statement error
+INSERT INTO lake.s3tablescatalog.salesdemo.retail.widget_sales VALUES (2, 'wrong table');
+----
+<REGEX>:.*INSERT is not supported in "s3tablescatalog.salesdemo.retail": Glue catalog "lake" lists the schemas and tables of its child catalogs, but can not read or change them yet.*
+
+statement error
+DELETE FROM lake.s3tablescatalog.salesdemo.retail.widget_sales;
+----
+<REGEX>:.*(not supported|Can only delete from base table).*
+
+statement error
+UPDATE lake.s3tablescatalog.salesdemo.retail.widget_sales SET i = 3;
+----
+<REGEX>:.*(not supported|Can only update base table).*
+
+# a statement that would copy the rows fails when the scan starts, and leaves nothing behind
+statement error
+CREATE TABLE lake.retail.copied AS SELECT * FROM lake.s3tablescatalog.salesdemo.retail.widget_sales;
+----
+can not read yet
+
+statement error
+COPY (SELECT * FROM lake.s3tablescatalog.salesdemo.retail.widget_sales) TO '__TEST_DIR__/child_catalog_copy.csv';
+----
+can not read yet
+
+# tables
+statement error
+CREATE TABLE lake.s3tablescatalog.salesdemo.retail.created (i INTEGER);
+----
+CREATE TABLE is not supported in "s3tablescatalog.salesdemo.retail"
+
+statement error
+CREATE TABLE lake.s3tablescatalog.salesdemo.retail.created AS SELECT 1 AS i;
+----
+CREATE TABLE is not supported in "s3tablescatalog.salesdemo.retail"
+
+statement error
+DROP TABLE lake.s3tablescatalog.salesdemo.retail.widget_sales;
+----
+DROP is not supported in "s3tablescatalog.salesdemo.retail"
+
+statement error
+ALTER TABLE lake.s3tablescatalog.salesdemo.retail.widget_sales ADD COLUMN added INTEGER;
+----
+ALTER is not supported in "s3tablescatalog.salesdemo.retail"
+
+statement error
+COMMENT ON TABLE lake.s3tablescatalog.salesdemo.retail.widget_sales IS 'wrong table';
+----
+ALTER is not supported in "s3tablescatalog.salesdemo.retail"
+
+# a child catalog itself holds schemas, not tables
+statement error
+CREATE TABLE lake.s3tablescatalog.salesdemo.created (i INTEGER);
+----
+<REGEX>:.*CREATE TABLE is not supported in "s3tablescatalog.salesdemo": it is a child catalog of Glue catalog "lake".*which holds schemas, not tables.*
+
+# views
+statement error
+CREATE VIEW lake.s3tablescatalog.salesdemo.retail.created_view AS SELECT 1 AS i;
+----
+CREATE VIEW is not supported in "s3tablescatalog.salesdemo.retail"
+
+statement error
+CREATE VIEW lake.retail.over_child AS SELECT * FROM lake.s3tablescatalog.salesdemo.retail.widget_sales;
+----
+Glue view references
+
+# schemas
+statement error
+CREATE SCHEMA lake.s3tablescatalog.salesdemo.created_schema;
+----
+<REGEX>:.*CREATE SCHEMA is not supported for "s3tablescatalog.salesdemo.created_schema".*
+
+statement error
+CREATE SCHEMA IF NOT EXISTS lake.s3tablescatalog.salesdemo.retail;
+----
+CREATE SCHEMA is not supported
+
+statement error
+DROP SCHEMA lake.s3tablescatalog.salesdemo.retail;
+----
+<REGEX>:.*DROP SCHEMA is not supported for "s3tablescatalog.salesdemo.retail".*
+
+statement error
+DROP SCHEMA IF EXISTS lake.s3tablescatalog.salesdemo.retail CASCADE;
+----
+DROP SCHEMA is not supported
+
+statement error
+ALTER SCHEMA lake.s3tablescatalog.salesdemo.retail SET (comment = 'wrong database');
+----
+<REGEX>:.*(ALTER SCHEMA is not supported|not supported).*
+
+# the functions that take a table name, and the Hive DDL that calls them
+statement error
+SELECT * FROM glue_partitions('lake.s3tablescatalog.salesdemo.retail.widget_sales');
+----
+<REGEX>:.*glue_partitions does not work on "s3tablescatalog.salesdemo.retail.widget_sales".*
+
+statement error
+SELECT * FROM glue_get_table_response('lake.s3tablescatalog.salesdemo.retail.widget_sales');
+----
+can not read or change them yet
+
+statement error
+CALL glue_add_partition('lake.s3tablescatalog.salesdemo.retail.widget_sales', {dt: 'added'});
+----
+can not read or change them yet
+
+statement error
+CALL glue_drop_partition('lake.s3tablescatalog.salesdemo.retail.widget_sales', {dt: 'keep'});
+----
+can not read or change them yet
+
+statement error
+CALL glue_set_table_location('lake.s3tablescatalog.salesdemo.retail.widget_sales', '{GLUE_FLOCI_S3_LOCATION}/{TEST_DIR}/moved');
+----
+can not read or change them yet
+
+statement error
+CALL glue_repair_table('lake.s3tablescatalog.salesdemo.retail.widget_sales');
+----
+can not read or change them yet
+
+statement error
+ALTER TABLE lake.s3tablescatalog.salesdemo.retail.widget_sales ADD PARTITION (dt = 'added');
+----
+can not read or change them yet
+
+statement error
+ALTER TABLE lake.s3tablescatalog.salesdemo.retail.widget_sales DROP PARTITION (dt = 'keep');
+----
+can not read or change them yet
+
+statement error
+SELECT * FROM glue_get_database_response('lake.s3tablescatalog.salesdemo.retail');
+----
+expects a database name
+
+# the database and the table of the same names are as they were
+query III
+SELECT * FROM lake.retail.widget_sales;
+----
+1	own catalog	keep
+
+query I
+SELECT partition_values FROM glue_partitions('lake.retail.widget_sales');
+----
+[keep]
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'lake' AND schema_name = 'retail'
+AND table_name = 'widget_sales' AND column_name = 'added';
+----
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = 'created_schema';
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake'
+AND table_name IN ('created', 'created_view', 'over_child', 'copied');
+----
+0
+
+# with the Glue catalog as the default one, the view's reference resolves to the table below the child catalog
+statement ok
+USE lake.retail;
+
+statement error
+CREATE VIEW over_child AS SELECT * FROM s3tablescatalog.salesdemo.retail.widget_sales;
+----
+Glue view references
+
+statement ok
+USE memory;
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = 'over_child';
+----
+0
+
+statement ok
+DROP SCHEMA lake.retail CASCADE;

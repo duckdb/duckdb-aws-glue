@@ -1,0 +1,74 @@
+# name: test/sql/child_catalogs/child_catalog_same_name.test
+# description: a database of the attached catalog and a child catalog can share a name: the schema holds the tables of the database and the schemas of the child catalog
+# group: [child_catalogs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_FLOCI_ENDPOINT
+
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FLOCI_ENDPOINT}',
+    DEFAULT_LOCATION '{GLUE_FLOCI_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS lake.s3tablescatalog CASCADE;
+
+# before the database exists the name is the child catalog alone: it holds no tables
+statement error
+CREATE TABLE lake.s3tablescatalog.own_table (i INTEGER);
+----
+<REGEX>:.*(does not exist|it is a child catalog of Glue catalog "lake").*
+
+# the database is created beside the child catalog
+statement ok
+CREATE SCHEMA lake.s3tablescatalog;
+
+statement ok
+CREATE TABLE lake.s3tablescatalog.own_table AS SELECT 42 AS i;
+
+query I
+SELECT i FROM lake.s3tablescatalog.own_table;
+----
+42
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE lake.s3tablescatalog.salesdemo.retail.widget_sales);
+----
+i	INTEGER
+s	VARCHAR
+
+# one schema of that name is listed
+query II
+SELECT schema_name, parent_schema FROM duckdb_schemas() WHERE database_name = 'lake'
+AND schema_name IN ('s3tablescatalog', 'salesdemo') ORDER BY ALL;
+----
+s3tablescatalog	NULL
+salesdemo	s3tablescatalog
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'lake' AND schema_name = 's3tablescatalog';
+----
+s3tablescatalog	own_table
+
+statement ok
+INSERT INTO lake.s3tablescatalog.own_table VALUES (43);
+
+# dropping the database leaves the child catalog
+statement ok
+DROP SCHEMA lake.s3tablescatalog CASCADE;
+
+statement error
+SELECT i FROM lake.s3tablescatalog.own_table;
+----
+does not exist
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE lake.s3tablescatalog.salesdemo.retail.widget_sales);
+----
+i	INTEGER
+s	VARCHAR

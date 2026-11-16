@@ -1,0 +1,191 @@
+# name: test/sql/child_catalogs/child_catalog_paths.test
+# description: a nested schema path names a child catalog of the attached Glue catalog and a database in it; a table below one is described with one GetTable and not read
+# group: [child_catalogs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_FLOCI_ENDPOINT
+
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FLOCI_ENDPOINT}',
+    DEFAULT_LOCATION '{GLUE_FLOCI_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the account's own catalog has a database and a table with the names of the ones in the table buckets
+statement ok
+DROP SCHEMA IF EXISTS lake.retail CASCADE;
+
+statement ok
+CREATE SCHEMA lake.retail;
+
+statement ok
+CREATE TABLE lake.retail.widget_sales AS SELECT 'own catalog' AS origin;
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+# a fresh attachment describes a table below a child catalog with one request: the table, in the catalog the path
+# names
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as counted (TYPE glue, ENDPOINT '{GLUE_FLOCI_ENDPOINT}');
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE counted.s3tablescatalog.salesdemo.retail.widget_sales);
+----
+i	INTEGER
+s	VARCHAR
+
+query IIII
+SELECT glue_calls('GetTable'), glue_calls('GetDatabase'), glue_calls('GetCatalog'), glue_calls('GetCatalogs');
+----
+1	0	0	0
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DETACH counted;
+
+# each path reaches its own table: the columns are those of the table bucket the path names
+query II
+SELECT column_name, column_type FROM (DESCRIBE lake.s3tablescatalog.salesdemo.retail.widget_sales);
+----
+i	INTEGER
+s	VARCHAR
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE lake.s3tablescatalog.archive.retail.widget_sales);
+----
+archived_at	VARCHAR
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE lake.retail.widget_sales);
+----
+origin	VARCHAR
+
+query I
+SELECT origin FROM lake.retail.widget_sales;
+----
+own catalog
+
+# the tables below a child catalog are listed with the format Glue reports
+query III
+SELECT schema_name, table_name, tags['table_type'] FROM duckdb_tables()
+WHERE database_name = 'lake' AND schema_name = 'retail' ORDER BY ALL;
+----
+retail	pending	ICEBERG
+retail	widget_sales	HIVE
+retail	widget_sales	ICEBERG
+retail	widget_sales	ICEBERG
+
+query II
+SELECT table_name, column_name FROM duckdb_columns()
+WHERE database_name = 'lake' AND schema_name = 'retail' AND table_name = 'widget_sales' ORDER BY ALL;
+----
+widget_sales	archived_at
+widget_sales	i
+widget_sales	origin
+widget_sales	s
+
+# a schema carries the path that named it
+query II
+SELECT schema_name, parent_schema FROM duckdb_schemas()
+WHERE database_name = 'lake' AND schema_name IN ('retail', 'salesdemo', 'archive', 's3tablescatalog') ORDER BY ALL;
+----
+archive	s3tablescatalog
+retail	archive
+retail	salesdemo
+retail	NULL
+s3tablescatalog	NULL
+salesdemo	s3tablescatalog
+
+# reading is refused, with the way to read an Iceberg table
+statement error
+SELECT * FROM lake.s3tablescatalog.salesdemo.retail.widget_sales;
+----
+<REGEX>:.*Glue table "s3tablescatalog.salesdemo.retail.widget_sales" is an Iceberg table of the child catalog '000000000000:s3tablescatalog/salesdemo'.*ATTACH '000000000000:s3tablescatalog/salesdemo' AS <name> \(TYPE ICEBERG, ENDPOINT_TYPE GLUE\).*
+
+statement error
+SELECT count(*) FROM lake.s3tablescatalog.archive.retail.widget_sales;
+----
+can not read yet
+
+# a table Glue reports no columns for can not be bound
+statement error
+SELECT * FROM lake.s3tablescatalog.salesdemo.retail.pending;
+----
+can not read yet
+
+# what the path does not name is not found
+statement error
+SELECT * FROM lake.s3tablescatalog.salesdemo.retail.no_such_table;
+----
+does not exist
+
+statement error
+SELECT * FROM lake.s3tablescatalog.salesdemo.no_such_namespace.widget_sales;
+----
+does not exist
+
+statement error
+SELECT * FROM lake.s3tablescatalog.no_such_bucket.retail.widget_sales;
+----
+does not exist
+
+statement error
+SELECT * FROM lake.no_such_catalog.retail.widget_sales;
+----
+does not exist
+
+# a quoted name with dots is one database, not a path
+statement error
+SELECT * FROM lake."s3tablescatalog.salesdemo.retail".widget_sales;
+----
+does not exist
+
+# a path is relative to the attached catalog: attached to the federated catalog, a table bucket is the first level
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}:s3tablescatalog' as tables (TYPE glue, ENDPOINT '{GLUE_FLOCI_ENDPOINT}');
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE tables.archive.retail.widget_sales);
+----
+archived_at	VARCHAR
+
+statement error
+SELECT * FROM tables.archive.retail.widget_sales;
+----
+<REGEX>:.*child catalog '000000000000:s3tablescatalog/archive'.*
+
+# attached to the table bucket itself, its databases are at the top, as before
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}:s3tablescatalog/salesdemo' as bucket (TYPE glue, ENDPOINT '{GLUE_FLOCI_ENDPOINT}');
+
+query II
+SELECT schema_name, table_name FROM duckdb_tables() WHERE database_name = 'bucket' ORDER BY ALL;
+----
+retail	pending
+retail	widget_sales
+
+statement error
+SELECT * FROM bucket.retail.widget_sales;
+----
+has table format ICEBERG, which can not be read yet
+
+statement ok
+DROP SCHEMA lake.retail CASCADE;
