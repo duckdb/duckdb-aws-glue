@@ -1085,11 +1085,6 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["binary_as_string"] = Value::BOOLEAN(!HasBinaryColumn(*scan_info));
 		// writers leave NaN out of a float column's min/max, so without a nan_count the bounds do not cover NaN
 		param_map["can_have_nan"] = Value::BOOLEAN(true);
-		if (scan_info->partition_keys.empty()) {
-			// a small table's footers give the optimizer its row count and column statistics; a partitioned scan
-			// would list its partitions at bind, before a join's filter prunes them
-			param_map["maximum_files_for_stats"] = Value::UBIGINT(HiveFooterStatisticsMaxFiles(context));
-		}
 		break;
 	case HiveFileFormat::CSV:
 		// Hive CSV files carry no schema: the columns are given, by position, and the dialect is the one the table

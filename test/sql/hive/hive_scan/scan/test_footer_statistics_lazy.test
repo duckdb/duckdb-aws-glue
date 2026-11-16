@@ -1,0 +1,182 @@
+# name: test/sql/hive/hive_scan/scan/test_footer_statistics_lazy.test
+# description: The footers of a small unpartitioned parquet scan are read when the optimizer first asks for its statistics, not at bind: a scan the optimizer removes and a DESCRIBE open no file, and a scan that is kept fails on the files it cannot read rather than reading none
+# group: [scan]
+
+require parquet
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env DEFAULT_S3_LOCATION
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as lazy_lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS lazy_lake.default.lazy_footers;
+
+# a Glue table of two files, and a location of two files read with hive_scan: i is 1 to 10 in one and 11 to 20 in
+# the other
+statement ok
+CREATE TABLE lazy_lake.default.lazy_footers AS SELECT i::BIGINT AS i FROM range(1, 11) t(i);
+
+statement ok
+INSERT INTO lazy_lake.default.lazy_footers SELECT i::BIGINT AS i FROM range(11, 21) t(i);
+
+statement ok
+COPY (SELECT i::BIGINT AS i FROM range(1, 11) t(i)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/lazy_scan/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT i::BIGINT AS i FROM range(11, 21) t(i)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/lazy_scan/b.parquet' (FORMAT parquet);
+
+statement ok
+CREATE MACRO lazy_scan() AS TABLE FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/lazy_scan', schema := {i: 'BIGINT'});
+
+# the optimizer still gets the footers' merged statistics and summed row count
+query I
+SELECT stats(i) FROM lazy_lake.default.lazy_footers LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}
+
+query I
+SELECT stats(i) FROM lazy_scan() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}
+
+query II
+EXPLAIN SELECT i FROM lazy_scan();
+----
+physical_plan	<REGEX>:.*Hive Scan.*~20 rows.*
+
+# and prunes on them
+query II
+EXPLAIN SELECT i FROM lazy_lake.default.lazy_footers WHERE i > 20;
+----
+physical_plan	<REGEX>:(?s).*Empty Result.*
+
+query I
+SELECT count(*) FROM lazy_lake.default.lazy_footers WHERE i > 15;
+----
+5
+
+# every scan of a table in a query shares one read of its footers
+statement ok
+CALL enable_logging('GlueScan', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM lazy_lake.default.lazy_footers a JOIN lazy_lake.default.lazy_footers b USING (i);
+----
+20
+
+query II
+SELECT count(*), max(files) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'footers';
+----
+1	2
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# but not scans that read the files differently: a binary column makes the reader keep BYTE_ARRAY bytes
+query I
+SELECT count(*) FROM lazy_scan() a JOIN hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/lazy_scan', schema := {i: 'BIGINT', b: 'BLOB'}) b USING (i);
+----
+20
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'footers';
+----
+2
+
+statement ok
+CALL disable_logging();
+
+# with hive_footer_statistics_max_files = 0 there are none
+statement ok
+SET hive_footer_statistics_max_files = 0;
+
+query I
+SELECT stats(i) FROM lazy_scan() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true}
+
+statement ok
+RESET hive_footer_statistics_max_files;
+
+# a prepared statement plans again on every EXECUTE, and reads the footers again
+statement ok
+PREPARE count_above AS SELECT count(*) FROM lazy_lake.default.lazy_footers WHERE i > ?;
+
+query I
+EXECUTE count_above(15);
+----
+5
+
+query I
+EXECUTE count_above(100);
+----
+0
+
+#---------------------------------------------------------------------------
+# no S3 access from here on: what binds and plans without opening a file still works
+#---------------------------------------------------------------------------
+
+statement ok
+SET disabled_filesystems = 'S3FileSystem';
+
+statement ok
+PREPARE table_false AS SELECT * FROM lazy_lake.default.lazy_footers WHERE false;
+
+query I
+EXECUTE table_false;
+----
+
+statement ok
+PREPARE scan_false AS SELECT * FROM lazy_scan() WHERE false;
+
+query I
+EXECUTE scan_false;
+----
+
+query II
+EXPLAIN SELECT * FROM lazy_lake.default.lazy_footers WHERE false;
+----
+physical_plan	<REGEX>:(?s).*Empty Result.*
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE lazy_lake.default.lazy_footers);
+----
+i	BIGINT
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM lazy_scan());
+----
+i	BIGINT
+
+# a scan that is kept lists its location when it runs, and fails there
+statement error
+SELECT count(*) FROM lazy_lake.default.lazy_footers;
+----
+<REGEX>:.*File system S3FileSystem has been disabled by configuration.*
+
+statement error
+SELECT * FROM lazy_scan() WHERE i > 15;
+----
+<REGEX>:.*File system S3FileSystem has been disabled by configuration.*
+
+statement error
+EXECUTE count_above(15);
+----
+<REGEX>:.*File system S3FileSystem has been disabled by configuration.*
+
+statement ok
+DROP TABLE lazy_lake.default.lazy_footers;

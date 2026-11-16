@@ -48,7 +48,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
-	//! The cardinality function of the bound file format reader, used when it read the footers of every file at bind
+	//! The cardinality function of the bound file format reader, used once the footers of every file are read
 	table_function_cardinality_t format_cardinality = nullptr;
 	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
 	//! columns
@@ -186,8 +186,7 @@ private:
 
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of
 //! 'scan_info' with the HiveMultiFileReader. Returns the bound table function and fills in 'bind_data'; the scan
-//! produces exactly the columns of 'scan_info'. Only an unpartitioned parquet scan lists and opens files here, for
-//! their footers (maximum_files_for_stats).
+//! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
 //! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan

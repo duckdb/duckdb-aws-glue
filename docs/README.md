@@ -161,9 +161,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   scan reads: the group estimate on a key is exact, but the optimizer can then push aggregates below a join on the
   key and lose that join's run-time partition pruning.
 - A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
-  gets its minimum, maximum and NULLs merged from the footers of all of them, which DuckDB's parquet reader reads
-  when the scan binds (its `maximum_files_for_stats`), so a `DESCRIBE` of such a table lists the table and reads its
-  footers too. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file
+  gets its minimum, maximum and NULLs merged from the footers of all of them. They are read the first time the
+  optimizer asks for the scan's statistics, not when it binds: a scan the optimizer removes first (`WHERE false`)
+  and a `DESCRIBE` open no file. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file
   with rows lacks the column, stores it as another type than the table declares, or, in a table of several files,
   has statistics for it that DuckDB cannot read; so do the data columns of partitioned, csv, json and avro tables. A
   table of one file whose statistics DuckDB cannot read fails planning, as `read_parquet` of that file does. An empty
@@ -588,6 +588,8 @@ The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, on
 - `sample`: the cardinality sample listed `files` files and measured one in `duration_ms` (`files` is NULL when
   nothing was listed: avro tables are not sampled). The scan reuses that listing, so a `listing` of the same
   directory then takes next to no time. Every scan of the table in the query shares the one sample.
+- `footers`: the footers of an unpartitioned parquet table's `files` files were read for statistics in
+  `duration_ms`, when the optimizer first asked. Every scan of the table in the query shares them.
 
 ```sql
 CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');
