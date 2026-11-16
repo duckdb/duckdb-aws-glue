@@ -52,7 +52,9 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 		}
 		auto &tables = outcome.GetResult();
 		for (auto &table : tables.GetTableList()) {
-			result.push_back(ToTableInfo(table, database_name, catalog_id));
+			if (IsInChildCatalog(table, catalog_id)) {
+				result.push_back(ToTableInfo(table, database_name, catalog_id));
+			}
 		}
 		next_token = tables.GetNextToken();
 		if (single_page) {
@@ -108,6 +110,9 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 		ThrowGlueError(outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
 	}
 	auto &table = outcome.GetResult().GetTable();
+	if (!IsInChildCatalog(table, catalog_id)) {
+		return false;
+	}
 	result = ToTableInfo(table, database_name, catalog_id);
 	if (raw_json) {
 		*raw_json = ToStdString(table.Jsonize().View().WriteReadable());

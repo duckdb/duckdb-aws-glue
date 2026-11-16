@@ -35,7 +35,9 @@ vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatal
 		}
 		auto &databases = outcome.GetResult();
 		for (auto &database : databases.GetDatabaseList()) {
-			result.push_back(ToDatabaseInfo(database));
+			if (IsInChildCatalog(database, catalog_id)) {
+				result.push_back(ToDatabaseInfo(database));
+			}
 		}
 		next_token = databases.GetNextToken();
 	} while (!next_token.empty());
@@ -57,6 +59,9 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 		ThrowGlueError(outcome, StringUtil::Format("GetDatabase '%s'", database_name));
 	}
 	auto &database = outcome.GetResult().GetDatabase();
+	if (!IsInChildCatalog(database, catalog_id)) {
+		return false;
+	}
 	result = ToDatabaseInfo(database);
 	if (raw_json) {
 		*raw_json = ToStdString(database.Jsonize().View().WriteReadable());
