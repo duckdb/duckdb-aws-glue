@@ -45,8 +45,8 @@ bool GlueRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Client::Cor
 	return retry;
 }
 
-long GlueRetryStrategy::CalculateDelayBeforeNextRetry(
-    const Aws::Client::AWSError<Aws::Client::CoreErrors> &error, long attempted_retries) const {
+long GlueRetryStrategy::CalculateDelayBeforeNextRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+                                                      long attempted_retries) const {
 	return strategy->CalculateDelayBeforeNextRetry(error, attempted_retries);
 }
 
@@ -78,7 +78,7 @@ void GlueRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcom
 }
 
 void GlueRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome,
-                                                  const Aws::Client::AWSError<Aws::Client::CoreErrors> &last_error) {
+                                           const Aws::Client::AWSError<Aws::Client::CoreErrors> &last_error) {
 	CountAttempt();
 	strategy->RequestBookkeeping(outcome, last_error);
 }

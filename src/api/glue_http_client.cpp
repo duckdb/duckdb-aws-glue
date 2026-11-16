@@ -68,7 +68,8 @@ GlueHttpClientContextScope::~GlueHttpClientContextScope() {
 		glue_call_timed = false;
 		try {
 			timer.End();
-			QueryProfiler::Get(*timed_context).AddToMetricTiming(GlueRequestMetrics::REQUEST_TIME, timer.ElapsedNanos());
+			QueryProfiler::Get(*timed_context)
+			    .AddToMetricTiming(GlueRequestMetrics::REQUEST_TIME, timer.ElapsedNanos());
 		} catch (...) { // NOLINT: a destructor must not throw
 		}
 	}
