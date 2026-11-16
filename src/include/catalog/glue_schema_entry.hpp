@@ -96,6 +96,15 @@ public:
 	const string &GetCatalogId() const {
 		return catalog_id;
 	}
+	//! Whether the schema is a child catalog of the attached one or a database of one. Those are listed, but not read
+	//! or changed: every other Glue request carries the id of the attached catalog
+	bool InChildCatalog() const {
+		return GetParentSchema() != nullptr;
+	}
+	//! Throws if InChildCatalog(): 'operation' would act on the attached catalog's database of the same name
+	void CheckNotInChildCatalog(const string &operation) const;
+	//! Throws: a table of this schema, which is InChildCatalog(), can not be scanned
+	[[noreturn]] void ThrowTableNotReadable(const GlueTableInfo &table) const;
 	//! The database's key in the metadata cache: two catalogs can hold a database of the same name
 	string GetCacheKey() const {
 		return catalog_id.empty() ? database_info.name : catalog_id + "\n" + database_info.name;

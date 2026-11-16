@@ -106,6 +106,11 @@ unique_ptr<FunctionData> GlueGetDatabaseResponseBind(ClientContext &context, Tab
 	if (components.size() == 1) {
 		// an unqualified database name: resolve it the way a query would (search path, default catalog)
 		auto &schema = Catalog::GetSchema(context, Identifier(), components[0]);
+		if (schema.GetParentSchema()) {
+			throw BinderException("glue_get_database_response does not work on \"%s\", a schema below a child "
+			                      "catalog",
+			                      QualifiedName::FromPath(schema.GetSchemaPath()).ToString());
+		}
 		components = {schema.ParentCatalog().GetName(), Identifier(schema.name)};
 	}
 	if (components.size() != 2) {
@@ -194,8 +199,8 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 		// a partially qualified name: resolve it the way a query would (search path, default catalog)
 		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qualified);
 		auto &entry = Catalog::GetEntry(context, lookup);
-		qualified = QualifiedName(entry.ParentCatalog().GetName(), Identifier(entry.ParentSchema().name),
-		                          Identifier(entry.name));
+		qualified = QualifiedName::FromCatalogSchema(entry.ParentCatalog().GetName(),
+		                                             entry.ParentSchema().GetSchemaPath(), Identifier(entry.name));
 	}
 	auto catalog = Catalog::GetCatalogEntry(context, qualified.Catalog());
 	if (!catalog) {
@@ -205,11 +210,14 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 		throw BinderException("%s only works on tables of a Glue catalog, '%s' is a %s catalog", function_name,
 		                      qualified.Catalog().GetIdentifierName(), catalog->GetCatalogType());
 	}
-	// a fully qualified name skips the lookup that rejects a nested schema path
+	// the functions ask Glue for <database>.<table> of the attached catalog: a nested path names a table of a child
+	// catalog, and would reach the attached catalog's table of the same name
 	auto schema_path = qualified.SchemaPath();
-	if (schema_path.size() > 1 && !catalog->SupportsNestedSchemas()) {
-		throw BinderException("Catalog %s does not support nested schemas: %s", catalog->GetName(),
-		                      QualifiedName::FromPath(std::move(schema_path)).ToString());
+	if (schema_path.size() > 1) {
+		throw BinderException("%s does not work on \"%s\": Glue catalog \"%s\" lists the schemas and tables of its "
+		                      "child catalogs, but can not read or change them yet",
+		                      function_name, QualifiedName(std::move(schema_path), qualified.Name()).ToString(),
+		                      catalog->GetName().GetIdentifierName());
 	}
 	return qualified;
 }

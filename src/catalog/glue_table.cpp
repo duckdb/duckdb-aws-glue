@@ -214,6 +214,10 @@ unique_ptr<CreateInfo> GlueTable::GetInfo() const {
 // Scan
 //===--------------------------------------------------------------------===//
 TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
+	auto &glue_schema = schema.Cast<GlueSchemaEntry>();
+	if (glue_schema.InChildCatalog()) {
+		glue_schema.ThrowTableNotReadable(table_info);
+	}
 	// only Hive (Glue native) tables can be read
 	auto format = table_info.GetFormat();
 	switch (format.format) {

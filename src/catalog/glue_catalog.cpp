@@ -228,6 +228,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry &schema, AlterSchemaInfo &info) {
 	auto &context = transaction.GetContext();
 	ThrowIfInExplicitTransaction(context);
+	schema.Cast<GlueSchemaEntry>().CheckNotInChildCatalog("ALTER SCHEMA");
 	auto schema_name = schema.Cast<GlueSchemaEntry>().GetDatabaseName();
 	// work on the current Glue definition, not the cached one
 	GlueDatabaseInfo database;
@@ -510,6 +511,7 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context, const cha
 GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
                                            GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();
+	glue_table.schema.Cast<GlueSchemaEntry>().CheckNotInChildCatalog(statement);
 	table_info = glue_table.schema.Cast<GlueSchemaEntry>().DefinitionForWrite(context, glue_table);
 	auto format = table_info.GetFormat();
 	if (!format.IsHive()) {

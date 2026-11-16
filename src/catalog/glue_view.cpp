@@ -162,7 +162,10 @@ unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntr
 	// Why the view can not be used, if it can not: decided here so that listing and DROP work on any view and only
 	// SELECT / DESCRIBE report it
 	string unsupported_reason;
-	if (!StringUtil::CIEquals(table.GetParameter("duckdb_view"), "true")) {
+	if (schema.GetParentSchema()) {
+		// its unqualified names would bind in the attached catalog's database of the same name
+		unsupported_reason = "it is in a child catalog, whose views can not be read yet";
+	} else if (!StringUtil::CIEquals(table.GetParameter("duckdb_view"), "true")) {
 		unsupported_reason = "it was not written by DuckDB (no duckdb_view parameter); query it from the engine that "
 		                     "wrote it";
 	} else {
