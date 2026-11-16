@@ -24,6 +24,7 @@ Attach options:
 | `DEFAULT_LOCATION` | optional S3 prefix for new databases and for tables created without an explicit location (takes precedence over the Glue database LocationUri) |
 | `DEFAULT_SCHEMA`   | Glue database to use as the default schema                                   |
 | `READ_ONLY`        | refuse everything that changes the catalog: DML, DDL and the mutating `glue_*` partition functions |
+| `ICEBERG_CATALOG`  | an attached Iceberg catalog over the same Glue catalog; Glue views read their Iceberg tables from it (see [Views](#views)) |
 
 ## Reading
 
@@ -44,30 +45,42 @@ A `float` or `double` column may hold NaN wherever the file does not count its N
 writers leave out): such a column's min/max never skip a row group for a filter that NaN could match.
 Text tables are read the way their SerDe reads them:
 
-- LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
-  is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
-  quoted.
-- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\` when the table has none; doubled quotes
-  are read either way). Without `escapeChar` the escape is read as Athena v3 reads it: the `\` is dropped and the `\`
-  or quote character after it is kept, in a quoted field or not (`\` is an empty field, `a\x` is `ax`, `a\\b` is
-  `a\b`), and outside quotes it does not escape the separator (`a\,b` is the fields `a` and `b`). As `read_csv` splits
-  the fields first, two cases differ: `\"` inside a quoted field ends the quote, so the field and the following lines
-  run together until the next quote (v3: `"`), and an unquoted field starting with `\\` keeps one `\` (v3: none). An
-  `escapeChar` the table records, such as the `"` of the tables this extension creates, is applied by `read_csv` (v3
-  reads `"` as `\` too). An empty field is an empty string; there is no NULL. A line break inside a quoted field fails
-  a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner does not
-  support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per file and
-  the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per file in
-  every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two broken
-  rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any case and
-  false otherwise. A timestamp field is a number of milliseconds since the epoch (`1579059880000` is `2020-01-15
-  03:44:40`) and a date field a number of days since the epoch (`18276` is `2020-01-15`); text such as `2020-01-15
-  03:44:40` or `2020-01-15` does not parse.
+- LazySimpleSerDe:
+  - The delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127 is a byte code
+    (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not quoted.
+  - `timestamp.formats` is not supported as the SerDe defines it (Joda-Time patterns, the longest match wins). Its
+    patterns are hints: a `timestamp` field is trimmed and tried with `try_strptime` and each pattern strptime can
+    express (`y`, `M`, `d`, `H`, `h`, `m`, `s`, `SSS`, `a`, `E` and quoted text), the first match in the list winning;
+    then as milliseconds since the epoch if `millis` is listed; then with the usual cast. A field shorter than 8
+    characters is NULL, as in the SerDe. Patterns are separated by `,` (`\,` is a comma in a pattern); those with a time
+    zone, a fraction other than `SSS`, or no year are ignored. Without the property, timestamps are read with the usual
+    cast only.
+- OpenCSVSerde:
+  - `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\` when the table has none; see escapes below). An
+    empty field is an empty string; there is no NULL.
+  - A boolean field is true when it is `true` in any case and false otherwise.
+  - A timestamp field is a number of milliseconds since the epoch (`1579059880000` is `2020-01-15 03:44:40`) and a date
+    field a number of days since the epoch (`18276` is `2020-01-15`); text such as `2020-01-15 03:44:40` or
+    `2020-01-15` does not parse.
+  - Escapes: without `escapeChar` a field is read with `\` as the escape, as the SerDe reads it: the `\` is dropped and
+    the `\` or quote character after it is kept, in a quoted field or not (`\` is an empty field, `a\x` is `ax`,
+    `a\\b` is `a\b`), and outside quotes it does not escape the separator (`a\,b` is the fields `a` and `b`). Doubled
+    quotes are one quote either way. As `read_csv` splits the fields first, two cases differ: `\"` inside a quoted field
+    ends the quote, so the field and the following lines run together until the next quote (the SerDe: `"`), and an
+    unquoted field starting with `\\` keeps one `\` (the SerDe: none). An `escapeChar` the table records, such as the
+    `"` of the tables this extension creates, is applied by `read_csv` (the SerDe reads `"` as `\` too).
+  - Line breaks: the SerDe reads a file line by line (TextInputFormat), so a line break inside a quoted field splits the
+    record into two broken rows, and a quote that is never closed (`2,"abc`) makes only that field NULL. The extension
+    reads CSV as `read_csv` does: a quoted field continues across line breaks, so a quoted line break is read as one
+    value, and the lines after an unclosed quote are read into that one value without an error. A quoted line break
+    fails a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner
+    does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per
+    file. `SET hive_csv_parallel = false` reads one thread per file in every scan.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
-  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
-  details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
-  (Hive: a row of NULLs).
+  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property; OpenCSVSerde booleans, timestamps
+  and dates as above), which differs from Hive in details: surrounding spaces are ignored, `'1.5'` in an `int` column
+  is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
 - A line may be up to `hive_csv_max_line_size` bytes long (default 8000000; Hive has no limit); a longer line fails
   the query. Up to the default the reader's buffers and how a file is split between threads are unchanged; a larger
@@ -85,10 +98,14 @@ Text tables are read the way their SerDe reads them:
   is refused), and a `\` is doubled in a table without `escapeChar`, which reads with the `\` escape. NULL is written
   as an empty field, which reads back as an empty string in a string column, false in a boolean column and NULL
   elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
-- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
-  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
-  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
-  NULL string. Writes need a single-byte delimiter.
+- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables, nested
+  columns, multi-byte quote or escape characters, and for LazySimpleSerDe `serialization.escape.crlf`, an `escape.delim`
+  that is the delimiter or longer than one byte, a non-UTF-8 `serialization.encoding`,
+  `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the NULL string. Writes need a
+  single-byte delimiter.
+- LazySimpleSerDe with `escape.delim` (one byte): the escape character makes the next character part of the field,
+  a delimiter included (`a\,b` is `a,b`, `\\` is `\`); `\N` is still NULL. An escaped line break continues the field
+  (Hive ends the record there). Writes escape the escape character and the delimiter in each value.
 - As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
   and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe and SerDe
   properties: a scan that reaches a partition whose own InputFormat, SerDe or SerDe properties read its files
@@ -137,7 +154,22 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
   that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
-  the listing. Avro tables are not measured, so planning them lists nothing.
+  the listing. Avro tables are not measured, so planning them lists nothing. An unpartitioned parquet table of at
+  most `hive_footer_statistics_max_files` (default 16, at most 25) files is counted instead: its row count is the
+  sum of the row counts in the footers of all its files.
+- Partition keys have no optimizer statistics by default, as for `read_parquet` with hive partitioning. With
+  `SET glue_enable_partition_key_statistics = true` they get the bounds and exact distinct count of the partitions a
+  scan reads: the group estimate on a key is exact, but the optimizer can then push aggregates below a join on the
+  key and lose that join's run-time partition pruning.
+- A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
+  gets its minimum, maximum and NULLs merged from the footers of all of them, which DuckDB's parquet reader reads
+  when the scan binds (its `maximum_files_for_stats`), so a `DESCRIBE` of such a table lists the table and reads its
+  footers too. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file
+  with rows lacks the column, stores it as another type than the table declares, or, in a table of several files,
+  has statistics for it that DuckDB cannot read; so do the data columns of partitioned, csv, json and avro tables. A
+  table of one file whose statistics DuckDB cannot read fails planning, as `read_parquet` of that file does. An empty
+  file is skipped. The optimizer prunes on these statistics and orders joins by them: the minimum and maximum of a
+  dimension's key let it see how much a join on that key keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
@@ -180,7 +212,10 @@ their codec themselves.
   without any of these the statement fails. Partition keys must be plain column names; they become Glue
   PartitionKeys and are listed last in the table's columns. Generated columns, column defaults and collated columns
   (`COLLATE`, also from a `CREATE TABLE ... AS` query) are refused. Unknown `WITH` keys are stored as Glue table
-  parameters. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
+  parameters, except other engines' spellings of options this extension spells differently, which would do nothing
+  there: `partitioned_by`, `partitioning`, `partition_by`, `partition_columns`, `partition_keys` and `PartitionKeys`
+  (use `PARTITIONED BY (...)`), `external_location` (use `location`) and
+  `field_delimiter` (use `delimiter`) are refused. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
   `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
@@ -202,13 +237,14 @@ their codec themselves.
   stay, empty), so the statement can be run again without adding its
   rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
-  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
-  (empty) table stays. It is refused when the location already holds data files, such as those of a dropped table,
-  which would read as rows of the new table. `WITH (overwrite = true)` deletes those files instead, in one
+  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing). It is refused when the
+  location already holds data files, such as those of a dropped table, which would read as rows of the new table.
+  `WITH (overwrite = true)` deletes those files instead, in one
   `RemoveFiles` call when the statement starts executing and before the table is created: they stay deleted if the
   statement then fails, and a failed delete may leave some of them (the table is then not created). It is refused
-  when the location is, holds or lies inside the location of another table in the same Glue database; tables in
-  other databases, catalogs or accounts are not checked. `CREATE OR REPLACE` refuses `overwrite`. Files a scan skips
+  when the location is, holds or lies inside the location of another table in the same Glue database, or of a
+  partition of one (a partition can lie outside its table's location); tables in other databases, catalogs or
+  accounts are not checked. `CREATE OR REPLACE` refuses `overwrite`. Files a scan skips
   (`_SUCCESS`, hidden files) are left. `overwrite` is not stored as a table parameter, and a `CREATE TABLE` without a
   query refuses it. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
@@ -219,6 +255,17 @@ their codec themselves.
   csv and json, `AvroContainerInputFormat`) or empty: another engine's InputFormat means a layout DuckDB does not
   know, and files written into it could corrupt the table. Adding a partition to such a table (`glue_add_partition`,
   `ALTER TABLE ... ADD PARTITION`) is refused too: a partition registered the way Hive does may not hold its files.
+- The files of one `INSERT` or `CREATE TABLE ... AS` are named `<write id>_<file id>.<extension>`, with a new write
+  id (a UUIDv7) per statement. The write is registered with the Glue transaction when it starts and completed when
+  its partitions are registered; a write that is still registered when the transaction ends belongs to a statement
+  that failed, and the rollback deletes the files named after its write and, for `CREATE TABLE ... AS`, the Glue
+  table it created, so the statement can be run again. To find the files, the rollback lists every object below the
+  table's location, which takes one LIST request per 1,000 objects; it lists nothing, and deletes nothing, if the
+  location contains a glob character (`*`, `?`, `[`). A table `CREATE TABLE ... AS` created is kept if it holds files
+  of another writer, or if another client dropped and created it again while the statement ran. This is best effort:
+  a step that fails is logged as a warning (`CALL enable_logging(level := 'warning')` shows it). If the process
+  dies, nothing is cleaned up: the files stay, and the rows in them appear once their partition is registered, by a
+  later `INSERT`, `MSCK REPAIR` or a crawler. Other queries can read the files of an insert before it finishes.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.
@@ -227,7 +274,7 @@ their codec themselves.
   USING <expr>` is refused, since the data files can not be rewritten.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`, and avro
-  with `avro.output.codec`. A table without its format's codec parameter is written with `write_compression`, if it
+  with `avro.output.codec` (snappy, deflate, bzip2 or zstandard). A table without its format's codec parameter is written with `write_compression`, if it
   records one. Another codec is an error.
 - `ALTER TABLE ... RENAME COLUMN` is supported for csv tables, whose files are read by position. Parquet, json and
   avro files are matched by name, so a rename would make the existing data read as NULL and is refused (replace the
@@ -254,6 +301,21 @@ their codec themselves.
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
 
+With `SET glue_store_written_files = true`, every `INSERT` or `CREATE TABLE ... AS` into a Hive table adds the data
+files it wrote to the temporary table `temp.main.glue_written_files`, one row per file with the `query_id` of the
+statement, the `table` (`database.table`) and the `file_path`, for example to give a manifest of what a query wrote. The
+table is created by the first write that stores its files. Its rows are added once the write's partitions are
+registered, in the write's transaction, so a write that fails adds none. Like any temporary table, it belongs to the
+connection.
+
+```sql
+SET glue_store_written_files = true;
+INSERT INTO lake.db.events SELECT ...;
+SELECT file_path FROM temp.main.glue_written_files WHERE query_id = (SELECT max(query_id) FROM temp.main.glue_written_files);
+-- s3://bucket/db/events/day=2026-11-09/<write id>_<file id>.snappy.parquet
+-- s3://bucket/db/events/day=2026-11-10/<write id>_<file id>.snappy.parquet
+```
+
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
 of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
@@ -278,8 +340,10 @@ this connection's cache: a write through it, a rollback, or DETACH.
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...` and `CREATE SECURE VIEW` create a Glue
   view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB. `OR REPLACE` updates it in place. Unqualified table
-  names in the SELECT refer to the view's own database. The view's columns store their DuckDB types (e.g. `HUGEINT`,
-  `INTEGER`), not Glue types.
+  names in the SELECT refer to the view's own database.
+- A view column's Glue type is its Hive type, or the closest one other engines read (`decimal(38,0)` for `HUGEINT`,
+  `timestamp` for `TIMESTAMP_NS`), or `string` when there is none (e.g. `TIME`, `UUID`). DuckDB uses only the
+  column names and binds the view's SQL for the types. Other engines don't query DuckDB views; Spark refuses them.
 - `CREATE VIEW ... WITH (DEFER_BINDING)` is not supported yet: the tables a view reads must exist when it is created.
 - A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
   `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
@@ -288,6 +352,18 @@ this connection's cache: a write through it, a rollback, or DETACH.
   it applies to every connection and `SET SESSION` is refused), views can also read tables of catalogs of those types, stored as `"external:<type>:<alias>".<schema>.<table>` and read wherever a
   catalog of that type is attached under that alias, never from one in memory, temporary, system or attached hidden. A
   bare table name in a body written to Glue by other means is read from the view's own Glue database.
+- A view can join Hive and Iceberg tables of its Glue catalog. Iceberg tables are read through an existing Iceberg attachment, named by the Glue attach option `ICEBERG_CATALOG`:
+
+  ```sql
+  ATTACH '123456789012' AS lake (TYPE GLUE, ICEBERG_CATALOG 'lake_ice');
+  ATTACH '123456789012' AS lake_ice (TYPE ICEBERG, ENDPOINT_TYPE GLUE);
+  CREATE VIEW lake.sales.orders_by_customer AS
+  SELECT c.name, o.amount FROM lake.sales.customers c JOIN lake_ice.sales.orders o ON c.id = o.id;
+  ```
+
+  `ViewExpandedText`, the executable view SQL, stores both tables by their Glue names (`sales.customers`, `sales.orders`). `ViewOriginalText` keeps the submitted SQL, including its attachment aliases. When the view is read, its Iceberg references are mapped to the attachment named by `ICEBERG_CATALOG`. Direct Iceberg reads through `lake` remain unsupported; use the Iceberg attachment.
+
+  The named attachment must have catalog type `iceberg`. Its warehouse must match the Glue attachment path or known catalog ID, and each mapped table must be registered as Iceberg in Glue. Configure both attachments for the same region and endpoint; these are not verified by the warehouse check.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
@@ -342,8 +418,9 @@ The caller reads a set of the scan's files as `SELECT <columns>, <partition valu
 <parameters>)`, one such read per partition, `UNION ALL`ed. Neither function calls Glue or needs a `ClientContext`.
 Both return nothing for a scan they do not recognize or that reads a column, a partition key included, as another
 type than the table declares (a type the optimizer pushed into the scan), and `HiveScanGetReaderCall` also for a
-Parquet table with a `binary` column, whose string columns are decoded file by file. Both only work when the caller
-and this extension are linked into the same binary.
+Parquet table with a `binary` column, whose string columns are decoded file by file, and for a scan that reads with
+[file credentials](#file-credentials). Both only work when the caller and this extension are linked into the same
+binary.
 
 `EXPLAIN (SQL)` renders a Hive scan as these reads, so the SQL it prints reads the scan's files without this extension
 (and `SET debug_verify_statement = 'explain_sql_strict'` runs a query as that SQL). The scan lists its files for it:
@@ -351,6 +428,32 @@ a partition the filters pruned is not read, a filter the partition values decide
 scan without files is a relation without rows. A scan no reader call can read (a Parquet table with a `binary`
 column, or one whose query reads `$path`, `$file_size`, `$file_modified_time` or another virtual column) is rendered
 as the Glue table it reads, by name; a `hive_scan()` call then cannot be rendered.
+
+## File credentials
+
+An extension can give the scans of a Glue table credentials of their own, for example credentials a governance
+service vends for that table. It registers a `GlueFileCredentialsCallback`
+([glue_file_credentials.hpp](../src/include/catalog/glue_file_credentials.hpp)) as an `ExtensionCallback`, which this
+extension asks each time a scan of a Hive table is bound. The callback's extension must be linked into the same binary
+as this one (it is found with `dynamic_cast`); one `LOAD`ed as a separate library is not found. The callback answers
+with the name of a secret, typically one it created for the transaction (`SecretPersistType::TRANSACTION`). Every file
+the scan lists then names that secret in its options (`ExtendedOpenFileInfo::SECRET_OPTION`), and DuckDB opens it with
+that secret instead of the one that matches its path. Without a callback, or when it returns no name, the files are read as above.
+
+- The listings themselves are made by path: DuckDB's globs name no secret. A secret of the transaction takes part in
+  the path lookup, so a listing under its scope is made with it. So does every other read by path under its scope in
+  that transaction, e.g. a `read_parquet` of the table's files or a table without credentials at the same location.
+- One query lists a directory once, for every scan of it with or without credentials; only the opens differ.
+- A file naming a secret that does not exist (e.g. a transaction secret, after the transaction), or whose scope does
+  not cover it, fails to open rather than being read by path.
+- `glue_cache_listings` does not keep the listings of a scan with credentials beyond the query.
+- A scan with credentials serializes the name of its secret; `EXPLAIN (SQL)` renders it as the Glue table by name.
+- INSERT into a table whose scans read with credentials, and `glue_repair_table` of one, are refused: they list or
+  write its files by path. The check asks the callback's `GetFileSecret`, as a scan of the table would.
+
+The tests under `test/sql/file_credentials/` give tables credentials with the test extension `glue_test_credentials`
+(`test/extension/glue_test_credentials/`), which must share a binary with this extension; `extension_config.cmake`
+links both into `unittest`.
 
 ## Partitions
 
@@ -412,7 +515,9 @@ the partitions Glue does not have yet with `BatchCreatePartition`. A partition i
 component per partition key, in partition key order (keys compare case-insensitively); it is registered at that
 directory, with the values unescaped and cast to the key types (`year=07` is `7`). Directories that do not follow this
 scheme, whose values do not cast, that are already the location of a partition, or that hold no file a scan would read
-(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions.
+(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. A table with another
+engine's InputFormat over a Hive SerDe (one INSERT refuses too) is refused: its files are not laid out the way Hive
+writes them.
 
 Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
 Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so
@@ -468,7 +573,8 @@ CALL enable_logging('HTTP', storage='memory');
 SELECT request.type, request.url, request.headers['x-amz-target'], response.status FROM duckdb_logs_parsed('HTTP');
 ```
 
-`SET glue_network_calls_via_duckdb = false` switches back to the SDK's own HTTP client.
+`SET glue_network_calls_via_duckdb = false` switches back to the SDK's own HTTP client (not under WebAssembly,
+where the SDK has none).
 
 `glue_requests()` lists the Glue requests in the `HTTP` log, retries and pages included: `operation` (the
 `X-Amz-Target`, e.g. `AWSGlue.GetPartitions`), `status`, `reason`, `start_time`, `duration_ms` and the
@@ -495,6 +601,19 @@ SELECT "table", scan_id, event, partitions, partitions_read, listings, files, du
 FROM duckdb_logs_parsed('GlueScan');
 ```
 
+The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry strategy decides on for a Glue API call,
+before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
+the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got
+no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection). The retry limit is
+`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew does not go through the
+retry strategy and is not logged.
+
+```sql
+CALL enable_logging('GlueRetry', storage = 'memory');
+-- ... run queries ...
+SELECT error, status, count(*) FROM duckdb_logs_parsed('GlueRetry') GROUP BY ALL;
+```
+
 ## Testing
 
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:
@@ -511,8 +630,11 @@ which the tests use in their ATTACH; tests are skipped without a config (`requir
 The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
 GetTables on a database named `fault_access_denied*` / `fault_invalid_input*` with that Glue error, and carries out
 CreateDatabase / CreateTable on a `fault_already_exists*` database before answering AlreadyExistsException (what it
-creates differs from what was asked for); tests that need it are skipped without it. It also sets
-`GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
+creates differs from what was asked for), and refuses the first attempt of each request on a `fault_throttled*`
+database with ThrottlingException, letting the SDK's retries through. A table named `fault_denied_*` is one the caller
+may not describe, as Lake Formation leaves it: GetTable on it fails with AccessDeniedException and GetTables leaves it
+out. Tests that need the proxy are skipped without it. It
+also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
 `link_db` as Glue does through a database resource link whose target is `target_db`.
 
 ```sh

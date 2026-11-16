@@ -59,6 +59,7 @@ ATTACH '123456789012' AS my_datalake (
     DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
 );
 SET enable_external_file_cache=false;
+SET glue_enable_partition_key_statistics=false;
 
 run
 SELECT count(*), max(d.name)

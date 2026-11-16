@@ -1,0 +1,52 @@
+# name: test/sql/hive/bugs/s3_partition_key_statistics_setting.test
+# description: glue_enable_partition_key_statistics decides whether the optimizer sees statistics for a partition key: none by default, the bounds and the exact distinct count when true.
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pkstats;
+
+statement ok
+CREATE TABLE my_datalake.default.pkstats (id INTEGER, k INTEGER) PARTITIONED BY (k);
+
+# 4 partitions 10 apart, 1000 rows each: 4 distinct values
+statement ok
+INSERT INTO my_datalake.default.pkstats SELECT i, 10 + (i % 4) * 10 FROM generate_series(1,4000) t(i);
+
+# default: no distinct count and no bounds, so the group estimate is not the partition count
+query II
+EXPLAIN SELECT k, count(*) FROM my_datalake.default.pkstats GROUP BY k;
+----
+physical_plan	<!REGEX>:.*Hash Group By.*~4 rows.*
+
+# true: the bounds and the exact distinct count of the partitions read
+statement ok
+SET glue_enable_partition_key_statistics = true;
+
+query II
+EXPLAIN SELECT k, count(*) FROM my_datalake.default.pkstats GROUP BY k;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~4 rows.*
+
+# the answers do not depend on the setting
+query II
+SELECT k, count(*) FROM my_datalake.default.pkstats WHERE k >= 20 GROUP BY k ORDER BY k;
+----
+20	1000
+30	1000
+40	1000
+
+statement ok
+DROP TABLE my_datalake.default.pkstats;

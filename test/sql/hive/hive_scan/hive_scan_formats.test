@@ -134,7 +134,7 @@ NULL	NULL
 foreach fmt parquet csv json
 
 query I
-SELECT count(*) FROM hive_scan('{TEST_DIR}/fmt_${fmt}', format := '${fmt}',
+SELECT count(*) FROM hive_scan('{TEST_DIR}/fmt_{fmt}', format := '{fmt}',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
 WHERE id + 1 > 2;
@@ -142,7 +142,7 @@ WHERE id + 1 > 2;
 2
 
 query I
-SELECT sum(id) FROM hive_scan('{TEST_DIR}/fmt_${fmt}', format := '${fmt}',
+SELECT sum(id) FROM hive_scan('{TEST_DIR}/fmt_{fmt}', format := '{fmt}',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
 WHERE amount > 15 AND id::VARCHAR <> '3';
@@ -154,7 +154,7 @@ statement ok
 SET debug_verify_serializer = true;
 
 query II
-SELECT id, dt FROM hive_scan('{TEST_DIR}/fmt_${fmt}', format := '${fmt}',
+SELECT id, dt FROM hive_scan('{TEST_DIR}/fmt_{fmt}', format := '{fmt}',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
 WHERE id + 1 > 2 AND dt = '2016-05-14';

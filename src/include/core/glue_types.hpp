@@ -13,6 +13,8 @@ struct GlueTypes {
 	static LogicalType ToLogicalType(const string &glue_type);
 	//! Produce a Glue column type string from a DuckDB logical type
 	static string FromLogicalType(const LogicalType &type);
+	//! A view column's Glue type: the closest type Hive, Trino and Spark all parse, else 'string'. Never throws.
+	static string FromLogicalTypeForView(const LogicalType &type);
 
 	//! HivePartitioning::GetValue without the unescaping: Glue stores the raw value, so 'a%20b' stays 'a%20b', not 'a
 	//! b'. Throws if the value can't be cast to the key's type.
@@ -24,6 +26,9 @@ struct GlueTypes {
 	//! Whether values a partition declares as 'from' can be read as the table's type 'to': the changes the extension's
 	//! own DDL allows, and DuckDB's implicit casts. Nested types are left to the reader.
 	static bool CanReadPartitionTypeAs(ClientContext &context, const LogicalType &from, const LogicalType &to);
+	//! Whether two Glue column types read as the same DuckDB type, so 'int' and 'integer' agree; types that do not
+	//! parse are compared as Hive compares them, ignoring case and whitespace
+	static bool SameColumnType(const string &a, const string &b);
 };
 
 } // namespace duckdb

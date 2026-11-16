@@ -1,0 +1,170 @@
+# name: test/sql/hive/dml/insert/insert_written_files.test
+# description: glue_store_written_files adds the data files an INSERT or CREATE TABLE AS wrote to temp.main.glue_written_files
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files_ctas;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files_off;
+
+# off by default: no table
+statement ok
+CREATE TABLE my_datalake.default.written_files_off AS SELECT 0 AS id;
+
+statement error
+SELECT * FROM temp.main.glue_written_files;
+----
+does not exist
+
+statement ok
+DROP TABLE my_datalake.default.written_files_off;
+
+statement ok
+CREATE TABLE my_datalake.default.written_files (id INTEGER);
+
+statement ok
+SET glue_store_written_files = true;
+
+statement ok
+INSERT INTO my_datalake.default.written_files SELECT i FROM range(10) t(i);
+
+# one row per file, from the INSERT's query: all the table's files
+query II
+SELECT count(DISTINCT query_id), min("table") FROM temp.main.glue_written_files;
+----
+1	default.written_files
+
+query I
+SELECT count(*) FROM (
+    (SELECT file_path FROM temp.main.glue_written_files
+     EXCEPT SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files/**'))
+    UNION ALL
+    (SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files/**')
+     EXCEPT SELECT file_path FROM temp.main.glue_written_files)
+);
+----
+0
+
+# each connection has its own table
+statement error con2
+SELECT * FROM temp.main.glue_written_files;
+----
+does not exist
+
+# the next write adds its rows under its own query id
+statement ok
+INSERT INTO my_datalake.default.written_files SELECT i FROM range(10) t(i);
+
+query I
+SELECT count(DISTINCT query_id) FROM temp.main.glue_written_files;
+----
+2
+
+# a partitioned INSERT adds the files of every partition it wrote
+statement ok
+CREATE TABLE my_datalake.default.written_files_partitioned (id INTEGER, p INTEGER) PARTITIONED BY (p);
+
+statement ok
+DELETE FROM temp.main.glue_written_files;
+
+statement ok
+INSERT INTO my_datalake.default.written_files_partitioned SELECT i, i % 3 FROM range(9) t(i);
+
+query I
+SELECT DISTINCT regexp_extract(file_path, '/(p=[0-9]+)/', 1) AS partition FROM temp.main.glue_written_files ORDER BY partition;
+----
+p=0
+p=1
+p=2
+
+# a write that fails while running adds none
+statement ok
+DELETE FROM temp.main.glue_written_files;
+
+statement error
+INSERT INTO my_datalake.default.written_files SELECT CASE WHEN i = 5 THEN error('boom') ELSE i END FROM range(10) t(i);
+----
+boom
+
+query I
+SELECT count(*) FROM temp.main.glue_written_files;
+----
+0
+
+# so does one whose partition registration fails
+statement ok
+SET glue_debug_fail_partition_registration = 'InvalidInputException:0';
+
+statement error
+INSERT INTO my_datalake.default.written_files_partitioned SELECT i, i % 3 + 10 FROM range(9) t(i);
+----
+was rolled back
+
+statement ok
+RESET glue_debug_fail_partition_registration;
+
+query I
+SELECT count(*) FROM temp.main.glue_written_files;
+----
+0
+
+# CREATE TABLE AS
+statement ok
+CREATE TABLE my_datalake.default.written_files_ctas AS SELECT i AS id FROM range(5) t(i);
+
+query I
+SELECT count(*) FROM (
+    (SELECT file_path FROM temp.main.glue_written_files
+     EXCEPT SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files_ctas/**'))
+    UNION ALL
+    (SELECT file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/written_files_ctas/**')
+     EXCEPT SELECT file_path FROM temp.main.glue_written_files)
+);
+----
+0
+
+# a CREATE TABLE AS that fails when it starts writing adds none: the dropped table's files are still there
+statement ok
+DROP TABLE my_datalake.default.written_files_ctas;
+
+statement ok
+DELETE FROM temp.main.glue_written_files;
+
+statement error
+CREATE TABLE my_datalake.default.written_files_ctas AS SELECT 1 AS id;
+----
+already holds files
+
+query I
+SELECT count(*) FROM temp.main.glue_written_files;
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.written_files;
+
+statement ok
+DROP TABLE my_datalake.default.written_files_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.written_files_ctas;

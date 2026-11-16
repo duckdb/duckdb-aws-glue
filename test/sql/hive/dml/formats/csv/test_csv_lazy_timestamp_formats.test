@@ -1,0 +1,165 @@
+# name: test/sql/hive/dml/formats/csv/test_csv_lazy_timestamp_formats.test
+# description: LazySimpleSerDe timestamp.formats patterns are tried with try_strptime before the default cast
+# group: [csv]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table lazy_ts_listed lazy_ts_millis lazy_ts_plain lazy_ts_escaped lazy_ts_untranslatable
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+# fields in the formats LazySimpleSerDe reads, by tables with different timestamp.formats
+statement ok
+CREATE TABLE my_datalake.default.lazy_ts_listed (id INTEGER, ts TIMESTAMP) WITH (format = 'csv', 'field.delim' = '|',
+    'timestamp.formats' = 'dd/MM/yyyy HH:mm:ss,yyyyMMddHHmmss,millis,yyyy-MM-dd HH:mm:ss.SSS,dd/MM/yyyy hh:mm:ss a,MMM dd yyyy,yyyy-MM-dd HH:mm:ssZ,dd/MM/yyyy');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1|15/01/2020 06:24:40'), ('2|5/1/2020 6:24:40'), ('3|20200115062440'),
+    ('4|1579069480000'), ('5|2020-01-15 06:24:40.123'), ('6|15/01/2020 06:24:40 PM'), ('7|Jan 15 2020'),
+    ('8|2020-01-15 06:24:40+0100'), ('9|15/01/2020'), ('10|2020-01-15 06:24:40'), ('11|2020-01-15T06:24:40'),
+    ('12| 15/01/2020 06:24:40 '), ('13|abc'), ('14|15/01/2020 06:24:40.5'), ('15|1/2/20'),
+    ('16|32/01/2020 00:00:00'), ('17|15/1/2020 06:24'), ('18'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lazy_ts_listed/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+# as LazySimpleSerDe reads them, except 4 (the SerDe: NULL, its yyyyMMddHHmmss pattern takes the digits and fails) and
+# 8 (the SerDe: 05:24:40 UTC; the Z pattern is not tried and the cast drops the offset)
+query II
+SELECT id, ts FROM my_datalake.default.lazy_ts_listed ORDER BY id;
+----
+1	2020-01-15 06:24:40
+2	2020-01-05 06:24:40
+3	2020-01-15 06:24:40
+4	2020-01-15 06:24:40
+5	2020-01-15 06:24:40.123
+6	2020-01-15 18:24:40
+7	2020-01-15 00:00:00
+8	2020-01-15 06:24:40
+9	2020-01-15 00:00:00
+10	2020-01-15 06:24:40
+11	2020-01-15 06:24:40
+12	2020-01-15 06:24:40
+13	NULL
+14	NULL
+15	NULL
+16	NULL
+17	NULL
+18	NULL
+
+query I
+SELECT count(*) FROM my_datalake.default.lazy_ts_listed WHERE ts = TIMESTAMP '2020-01-15 06:24:40';
+----
+7
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+# the reader call tries the patterns strptime can express, then 'millis', then the cast
+query II
+EXPLAIN (SQL) SELECT ts FROM my_datalake.default.lazy_ts_listed;
+----
+sql	<REGEX>:.*CASE\s+WHEN \(\(length\(__internal_barrier\(ts\)\) < CAST\(8 AS BIGINT\)\)\) THEN \(CAST\(NULL AS TIMESTAMP_US\)\)\s+ELSE COALESCE\(\s+try_strptime\(\s+"trim"\(__internal_barrier\(ts\)\),\s+"system"\.main\.list_value\(\s+'%d/%m/%Y %H:%M:%S',\s+'%Y%m%d%H%M%S',\s+'%Y-%m-%d %H:%M:%S\.%g',\s+'%d/%m/%Y %I:%M:%S %p',\s+'%b %d %Y',\s+'%d/%m/%Y'\)\),\s+TRY\(make_timestamp_ms\(TRY_CAST\("trim"\(__internal_barrier\(ts\)\) AS BIGINT\)\)\),\s+TRY_CAST\("trim"\(__internal_barrier\(ts\)\) AS TIMESTAMP_US\)\)\s+END AS ts.*
+
+# 'millis' alone: digits are milliseconds since the epoch, out of range is NULL
+statement ok
+CREATE TABLE my_datalake.default.lazy_ts_millis (id INTEGER, ts TIMESTAMP) WITH (format = 'csv', 'field.delim' = '|',
+    'timestamp.formats' = 'MILLIS');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1|1579069480000'), ('2|20200115062440'), ('3|99999999999999999'),
+    ('4|2020-01-15 06:24:40'), ('5|15/01/2020 06:24:40'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lazy_ts_millis/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
+
+query II
+SELECT id, ts FROM my_datalake.default.lazy_ts_millis ORDER BY id;
+----
+1	2020-01-15 06:24:40
+2	2610-02-12 15:04:22.44
+3	NULL
+4	2020-01-15 06:24:40
+5	NULL
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
+# without timestamp.formats a field in another format is NULL
+statement ok
+CREATE TABLE my_datalake.default.lazy_ts_plain (id INTEGER, ts TIMESTAMP) WITH (format = 'csv', 'field.delim' = '|');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1|15/01/2020 06:24:40'), ('2|2020-01-15 06:24:40'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lazy_ts_plain/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, ts FROM my_datalake.default.lazy_ts_plain ORDER BY id;
+----
+1	NULL
+2	2020-01-15 06:24:40
+
+# '\,' is a comma inside a pattern, and a quoted literal is matched as written
+statement ok
+CREATE TABLE my_datalake.default.lazy_ts_escaped (id INTEGER, ts TIMESTAMP) WITH (format = 'csv', 'field.delim' = '|',
+    'timestamp.formats' = 'MMM d\, yyyy,yyyy-MM-dd''T''HH:mm,EEE dd MMMM yyyy');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1|Jan 15, 2020'), ('2|2020-01-15T06:24'), ('3|Wed 15 January 2020'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lazy_ts_escaped/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, ts FROM my_datalake.default.lazy_ts_escaped ORDER BY id;
+----
+1	2020-01-15 00:00:00
+2	2020-01-15 06:24:00
+3	2020-01-15 00:00:00
+
+# patterns strptime can not express (a time zone name, no year) are not tried: the field is read by the cast alone
+statement ok
+CREATE TABLE my_datalake.default.lazy_ts_untranslatable (id INTEGER, ts TIMESTAMP) WITH (format = 'csv',
+    'field.delim' = '|', 'timestamp.formats' = 'dd/MM/yyyy HH:mm:ss z,HH:mm');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1|15/01/2020 06:24:40 UTC'), ('2|06:24'), ('3|2020-01-15 06:24:40'))
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lazy_ts_untranslatable/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, ts FROM my_datalake.default.lazy_ts_untranslatable ORDER BY id;
+----
+1	NULL
+2	NULL
+3	2020-01-15 06:24:40
+
+foreach table lazy_ts_listed lazy_ts_millis lazy_ts_plain lazy_ts_escaped lazy_ts_untranslatable
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

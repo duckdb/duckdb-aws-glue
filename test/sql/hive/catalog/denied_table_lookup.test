@@ -1,0 +1,66 @@
+# name: test/sql/hive/catalog/denied_table_lookup.test
+# description: duckdb_tables() and duckdb_columns() leave out a table we may not describe, also when they filter on its name, and querying the table still reports the refusal
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.denied_lookup;
+
+foreach table fault_denied_t allowed_t
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.denied_lookup.{table};
+
+statement ok
+CREATE TABLE my_datalake.denied_lookup.{table} AS SELECT 1 AS id;
+
+endloop
+
+# through the fault proxy, GetTable on fault_denied_t fails with AccessDeniedException and GetTables leaves it out
+statement ok
+attach '{GLUE_CATALOG_ID}' as denied_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'denied_dl' AND schema_name = 'denied_lookup' ORDER BY ALL;
+----
+allowed_t
+
+# a filter on the name looks the table up with GetTable instead of listing
+query T
+SELECT table_name FROM duckdb_tables()
+WHERE database_name = 'denied_dl' AND schema_name = 'denied_lookup' AND table_name = 'fault_denied_t';
+----
+
+query T
+SELECT column_name FROM duckdb_columns()
+WHERE database_name = 'denied_dl' AND schema_name = 'denied_lookup' AND table_name = 'fault_denied_t';
+----
+
+query T
+SELECT table_name FROM duckdb_tables()
+WHERE database_name = 'denied_dl' AND schema_name = 'denied_lookup' AND table_name = 'allowed_t';
+----
+allowed_t
+
+statement error
+SELECT * FROM denied_dl.denied_lookup.fault_denied_t;
+----
+<REGEX>:.*GetTable 'denied_lookup.fault_denied_t' failed.*AccessDeniedException.*
