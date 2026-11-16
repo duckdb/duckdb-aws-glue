@@ -64,6 +64,20 @@ public:
 		}
 		return Resolve(*entry, load);
 	}
+	//! Whether the table's partitions are cached, without loading them
+	bool HasPartitions(const string &database_name, const string &table_name) {
+		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			auto found = partitions.find(StringUtil::Lower(database_name + "\n" + table_name));
+			if (found == partitions.end()) {
+				return false;
+			}
+			entry = found->second;
+		}
+		annotated_lock_guard<annotated_mutex> guard(entry->load_lock);
+		return entry->value != nullptr;
+	}
 	void Clear() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();

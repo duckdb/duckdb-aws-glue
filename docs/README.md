@@ -530,6 +530,19 @@ descriptor with its columns, which the scan checks the partitions it reads again
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
 
+A query that scans several partitioned tables would fetch their partitions one table after another, as each scan is
+first estimated. Instead, the first estimate fetches the partitions of every partitioned table the query's scans read
+that no cache holds yet, `glue_partition_load_parallelism` tables at a time (default 8; each with its
+`glue_get_partitions_segments` requests), and the scans then take them from the query's cache. These are the same
+requests the scans would have sent, and the scans of a table the optimizer removes still send none, since a removed
+scan is not estimated. A scan that has a filter pushed into it and reads a partition key fetches its table's
+partitions at filter pushdown, before any estimate, on its own as before. When a fetch fails, the tables it did not fetch are fetched by their scans as before, and
+the rest of the query fetches one table at a time; the error is left to the scan's own fetch to raise. When Glue
+throttled the requests (a `ThrottlingException`, HTTP 429 or 503), every query against that Glue catalog (account,
+region and endpoint) fetches one table at a time for `glue_partition_load_cooldown` seconds (default 300). Each fetch
+of several tables is logged as a `GlueScan` event `parallel_load`, its `detail` naming how many tables it fetched
+and why the others were not. `SET glue_partition_load_parallelism = 1` fetches one table at a time.
+
 ## Inspecting tables
 
 Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,

@@ -301,6 +301,7 @@ idx_t HiveFooterStatisticsMaxFiles(ClientContext &context) {
 //! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
 //! same, and csv and json are estimated at one row.
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	LoadPartitionsTogether(context);
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = hive_list.ScanInfo();

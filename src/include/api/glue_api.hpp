@@ -32,6 +32,18 @@ public:
 	bool access_denied;
 };
 
+//! One table of GlueAPI::GetPartitionsOfTables: its partitions once every request for them succeeded ('loaded'),
+//! otherwise the first error and whether it was Glue throttling the requests
+struct GluePartitionLoad {
+	string database_name;
+	string table_name;
+	bool loaded = false;
+	vector<GluePartitionInfo> partitions;
+	//! Empty when the table was left unloaded because another table's load failed first
+	string error;
+	bool throttled = false;
+};
+
 //! How a create call ended: the object exists afterwards either way, another client may have created it first
 enum class GlueCreateOutcome : uint8_t { CREATED, ALREADY_EXISTED };
 
@@ -141,6 +153,9 @@ public:
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
+	//! GetPartitions of several tables, their requests sent together. The first failure stops the requests not yet
+	//! sent; only an interrupt is thrown.
+	static void GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog, vector<GluePartitionLoad> &tables);
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
 	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
 	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.

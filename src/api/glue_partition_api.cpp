@@ -2,6 +2,7 @@
 #include "api/glue_http_client.hpp"
 #include "catalog/glue_transaction.hpp"
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -9,6 +10,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <thread>
 
@@ -320,13 +322,30 @@ static constexpr idx_t GLUE_DEFAULT_PARTITION_SEGMENTS = 8;
 //! The maximum Glue accepts for Segment::TotalSegments
 static constexpr idx_t GLUE_MAX_PARTITION_SEGMENTS = 10;
 
+//! Whether Glue refused a request for its rate (ThrottlingException, an HTTP 429 or 503), which retrying later may get
+//! through, rather than for the request itself
+template <class ERROR>
+static bool IsThrottlingError(const ERROR &error) {
+	auto type = error.GetErrorType();
+	auto code = error.GetResponseCode();
+	return type == Aws::Glue::GlueErrors::THROTTLING || type == Aws::Glue::GlueErrors::SLOW_DOWN ||
+	       code == Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS ||
+	       code == Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE ||
+	       error.GetExceptionName() == "ThrottlingException";
+}
+
 //! One chain of GetPartitions requests: pages through the partitions of segment 'segment_number' (the whole table
-//! when 'total_segments' is 1) and appends them to 'result'
-static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
+//! when 'total_segments' is 1) and appends them to 'result'. A failed request throws, and sets 'throttled' when Glue
+//! refused it for its rate. With 'stop', returns false without sending the next request once it is set.
+static bool FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
                                   const string &database_name, const string &table_name, int segment_number,
-                                  int total_segments, vector<GluePartitionInfo> &result) {
+                                  int total_segments, vector<GluePartitionInfo> &result, bool *throttled = nullptr,
+                                  const std::atomic<bool> *stop = nullptr) {
 	Aws::String next_token;
 	do {
+		if (stop && stop->load()) {
+			return false;
+		}
 		Aws::Glue::Model::GetPartitionsRequest request;
 		SetCatalogId(request, catalog);
 		request.SetDatabaseName(database_name);
@@ -343,6 +362,9 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 		}
 		auto outcome = client.GetPartitions(request);
 		if (!outcome.IsSuccess()) {
+			if (throttled) {
+				*throttled = IsThrottlingError(outcome.GetError());
+			}
 			ThrowGlueError(outcome, StringUtil::Format("GetPartitions '%s.%s'", database_name, table_name));
 		}
 		auto &partitions = outcome.GetResult();
@@ -361,6 +383,7 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 		}
 		next_token = partitions.GetNextToken();
 	} while (!next_token.empty());
+	return true;
 }
 
 class FetchPartitionSegmentTask : public BaseExecutorTask {
@@ -444,6 +467,143 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 		}
 	}
 	return result;
+}
+
+//! glue_debug_fail_partition_loads: the AWS error every request of GetPartitionsOfTables fails with, unsent
+static string DebugFailPartitionLoads(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("glue_debug_fail_partition_loads", setting) && !setting.IsNull()) {
+		return setting.ToString();
+	}
+	return string();
+}
+
+namespace {
+
+//! What the segments of one table of GetPartitionsOfTables fetched, and its first error
+struct PartitionLoadSlot {
+	mutex lock;
+	vector<vector<GluePartitionInfo>> segments;
+	vector<bool> fetched;
+	string error;
+	bool throttled = false;
+};
+
+//! A failure is kept in the table's slot and stops the requests not yet sent; an interrupt is rethrown
+class PartitionLoadSegmentTask : public BaseExecutorTask {
+public:
+	PartitionLoadSegmentTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
+	                         const GlueCatalog &catalog, const GluePartitionLoad &table, int segment_number,
+	                         int total_segments, const string &injected, std::atomic<bool> &stop,
+	                         PartitionLoadSlot &slot)
+	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), table(table),
+	      segment_number(segment_number), total_segments(total_segments), injected(injected), stop(stop), slot(slot) {
+	}
+
+	void ExecuteTask() override {
+		GlueHttpClientContextScope http_scope(context);
+		if (stop.load()) {
+			return;
+		}
+		bool throttled = false;
+		try {
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			if (!injected.empty()) {
+				throttled = injected == "ThrottlingException";
+				throw GlueException(StringUtil::Format("Glue GetPartitions '%s.%s' failed: injected by "
+				                                       "glue_debug_fail_partition_loads (%s)",
+				                                       table.database_name, table.table_name, injected),
+				                    false);
+			}
+			vector<GluePartitionInfo> result;
+			if (!FetchPartitionSegment(client, catalog, table.database_name, table.table_name, segment_number,
+			                           total_segments, result, &throttled, &stop)) {
+				return;
+			}
+			lock_guard<mutex> guard(slot.lock);
+			slot.segments[NumericCast<idx_t>(segment_number)] = std::move(result);
+			slot.fetched[NumericCast<idx_t>(segment_number)] = true;
+		} catch (std::exception &ex) {
+			stop = true;
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			lock_guard<mutex> guard(slot.lock);
+			if (slot.error.empty()) {
+				slot.error = error.RawMessage();
+				slot.throttled = throttled;
+			}
+		}
+	}
+	string TaskType() const override {
+		return "PartitionLoadSegmentTask";
+	}
+
+private:
+	ClientContext &context;
+	Aws::Glue::GlueClient &client;
+	const GlueCatalog &catalog;
+	const GluePartitionLoad &table;
+	int segment_number;
+	int total_segments;
+	const string &injected;
+	std::atomic<bool> &stop;
+	PartitionLoadSlot &slot;
+};
+
+} // namespace
+
+void GlueAPI::GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog, vector<GluePartitionLoad> &tables) {
+	if (tables.empty()) {
+		return;
+	}
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	auto total_segments = GetPartitionSegmentCount(context, catalog);
+	auto injected = DebugFailPartitionLoads(context);
+	vector<unique_ptr<PartitionLoadSlot>> slots;
+	std::atomic<bool> stop {false};
+	{
+		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+		for (auto &table : tables) {
+			auto slot = make_uniq<PartitionLoadSlot>();
+			slot->segments.resize(NumericCast<idx_t>(total_segments));
+			slot->fetched.resize(NumericCast<idx_t>(total_segments), false);
+			for (int segment = 0; segment < total_segments; segment++) {
+				executor.ScheduleTask(make_uniq<PartitionLoadSegmentTask>(
+				    executor, context, *client, catalog, table, segment, total_segments, injected, stop, *slot));
+			}
+			slots.push_back(std::move(slot));
+		}
+		executor.WorkOnTasks();
+	}
+	for (idx_t i = 0; i < tables.size(); i++) {
+		auto &table = tables[i];
+		auto &slot = *slots[i];
+		table.error = std::move(slot.error);
+		table.throttled = slot.throttled;
+		bool complete = table.error.empty();
+		for (auto fetched : slot.fetched) {
+			complete = complete && fetched;
+		}
+		if (!complete) {
+			continue;
+		}
+		// as GetPartitions assembles one table's segments
+		unordered_set<string> seen;
+		for (auto &segment_result : slot.segments) {
+			for (auto &partition : segment_result) {
+				if (total_segments > 1 && !seen.insert(StringUtil::Join(partition.values, "\x1f")).second) {
+					continue;
+				}
+				table.partitions.push_back(std::move(partition));
+			}
+		}
+		table.loaded = true;
+	}
 }
 
 //! glue_debug_fail_partition_registration, '<error code>:<index>': the partition at 'index' of a registration and

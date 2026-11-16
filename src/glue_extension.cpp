@@ -80,6 +80,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_partition_load_parallelism",
+	                          "How many partitioned Glue tables of a query load their partitions at the same time, "
+	                          "when the query first estimates its scans; each scan would otherwise load its table "
+	                          "after the one before it. The same requests are sent either way. A table whose load "
+	                          "fails is loaded by its scan as before, and the query's remaining tables one at a "
+	                          "time. 1 loads one table at a time. Default 8.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(8));
+	config.AddExtensionOption("glue_partition_load_cooldown",
+	                          "Seconds the partitions of a Glue catalog load one table at a time, in every connection, "
+	                          "after Glue throttled a load of several tables at once "
+	                          "(glue_partition_load_parallelism). Default 300.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(300));
 	config.AddExtensionOption("glue_max_retries",
 	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
 	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "
@@ -166,6 +178,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "InternalServiceException, ...) fails the first attempt only. Empty, the default, injects "
 	    "nothing.",
 	    LogicalType::VARCHAR, Value(""), GlueAPI::CheckDebugFailPartitionRegistration, SetScope::SESSION, true);
+	config.AddExtensionOption("glue_debug_fail_partition_loads",
+	                          "For tests: an AWS error name (ThrottlingException, InternalServiceException, ...) with "
+	                          "which every GetPartitions request of a load of several tables at once fails before it "
+	                          "is sent; a scan's own load is left alone. Empty, the default, injects nothing.",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::SESSION, true);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();

@@ -21,13 +21,22 @@ namespace {
 class HiveListingCache : public ClientContextState {
 public:
 	shared_ptr<MultiFileList> GetListing(ClientContext &context, const string &directory) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto &listing = listings[directory];
-		if (!listing) {
-			auto &fs = FileSystem::GetFileSystem(context);
-			listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
+		shared_ptr<HiveDirectoryListingEntry> entry;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			auto &slot = listings[directory];
+			if (!slot) {
+				slot = make_shared_ptr<HiveDirectoryListingEntry>();
+			}
+			entry = slot;
 		}
-		return listing;
+		// a listing fetches its first page right away; other directories' listings must not wait behind it
+		annotated_lock_guard<annotated_mutex> guard(entry->lock);
+		if (!entry->listing) {
+			auto &fs = FileSystem::GetFileSystem(context);
+			entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
+		}
+		return entry->listing;
 	}
 
 	void Clear() {
@@ -55,7 +64,7 @@ public:
 
 private:
 	annotated_mutex lock;
-	unordered_map<string, shared_ptr<MultiFileList>> listings DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> listings DUCKDB_GUARDED_BY(lock);
 };
 
 } // namespace
@@ -81,11 +90,41 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 	samples.clear();
 	directory_listings.clear();
 	scan_count = 0;
+	registered_scans.clear();
+	parallel_loads_stopped = false;
 }
 
 idx_t HiveQueryCache::NextScanId() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	return ++scan_count;
+}
+
+void HiveQueryCache::RegisterScan(const shared_ptr<HiveScanInfo> &scan) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	registered_scans.push_back(scan);
+}
+
+vector<shared_ptr<HiveScanInfo>> HiveQueryCache::TakeRegisteredScans() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	vector<shared_ptr<HiveScanInfo>> scans;
+	for (auto &registered : registered_scans) {
+		auto scan = registered.lock();
+		if (scan) {
+			scans.push_back(std::move(scan));
+		}
+	}
+	registered_scans.clear();
+	return scans;
+}
+
+bool HiveQueryCache::ParallelLoadsStopped() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return parallel_loads_stopped;
+}
+
+void HiveQueryCache::StopParallelLoads() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	parallel_loads_stopped = true;
 }
 
 shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
