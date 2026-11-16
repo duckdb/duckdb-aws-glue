@@ -35,5 +35,12 @@
       "env_value": "s3://glue-test/warehouse"
     }
   ],
-  "skip_tests": []
+  "skip_tests": [
+    {
+      "reason": "USE, the search path and SHOW TABLES FROM take a nested schema path only with duckdb/duckdb#28771; remove once the duckdb submodule has it",
+      "paths": [
+        "test/sql/hive/attach/nested_path_not_found_use.test"
+      ]
+    }
+  ]
 }

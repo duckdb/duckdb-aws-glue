@@ -1,0 +1,57 @@
+# name: test/sql/hive/attach/nested_path_not_found_use.test
+# description: USE of a path through a child catalog Glue does not have fails, and does not make the database of the same name in the attached catalog the current schema
+# group: [attach]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# only against the local servers: what a live Glue answers for a catalog it does not have has not been checked
+require-env GLUE_TEST_CONFIG local
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.npnfu_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.npnfu_orders (id INTEGER);
+
+# A server that ignores the catalog id of a request (moto) answers GetDatabase for 'default' of the child catalog
+# 'zz' with the attached catalog's database, which says it is in the account's own catalog: that answer is not
+# taken.
+statement error
+USE my_datalake.zz."default";
+----
+<REGEX>:.*(does not exist|No catalog \+ schema named).*
+
+statement error
+SET search_path = 'my_datalake.zz.default';
+----
+<REGEX>:.*(does not exist|No catalog \+ schema named).*
+
+statement error
+SHOW TABLES FROM my_datalake.zz."default";
+----
+<REGEX>:.*(does not exist|No catalog \+ schema named).*
+
+# the current schema did not move there
+statement error
+SELECT * FROM npnfu_orders;
+----
+does not exist
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND parent_schema IS NOT NULL;
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.npnfu_orders;

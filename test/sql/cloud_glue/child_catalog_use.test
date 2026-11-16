@@ -1,0 +1,44 @@
+# name: test/sql/cloud_glue/child_catalog_use.test
+# description: with a database of a nested Glue catalog (an S3 Tables bucket) on the search path, a bare table name is described and an INSERT into it is refused
+# group: [cloud_glue]
+
+require httpfs
+
+require glue
+
+require-env GLUE_TEST_CONFIG cloud
+
+require-env GLUE_CATALOG_ID
+
+# an account-implicit nested catalog path ("s3tablescatalog/<bucket>") and a database and a table in it; set only for
+# a live Glue Data Catalog that has them. Nothing here changes them: the INSERT is refused before Glue is asked.
+require-env GLUE_NESTED_CATALOG
+
+require-env GLUE_NESTED_DATABASE
+
+require-env GLUE_NESTED_TABLE
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as lake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+# the path has one level per level of GLUE_NESTED_CATALOG, so it is put together here
+statement ok
+SET search_path = 'lake.' || replace('{GLUE_NESTED_CATALOG}', '/', '.') || '.{GLUE_NESTED_DATABASE}';
+
+query I
+SELECT count(*) > 0 FROM (DESCRIBE {GLUE_NESTED_TABLE});
+----
+true
+
+statement error
+INSERT INTO {GLUE_NESTED_TABLE} SELECT * FROM {GLUE_NESTED_TABLE} WHERE false;
+----
+<REGEX>:.*INSERT is not supported in ".*": Glue catalog "lake" lists the schemas and tables of its child catalogs, but can not read or change them yet.*
+
+statement error
+SELECT * FROM {GLUE_NESTED_TABLE};
+----
+can not read yet
+
+statement ok
+RESET search_path;

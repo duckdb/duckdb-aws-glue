@@ -31,6 +31,12 @@
 	],
 	"skip_tests": [
 		{
+			"reason": "the search path takes a nested schema path only with duckdb/duckdb#28771; remove once the duckdb submodule has it",
+			"paths": [
+				"test/sql/cloud_glue/child_catalog_use.test"
+			]
+		},
+		{
 			"reason": "needs the fixture tables that scripts/docker-compose.yml creates in the local Glue",
 			"paths": [
 				"test/sql/hive/dml/insert/insert_into_bucketed_table.test",
