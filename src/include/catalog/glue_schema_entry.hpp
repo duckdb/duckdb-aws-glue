@@ -38,9 +38,11 @@ struct GlueCreateTableOptions {
 //! A Glue database, exposed as a DuckDB schema
 class GlueSchemaEntry : public SchemaCatalogEntry {
 public:
-	//! 'schema_info_loaded' false: only the name of 'database_info' is known, GetSchemaInfo asks Glue for the rest
+	//! 'schema_info_loaded' false: only the name of 'database_info' is known, GetSchemaInfo asks Glue for the rest.
+	//! 'catalog_id' and 'parent' place the database in a child catalog of the attached one
 	GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info,
-	                bool schema_info_loaded = true);
+	                bool schema_info_loaded = true, string catalog_id = string(),
+	                optional_ptr<SchemaCatalogEntry> parent = nullptr);
 	~GlueSchemaEntry() override;
 
 public:
@@ -90,6 +92,14 @@ public:
 	const string &GetDatabaseName() const {
 		return database_info.name;
 	}
+	//! The Glue CatalogId the requests for this database carry; empty for the attached catalog's own
+	const string &GetCatalogId() const {
+		return catalog_id;
+	}
+	//! The database's key in the metadata cache: two catalogs can hold a database of the same name
+	string GetCacheKey() const {
+		return catalog_id.empty() ? database_info.name : catalog_id + "\n" + database_info.name;
+	}
 	//! The database definition, asked from Glue first if the entry was created from the name alone
 	const GlueDatabaseInfo &GetSchemaInfo(ClientContext &context);
 	//! Take the definition of a database known by name alone from a listing; no-op once it is loaded
@@ -115,6 +125,7 @@ private:
 	//! Guards the fields of 'database_info' other than the name, which never changes
 	mutex schema_info_lock;
 	bool schema_info_loaded;
+	string catalog_id;
 };
 
 } // namespace duckdb

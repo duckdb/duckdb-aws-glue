@@ -69,6 +69,8 @@ struct GlueTableInfo {
 	string name;
 	//! The schema name of the table in the attached Glue catalog
 	string schema_name;
+	//! The Glue CatalogId the table was fetched with; empty for the attached catalog's own
+	string catalog_id;
 	//! Table.DatabaseName as Glue returned it: through a resource link, the link's target database
 	string glue_database_name;
 	//! The Glue TableType as written (EXTERNAL_TABLE, VIRTUAL_VIEW, ...), not the open table format

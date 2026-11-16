@@ -155,7 +155,7 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 
 	// re-fetch so the cached entry reflects what Glue stored
 	GlueDatabaseInfo created;
-	if (!GlueAPI::GetDatabase(context, *this, schema_name, created)) {
+	if (!GlueAPI::GetDatabase(context, *this, GlueAPI::OwnCatalog(), schema_name, created)) {
 		throw CatalogException("Glue database \"%s\" was created but could not be fetched afterwards", schema_name);
 	}
 	return schemas.CreateEntry(schemas.CreateSchemaEntry(created));
@@ -189,7 +189,7 @@ void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 	}
 	// Glue deletes every table of the database along with it, so without CASCADE only an empty database is dropped
 	string table_name;
-	if (!info.cascade && GlueAPI::GetAnyTableName(context, *this, schema_name, table_name)) {
+	if (!info.cascade && GlueAPI::GetAnyTableName(context, *this, GlueAPI::OwnCatalog(), schema_name, table_name)) {
 		throw DependencyException("Cannot drop Glue database \"%s\" because it still contains tables (e.g. \"%s\"). "
 		                          "Use DROP SCHEMA ... CASCADE to drop the database together with all of its tables",
 		                          schema_name, table_name);
@@ -231,7 +231,7 @@ void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry
 	auto schema_name = schema.Cast<GlueSchemaEntry>().GetDatabaseName();
 	// work on the current Glue definition, not the cached one
 	GlueDatabaseInfo database;
-	if (!GlueAPI::GetDatabase(context, *this, schema_name, database)) {
+	if (!GlueAPI::GetDatabase(context, *this, GlueAPI::OwnCatalog(), schema_name, database)) {
 		throw CatalogException("Schema with name \"%s\" does not exist in Glue catalog \"%s\"", schema_name,
 		                       GetName().GetIdentifierName());
 	}
@@ -263,7 +263,7 @@ void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry
 	GlueAPI::UpdateDatabase(context, *this, database);
 
 	GlueDatabaseInfo updated;
-	if (!GlueAPI::GetDatabase(context, *this, schema_name, updated)) {
+	if (!GlueAPI::GetDatabase(context, *this, GlueAPI::OwnCatalog(), schema_name, updated)) {
 		throw CatalogException("Glue database \"%s\" was updated but could not be fetched afterwards", schema_name);
 	}
 	schemas.CreateEntry(schemas.CreateSchemaEntry(updated));

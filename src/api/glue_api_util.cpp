@@ -41,10 +41,11 @@ GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database) {
 	return result;
 }
 
-GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &schema_name) {
+GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &schema_name, const string &catalog_id) {
 	GlueTableInfo result;
 	result.name = ToStdString(table.GetName());
 	result.schema_name = schema_name;
+	result.catalog_id = catalog_id;
 	result.glue_database_name = ToStdString(table.GetDatabaseName());
 	result.glue_table_type = ToStdString(table.GetTableType());
 	result.table_type = GlueTableTypeFromString(result.glue_table_type);

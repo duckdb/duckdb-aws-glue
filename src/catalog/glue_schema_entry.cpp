@@ -36,9 +36,9 @@
 namespace duckdb {
 
 GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p,
-                                 bool schema_info_loaded)
-    : SchemaCatalogEntry(catalog, info), tables(*this), database_info(std::move(database_info_p)),
-      schema_info_loaded(schema_info_loaded) {
+                                 bool schema_info_loaded, string catalog_id_p, optional_ptr<SchemaCatalogEntry> parent)
+    : SchemaCatalogEntry(catalog, info, parent), tables(*this), database_info(std::move(database_info_p)),
+      schema_info_loaded(schema_info_loaded), catalog_id(std::move(catalog_id_p)) {
 }
 
 GlueSchemaEntry::~GlueSchemaEntry() {
@@ -552,7 +552,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 
 	// re-fetch so the entry reflects what Glue stored
 	GlueTableInfo created;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, created)) {
+	if (!GlueAPI::GetTable(context, glue_catalog, catalog_id, database_info.name, table_name, created)) {
 		throw CatalogException("Glue table \"%s.%s\" was created but could not be fetched afterwards",
 		                       database_info.name, table_name);
 	}
@@ -640,7 +640,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	auto fetch_stored = [&]() {
 		tables.RemoveEntry(view_name);
 		GlueTableInfo stored;
-		if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, view_name, stored)) {
+		if (!GlueAPI::GetTable(context, glue_catalog, catalog_id, database_info.name, view_name, stored)) {
 			throw CatalogException("Glue view \"%s.%s\" was created but could not be fetched afterwards",
 			                       database_info.name, view_name);
 		}
@@ -994,7 +994,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 
 GlueTable &GlueSchemaEntry::RefreshTable(ClientContext &context, const string &table_name) {
 	GlueTableInfo updated;
-	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), database_info.name, table_name, updated)) {
+	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), catalog_id, database_info.name, table_name, updated)) {
 		throw CatalogException("Table \"%s.%s\" was altered but could not be fetched afterwards", database_info.name,
 		                       table_name);
 	}
@@ -1007,7 +1007,7 @@ const GlueTableInfo &GlueSchemaEntry::DefinitionForWrite(ClientContext &context,
 		return bound;
 	}
 	GlueTableInfo current;
-	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), database_info.name, bound.name, current)) {
+	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), catalog_id, database_info.name, bound.name, current)) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", bound.name,
 		                       database_info.name);
 	}
@@ -1089,7 +1089,7 @@ const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
 	lock_guard<mutex> guard(schema_info_lock);
 	if (!schema_info_loaded) {
 		GlueDatabaseInfo database;
-		if (!GlueAPI::GetDatabase(context, catalog.Cast<GlueCatalog>(), database_info.name, database)) {
+		if (!GlueAPI::GetDatabase(context, catalog.Cast<GlueCatalog>(), catalog_id, database_info.name, database)) {
 			throw CatalogException("Glue database \"%s\" no longer exists", database_info.name);
 		}
 		database_info.description = std::move(database.description);

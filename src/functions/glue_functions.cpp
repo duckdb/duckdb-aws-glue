@@ -34,7 +34,8 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 	// Always fetches: the 'response' column carries the raw reply, which only a fresh call has. The fetched
 	// table warms the metadata cache for the binds that follow.
 	GlueTableInfo info;
-	if (!GlueAPI::GetTable(context, catalog, database_name, table_name, info, &result->raw_json)) {
+	if (!GlueAPI::GetTable(context, catalog, GlueAPI::OwnCatalog(), database_name, table_name, info,
+	                       &result->raw_json)) {
 		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", database_name, table_name,
 		                       name.Catalog().GetIdentifierName());
 	}
@@ -123,8 +124,8 @@ unique_ptr<FunctionData> GlueGetDatabaseResponseBind(ClientContext &context, Tab
 		                      catalog_name.GetIdentifierName(), catalog->GetCatalogType());
 	}
 	auto result = make_uniq<GlueGetDatabaseResponseBindData>();
-	if (!GlueAPI::GetDatabase(context, catalog->Cast<GlueCatalog>(), database_name, result->database,
-	                          &result->raw_json)) {
+	if (!GlueAPI::GetDatabase(context, catalog->Cast<GlueCatalog>(), GlueAPI::OwnCatalog(), database_name,
+	                          result->database, &result->raw_json)) {
 		throw CatalogException("Database '%s' does not exist in Glue catalog '%s'", database_name,
 		                       catalog_name.GetIdentifierName());
 	}

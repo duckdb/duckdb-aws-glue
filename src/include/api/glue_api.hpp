@@ -41,26 +41,32 @@ public:
 	//! CatalogId from the GetDatabases response
 	static string GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog);
 
+	//! The read calls below take the Glue CatalogId their requests carry: a child catalog of the attached one, or
+	//! OwnCatalog() for the attached catalog itself
+	static const string &OwnCatalog();
+
 	//! List all databases of the catalog
-	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog);
+	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog,
+	                                             const string &catalog_id);
 	//! Fetch a single database, returns false if it does not exist. 'raw_json' (optional) receives the Glue Database
 	//! object of the response as JSON.
-	static bool GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                        GlueDatabaseInfo &result, string *raw_json = nullptr);
+	static bool GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+	                        const string &database_name, GlueDatabaseInfo &result, string *raw_json = nullptr);
 	//! List all tables of a database; none when the database no longer exists or its tables may not be listed.
 	//! With 'single_page' only Glue's first page is fetched and 'has_more' reports whether the database holds
 	//! tables beyond it. With 'single_page' or 'throw_if_denied', a refused permission throws instead of returning
 	//! none.
-	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                       bool single_page = false, optional_ptr<bool> has_more = nullptr,
-	                                       bool throw_if_denied = false);
+	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+	                                       const string &database_name, bool single_page = false,
+	                                       optional_ptr<bool> has_more = nullptr, bool throw_if_denied = false);
 	//! Returns false if the database holds no tables (or views), otherwise true with the name of one of them
-	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                            string &table_name);
+	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+	                            const string &database_name, string &table_name);
 	//! Fetch a single table, returns false if it does not exist. 'raw_json' (optional) receives the Glue Table
 	//! object of the response as JSON.
-	static bool GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                     const string &table_name, GlueTableInfo &result, string *raw_json = nullptr);
+	static bool GetTable(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+	                     const string &database_name, const string &table_name, GlueTableInfo &result,
+	                     string *raw_json = nullptr);
 
 	//! Create a database
 	static GlueCreateOutcome CreateDatabase(ClientContext &context, GlueCatalog &catalog,

@@ -66,14 +66,14 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 	if (is_loaded) {
 		return;
 	}
-	auto tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName());
+	auto tables = GlueAPI::GetTables(context, catalog, schema.GetCatalogId(), schema.GetDatabaseName());
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	for (auto &table : tables) {
 		if (cache) {
 			// Without this the per reference GetEntry re-fetches every table this one request
 			// already returned, which makes the bulk round trip pure added cost
 			shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
-			cache->GetTable(schema.GetDatabaseName(), table.name, [&info]() { return info; });
+			cache->GetTable(schema.GetCacheKey(), table.name, [&info]() { return info; });
 		}
 		auto existing = entries.find(table.name);
 		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(table)) {
@@ -106,7 +106,7 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 	bool has_more = false;
 	vector<GlueTableInfo> tables;
 	try {
-		tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName(), true, &has_more);
+		tables = GlueAPI::GetTables(context, catalog, schema.GetCatalogId(), schema.GetDatabaseName(), true, &has_more);
 	} catch (const GlueException &ex) {
 		// A failed bulk fetch must not fail a lookup that never needed GetTables: log it and let the caller
 		// fall through to the direct GetTable
@@ -124,7 +124,7 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 	for (auto &table : tables) {
 		// Warm the metadata cache only - already-cached values win; the entry/Scan story is on the declaration
 		shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
-		cache.GetTable(schema.GetDatabaseName(), table.name, [&info]() { return info; });
+		cache.GetTable(schema.GetCacheKey(), table.name, [&info]() { return info; });
 	}
 	if (has_more) {
 		DUCKDB_LOG_INFO(context,
@@ -160,14 +160,14 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
 		asked_glue = true;
 		GlueTableInfo table;
-		if (!GlueAPI::GetTable(context, catalog, schema.GetDatabaseName(), glue_name, table)) {
+		if (!GlueAPI::GetTable(context, catalog, schema.GetCatalogId(), schema.GetDatabaseName(), glue_name, table)) {
 			return nullptr;
 		}
 		return make_shared_ptr<const GlueTableInfo>(std::move(table));
 	};
 	// the definition Glue holds, fetched once per transaction (GlueTransactionCache) and outside entry_lock, so that a
 	// Glue round trip does not hold up the lookups of other tables
-	auto table = cache ? cache->GetTable(schema.GetDatabaseName(), glue_name, load) : load();
+	auto table = cache ? cache->GetTable(schema.GetCacheKey(), glue_name, load) : load();
 	lock_guard<mutex> guard(entry_lock);
 	if (!cached && asked_glue) {
 		// counts the round trips of misses, not lookups: a cache hit (including a bulk-warmed one) costs nothing and

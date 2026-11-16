@@ -36,7 +36,8 @@ unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> 
 vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input);
 GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database);
 //! Project a fetched Table; the result keeps the Table in 'fetched'
-GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &schema_name);
+GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &schema_name,
+                          const string &catalog_id = string());
 Aws::Map<Aws::String, Aws::String> ToAwsMap(const unordered_map<string, string> &input);
 Aws::Vector<Aws::Glue::Model::Column> ToAwsColumns(const vector<GlueColumn> &input);
 Aws::Vector<Aws::String> ToAwsValues(const vector<string> &values);
@@ -70,6 +71,16 @@ template <class REQUEST>
 void SetCatalogId(REQUEST &request, const GlueCatalog &catalog) {
 	if (!catalog.options.catalog_id.empty()) {
 		request.SetCatalogId(catalog.options.catalog_id);
+	}
+}
+
+//! 'catalog_id' names a child catalog of the attached one; empty means the attached catalog itself
+template <class REQUEST>
+void SetCatalogId(REQUEST &request, const GlueCatalog &catalog, const string &catalog_id) {
+	if (catalog_id.empty()) {
+		SetCatalogId(request, catalog);
+	} else {
+		request.SetCatalogId(catalog_id);
 	}
 }
 

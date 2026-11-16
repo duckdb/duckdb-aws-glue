@@ -25,7 +25,7 @@ void GlueSchemaSet::LoadEntries(ClientContext &context) {
 	if (is_loaded) {
 		return;
 	}
-	auto databases = GlueAPI::GetDatabases(context, catalog);
+	auto databases = GlueAPI::GetDatabases(context, catalog, GlueAPI::OwnCatalog());
 	for (auto &database : databases) {
 		auto entry = entries.find(database.name);
 		if (entry != entries.end()) {
@@ -51,7 +51,7 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 	}
 	// not cached, ask Glue for this database directly
 	GlueDatabaseInfo database;
-	if (!GlueAPI::GetDatabase(context, catalog, name, database)) {
+	if (!GlueAPI::GetDatabase(context, catalog, GlueAPI::OwnCatalog(), name, database)) {
 		return nullptr;
 	}
 	auto schema_entry = CreateSchemaEntry(database);

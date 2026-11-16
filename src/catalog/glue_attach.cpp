@@ -105,7 +105,8 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 	}
 	if (!catalog->options.default_schema.empty()) {
 		GlueDatabaseInfo database;
-		if (!GlueAPI::GetDatabase(context, *catalog, catalog->options.default_schema.GetIdentifierName(), database)) {
+		if (!GlueAPI::GetDatabase(context, *catalog, GlueAPI::OwnCatalog(),
+		                          catalog->options.default_schema.GetIdentifierName(), database)) {
 			throw InvalidConfigurationException("default_schema '%s' does not exist in Glue catalog '%s'",
 			                                    catalog->options.default_schema.GetIdentifierName(),
 			                                    catalog->options.path);

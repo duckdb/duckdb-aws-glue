@@ -36,8 +36,8 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 	auto name = ResolveGlueTableName(context, function_name, table_name.GetValue<string>());
 	GluePartitionTarget result;
 	result.catalog = &Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
-	if (!GlueAPI::GetTable(context, *result.catalog, name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(),
-	                       result.table)) {
+	if (!GlueAPI::GetTable(context, *result.catalog, GlueAPI::OwnCatalog(), name.Schema().GetIdentifierName(),
+	                       name.Name().GetIdentifierName(), result.table)) {
 		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", name.Schema().GetIdentifierName(),
 		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
 	}
@@ -942,7 +942,8 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		}
 		case GlueAlterAction::SET_TABLE_LOCATION:
 			// UpdateTable is refused with the VersionId of the definition an earlier step already replaced
-			if (table_updated && !GlueAPI::GetTable(context, catalog, table.schema_name, table.name, refetched_table)) {
+			if (table_updated && !GlueAPI::GetTable(context, catalog, table.catalog_id, table.schema_name, table.name,
+			                                        refetched_table)) {
 				throw CatalogException("Glue table '%s' was dropped while it was altered", table_name);
 			}
 			GlueAPI::SetTableLocation(context, catalog, table_updated ? refetched_table : table, step.location);
