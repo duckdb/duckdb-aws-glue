@@ -87,17 +87,21 @@ ErrorData GlueCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	return ErrorData();
 }
 
-//! Glue databases do not nest: a nested path would otherwise create or drop the database of its last name
-static string NestedSchemaError(const Catalog &catalog, vector<Identifier> schema_path) {
-	return StringUtil::Format("Catalog %s does not support nested schemas: %s", catalog.GetName(),
-	                          QualifiedName::FromPath(std::move(schema_path)).ToString());
+//! A nested path names a database of a child catalog: without this check the statement would create or drop the
+//! attached catalog's database of its last name
+static string ChildCatalogSchemaError(const Catalog &catalog, const char *statement, vector<Identifier> schema_path) {
+	return StringUtil::Format("%s is not supported for \"%s\": Glue catalog \"%s\" lists the schemas and tables of "
+	                          "its child catalogs, but can not read or change them yet",
+	                          statement, QualifiedName::FromPath(std::move(schema_path)).ToString(),
+	                          catalog.GetName().GetIdentifierName());
 }
 
 ErrorData GlueCatalog::SupportsCreateSchema(CreateSchemaInfo &info) {
 	if (info.IsNested()) {
 		auto schema_path = info.ParentSchemas();
 		schema_path.push_back(info.SchemaName());
-		return ErrorData(ExceptionType::BINDER, NestedSchemaError(*this, std::move(schema_path)));
+		return ErrorData(ExceptionType::BINDER,
+		                 ChildCatalogSchemaError(*this, "CREATE SCHEMA", std::move(schema_path)));
 	}
 	return ErrorData();
 }
@@ -131,6 +135,11 @@ static optional_ptr<CatalogEntry> OnExistingSchema(const CreateSchemaInfo &info,
 
 optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	auto &context = transaction.GetContext();
+	if (info.IsNested()) {
+		auto schema_path = info.ParentSchemas();
+		schema_path.push_back(info.SchemaName());
+		throw BinderException(ChildCatalogSchemaError(*this, "CREATE SCHEMA", std::move(schema_path)));
+	}
 	ThrowIfInExplicitTransaction(context);
 	auto schema_name = info.SchemaName().GetIdentifierName();
 
@@ -175,7 +184,7 @@ void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 		}
 	}
 	if (schema_path.size() > 1) {
-		throw BinderException(NestedSchemaError(*this, std::move(schema_path)));
+		throw BinderException(ChildCatalogSchemaError(*this, "DROP SCHEMA", std::move(schema_path)));
 	}
 	ThrowIfInExplicitTransaction(context);
 	auto schema_name = info.GetQualifiedName().Name().GetIdentifierName();
@@ -311,39 +320,45 @@ vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientConte
 	if (entry) {
 		result.push_back(entry->Cast<SchemaCatalogEntry>());
 	}
+	// the name is the schema's own: schemas below the top carry it too
+	schemas.ScanNested(context, name,
+	                   [&](CatalogEntry &nested) { result.push_back(nested.Cast<SchemaCatalogEntry>()); });
 	return result;
+}
+
+vector<string> GlueCatalog::SchemaLevels(const vector<Identifier> &path) const {
+	vector<string> levels;
+	for (auto &component : path) {
+		if (!component.empty()) {
+			levels.push_back(component.GetIdentifierName());
+		}
+	}
+	// a bound lookup leads with the catalog
+	if (levels.size() > 1 && StringUtil::CIEquals(levels[0], GetName().GetIdentifierName())) {
+		levels.erase(levels.begin());
+	}
+	return levels;
+}
+
+optional_ptr<CatalogEntry> GlueCatalog::LookupSchemaPath(ClientContext &context, const vector<string> &path) {
+	auto entry = schemas.GetEntry(context, path);
+	if (!entry) {
+		entry = schemas.GetChildCatalog(context, path);
+	}
+	return entry;
 }
 
 optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction transaction,
                                                            const EntryLookupInfo &schema_lookup,
                                                            OnEntryNotFound if_not_found) {
-	auto &schema_name = schema_lookup.GetEntryName();
-	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db]
-	vector<string> path;
-	for (auto &component : schema_lookup.GetQualifiedName().Path()) {
-		if (!component.empty()) {
-			path.push_back(component.GetIdentifierName());
-		}
-	}
-	if (path.size() > 1 && StringUtil::CIEquals(path[0], GetName().GetIdentifierName())) {
-		path.erase(path.begin());
-	}
-	if (path.size() > 1) {
-		if (if_not_found == OnEntryNotFound::RETURN_NULL) {
-			return nullptr;
-		}
-		throw CatalogException(schema_lookup.GetErrorContext(),
-		                       "Glue database \"%s\" does not exist: Glue databases are not nested",
-		                       schema_lookup.GetQualifiedName().ToString());
-	}
-	auto &context = transaction.GetContext();
-	auto entry = schemas.GetEntry(context, schema_name);
+	auto path = SchemaLevels(schema_lookup.GetQualifiedName().Path());
+	auto entry = LookupSchemaPath(transaction.GetContext(), path);
 	if (!entry) {
 		if (if_not_found == OnEntryNotFound::RETURN_NULL) {
 			return nullptr;
 		}
 		throw CatalogException(schema_lookup.GetErrorContext(), "Glue database with name \"%s\" does not exist",
-		                       schema_name);
+		                       StringUtil::Join(path, "."));
 	}
 	return &entry->Cast<SchemaCatalogEntry>();
 }
@@ -354,15 +369,14 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 		return {nullptr, nullptr, ErrorData(BinderException("Catalog type does not support time travel"))};
 	}
 	CatalogEntryLookup result {nullptr, nullptr, ErrorData()};
-	auto &catalog = lookup_info.GetCatalog();
-	auto &database_name = lookup_info.GetSchema().GetIdentifierName();
-	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db, t]
-	if (lookup_info.GetQualifiedName().Path().size() > 3 || database_name.empty() ||
-	    (!catalog.empty() && !StringUtil::CIEquals(catalog.GetIdentifierName(), GetName().GetIdentifierName()))) {
+	// the schema qualification is everything up to the entry name
+	auto &full_path = lookup_info.GetQualifiedName().Path();
+	auto path = SchemaLevels(vector<Identifier>(full_path.begin(), full_path.end() - 1));
+	if (path.empty()) {
 		return result;
 	}
 	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
-		switch (TryLookupTableBeforeSchema(transaction, lookup_info, database_name, result)) {
+		switch (TryLookupTableBeforeSchema(transaction, lookup_info, path, result)) {
 		case TableLookup::TABLE_FOUND:
 		case TableLookup::TABLE_NOT_FOUND:
 		case TableLookup::SCHEMA_NOT_FOUND:
@@ -372,7 +386,7 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 			break;
 		}
 	}
-	auto schema = schemas.GetEntry(transaction.GetContext(), database_name);
+	auto schema = LookupSchemaPath(transaction.GetContext(), path);
 	if (schema) {
 		result.schema = &schema->Cast<SchemaCatalogEntry>();
 		result.entry = result.schema->LookupEntry(transaction, lookup_info);
@@ -422,18 +436,26 @@ CatalogEntryLookup GlueCatalog::ViewForReading(CatalogTransaction transaction, C
 }
 
 TableLookup GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
-                                                    const string &database_name, CatalogEntryLookup &result) {
-	// Glue keeps database names in lower case, as GetDatabase would name the schema
+                                                    const vector<string> &schema_path, CatalogEntryLookup &result) {
+	// Glue keeps database and catalog names in lower case, as GetDatabase would name the schema
+	vector<string> path;
+	for (auto &level : schema_path) {
+		path.push_back(StringUtil::Lower(level));
+	}
 	GlueDatabaseInfo database;
-	database.name = StringUtil::Lower(database_name);
-	if (schemas.GetCachedEntry(database.name)) {
+	database.name = path.back();
+	if (schemas.GetCachedEntry(path)) {
 		return TableLookup::SKIPPED;
 	}
-	auto schema = schemas.CreateSchemaEntry(database, false);
+	auto schema = schemas.CreateSchemaEntry(transaction.GetContext(), path, database, false);
+	if (!schema) {
+		return TableLookup::SCHEMA_NOT_FOUND;
+	}
 	auto entry = schema->LookupEntry(transaction, lookup_info);
 	if (!entry) {
-		// the table or its schema is missing: GetDatabase tells which, without asking for the table again
-		auto loaded = schemas.GetEntry(transaction.GetContext(), database.name);
+		// the table or its schema is missing: GetDatabase tells which, without asking for the table again. A child
+		// catalog of that name holds no tables.
+		auto loaded = schemas.GetEntry(transaction.GetContext(), path);
 		if (!loaded) {
 			return TableLookup::SCHEMA_NOT_FOUND;
 		}
@@ -463,6 +485,25 @@ static bool StartsWithAccountId(const string &path) {
 		}
 	}
 	return path.size() == num_digits_in_aws_account_id || path[num_digits_in_aws_account_id] == ':';
+}
+
+bool GlueCatalog::TryGetChildCatalogId(ClientContext &context, const vector<string> &path, string &result) {
+	result = options.catalog_id;
+	if (result.empty()) {
+		// attached as ':', the Data Catalog of the current account: the id of a child catalog leads with that account
+		result = FetchCatalogId(context);
+		if (result.empty()) {
+			return false;
+		}
+	}
+	// '<account>' is the Data Catalog of an account, '<account>:<catalog>[/<catalog>]' a catalog below it
+	bool in_child_catalog = result.find(':') != string::npos || result.find('/') != string::npos;
+	for (auto &level : path) {
+		result += in_child_catalog ? "/" : ":";
+		result += StringUtil::Lower(level);
+		in_child_catalog = true;
+	}
+	return true;
 }
 
 string GlueCatalog::KnownCatalogId() {

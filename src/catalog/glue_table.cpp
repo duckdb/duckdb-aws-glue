@@ -213,10 +213,35 @@ unique_ptr<CreateInfo> GlueTable::GetInfo() const {
 //===--------------------------------------------------------------------===//
 // Scan
 //===--------------------------------------------------------------------===//
+namespace {
+
+//! The scan of a table below a child catalog. It binds, so that DESCRIBE shows the columns Glue reports, and throws
+//! once it runs: every Glue request of a real scan would carry the id of the attached catalog.
+struct ChildCatalogTableData : public TableFunctionData {
+	string error;
+};
+
+unique_ptr<GlobalTableFunctionState> ChildCatalogTableInit(ClientContext &context, TableFunctionInitInput &input) {
+	throw NotImplementedException(input.bind_data->Cast<ChildCatalogTableData>().error);
+}
+
+void ChildCatalogTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	output.SetCardinality(0);
+}
+
+} // namespace
+
 TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
 	auto &glue_schema = schema.Cast<GlueSchemaEntry>();
 	if (glue_schema.InChildCatalog()) {
-		glue_schema.ThrowTableNotReadable(table_info);
+		auto data = make_uniq<ChildCatalogTableData>();
+		data->error = glue_schema.TableNotReadableError(table_info);
+		if (columns.LogicalColumnCount() == 0) {
+			// Glue reports no columns (an Iceberg table without metadata yet): there is nothing to bind
+			throw NotImplementedException(data->error);
+		}
+		bind_data = std::move(data);
+		return TableFunction("glue_child_catalog_table", {}, ChildCatalogTableScan, nullptr, ChildCatalogTableInit);
 	}
 	// only Hive (Glue native) tables can be read
 	auto format = table_info.GetFormat();

@@ -41,12 +41,45 @@ GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueD
       schema_info_loaded(schema_info_loaded), catalog_id(std::move(catalog_id_p)) {
 }
 
+GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, string catalog_id_p,
+                                 optional_ptr<SchemaCatalogEntry> parent)
+    : SchemaCatalogEntry(catalog, info, parent), tables(*this), schema_info_loaded(true),
+      catalog_id(std::move(catalog_id_p)), is_database(false) {
+	database_info.name = name.GetIdentifierName();
+}
+
 GlueSchemaEntry::~GlueSchemaEntry() {
+}
+
+vector<string> GlueSchemaEntry::GetPath() const {
+	vector<string> path;
+	for (auto &level : GetSchemaPath()) {
+		path.push_back(level.GetIdentifierName());
+	}
+	return path;
+}
+
+void GlueSchemaEntry::SetCatalogInfo(const GlueCatalogInfo &info) {
+	lock_guard<mutex> guard(schema_info_lock);
+	catalog_info = make_uniq<GlueCatalogInfo>(info);
 }
 
 void GlueSchemaEntry::CheckNotInChildCatalog(const string &operation) const {
 	if (!InChildCatalog()) {
 		return;
+	}
+	if (!is_database) {
+		string kind;
+		{
+			lock_guard<mutex> guard(schema_info_lock);
+			if (catalog_info) {
+				kind = ", " + catalog_info->Describe();
+			}
+		}
+		throw NotImplementedException("%s is not supported in \"%s\": it is a child catalog of Glue catalog "
+		                              "\"%s\"%s, which holds schemas, not tables",
+		                              operation, QualifiedName::FromPath(GetSchemaPath()).ToString(),
+		                              catalog.GetName().GetIdentifierName(), kind);
 	}
 	throw NotImplementedException("%s is not supported in \"%s\": Glue catalog \"%s\" lists the schemas and tables "
 	                              "of its child catalogs, but can not read or change them yet",
@@ -54,18 +87,18 @@ void GlueSchemaEntry::CheckNotInChildCatalog(const string &operation) const {
 	                              catalog.GetName().GetIdentifierName());
 }
 
-void GlueSchemaEntry::ThrowTableNotReadable(const GlueTableInfo &table) const {
+string GlueSchemaEntry::TableNotReadableError(const GlueTableInfo &table) const {
 	auto table_name = QualifiedName(GetSchemaPath(), Identifier(table.name)).ToString();
 	if (table.GetFormat().format == GlueFormat::ICEBERG) {
-		throw NotImplementedException(
+		return StringUtil::Format(
 		    "Glue table \"%s\" is an Iceberg table of the child catalog '%s', which Glue catalog \"%s\" lists but can "
 		    "not read yet. Attach the child catalog with the Iceberg extension to read it: ATTACH '%s' AS <name> "
 		    "(TYPE ICEBERG, ENDPOINT_TYPE GLUE)",
 		    table_name, catalog_id, catalog.GetName().GetIdentifierName(), catalog_id);
 	}
-	throw NotImplementedException("Glue table \"%s\" is in the child catalog '%s', whose tables Glue catalog \"%s\" "
-	                              "lists but can not read yet",
-	                              table_name, catalog_id, catalog.GetName().GetIdentifierName());
+	return StringUtil::Format("Glue table \"%s\" is in the child catalog '%s', whose tables Glue catalog \"%s\" lists "
+	                          "but can not read yet",
+	                          table_name, catalog_id, catalog.GetName().GetIdentifierName());
 }
 
 bool GlueSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
@@ -1079,7 +1112,11 @@ void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 //===--------------------------------------------------------------------===//
 void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
                            const std::function<void(CatalogEntry &)> &callback) {
-	if (!CatalogTypeIsSupported(type)) {
+	if (type == CatalogType::SCHEMA_ENTRY) {
+		catalog.Cast<GlueCatalog>().GetSchemas().ScanChildren(context, GetPath(), callback);
+		return;
+	}
+	if (!CatalogTypeIsSupported(type) || !is_database) {
 		return;
 	}
 	tables.Scan(context, callback);
@@ -1091,6 +1128,9 @@ void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEnt
 
 void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
 	string name;
+	if (!is_database && info.type != CatalogType::SCHEMA_ENTRY) {
+		return;
+	}
 	if (!CatalogTypeIsSupported(info.type) || !info.filter || info.filter->GetOid() ||
 	    !TryGetNameEquality(info.filter->GetName(), "GlueSchemaEntry::Scan", name)) {
 		SchemaCatalogEntry::Scan(context, info);
@@ -1144,10 +1184,15 @@ void GlueSchemaEntry::SetSchemaInfo(const GlueDatabaseInfo &database) {
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,
                                                         const EntryLookupInfo &lookup_info) {
-	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
+	auto &context = transaction.GetContext();
+	if (lookup_info.GetCatalogType() == CatalogType::SCHEMA_ENTRY) {
+		auto path = GetPath();
+		path.push_back(lookup_info.GetEntryName());
+		return catalog.Cast<GlueCatalog>().LookupSchemaPath(context, path);
+	}
+	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType()) || !is_database) {
 		return nullptr;
 	}
-	auto &context = transaction.GetContext();
 	return tables.GetEntry(context, lookup_info);
 }
 
