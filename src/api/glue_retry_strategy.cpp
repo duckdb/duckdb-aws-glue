@@ -12,19 +12,18 @@
 
 namespace duckdb {
 
-GlueLoggingRetryStrategy::GlueLoggingRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> strategy_p)
+GlueRetryStrategy::GlueRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> strategy_p)
     : strategy(std::move(strategy_p)) {
 }
 
-bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
-                                           long attempted_retries) const {
-	auto retry = strategy->ShouldRetry(error, attempted_retries);
+void GlueRetryStrategy::ReportRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+                                    long attempted_retries) const {
 	auto context = GlueHttpClientContextScope::Current();
-	// this strategy belongs to the Glue client alone, so every retry it allows is a Glue request being sent again
-	if (retry && context) {
-		GlueRequestMetrics::RecordRetry(*context);
+	if (!context) {
+		return;
 	}
-	if (retry && context && Logger::Get(*context).ShouldLog(GlueRetryLogType::NAME, GlueRetryLogType::LEVEL)) {
+	GlueRequestMetrics::RecordRetry(*context);
+	if (Logger::Get(*context).ShouldLog(GlueRetryLogType::NAME, GlueRetryLogType::LEVEL)) {
 		GlueRetryEvent event;
 		event.error = error.GetExceptionName().c_str();
 		auto status = static_cast<int>(error.GetResponseCode());
@@ -35,36 +34,56 @@ bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Clie
 		event.request_id = error.GetRequestId().c_str();
 		DUCKDB_LOG(*context, GlueRetryLogType, event);
 	}
+}
+
+bool GlueRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+                                    long attempted_retries) const {
+	auto retry = strategy->ShouldRetry(error, attempted_retries);
+	if (retry) {
+		ReportRetry(error, attempted_retries);
+	}
 	return retry;
 }
 
-long GlueLoggingRetryStrategy::CalculateDelayBeforeNextRetry(
+long GlueRetryStrategy::CalculateDelayBeforeNextRetry(
     const Aws::Client::AWSError<Aws::Client::CoreErrors> &error, long attempted_retries) const {
 	return strategy->CalculateDelayBeforeNextRetry(error, attempted_retries);
 }
 
-long GlueLoggingRetryStrategy::GetMaxAttempts() const {
+long GlueRetryStrategy::GetMaxAttempts() const {
 	return strategy->GetMaxAttempts();
 }
 
-void GlueLoggingRetryStrategy::GetSendToken() {
+void GlueRetryStrategy::GetSendToken() {
 	strategy->GetSendToken();
 }
 
-bool GlueLoggingRetryStrategy::HasSendToken() {
+bool GlueRetryStrategy::HasSendToken() {
 	return strategy->HasSendToken();
 }
 
-void GlueLoggingRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome) {
+// The SDK (AWSClient::AttemptExhaustively) calls HasSendToken() before every attempt, and may stop there without
+// making one, and calls exactly one RequestBookkeeping() overload after each attempt that was made, the first
+// without and the later ones with the previous error. Counting in RequestBookkeeping() therefore counts each
+// attempt once, with either HTTP client.
+static void CountAttempt() {
+	if (auto context = GlueHttpClientContextScope::Current()) {
+		GlueRequestMetrics::RecordRequest(*context);
+	}
+}
+
+void GlueRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome) {
+	CountAttempt();
 	strategy->RequestBookkeeping(outcome);
 }
 
-void GlueLoggingRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome,
+void GlueRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome,
                                                   const Aws::Client::AWSError<Aws::Client::CoreErrors> &last_error) {
+	CountAttempt();
 	strategy->RequestBookkeeping(outcome, last_error);
 }
 
-const char *GlueLoggingRetryStrategy::GetStrategyName() const {
+const char *GlueRetryStrategy::GetStrategyName() const {
 	return strategy->GetStrategyName();
 }
 

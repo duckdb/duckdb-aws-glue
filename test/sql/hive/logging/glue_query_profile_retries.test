@@ -50,14 +50,15 @@ SELECT id FROM throttled_dl.fault_throttled_gpr.t;
 statement ok
 SET enable_profiling = 'no_output';
 
-# the one throttled GetTable is one retry, and the retry is one of the requests
-query III
-SELECT glue.retries, glue.requests >= 2, glue.request_time > 0
-FROM read_json('{TEST_DIR}/glue_throttled_profile.json');
+# the one throttled GetTable is one retry, and two requests: the refused attempt and the retry. The table has no
+# partitions, so nothing else asks Glue.
+query II
+SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT
+FROM read_json_objects('{TEST_DIR}/glue_throttled_profile.json') t(j);
 ----
-1	true	true
+1	2
 
-# the same through the AWS SDK's own HTTP client, which counts the retry but not the requests
+# the same through the AWS SDK's own HTTP client
 statement ok
 SET glue_network_calls_via_duckdb = false;
 
@@ -75,16 +76,11 @@ SELECT id FROM throttled_dl.fault_throttled_gpr.t;
 statement ok
 SET enable_profiling = 'no_output';
 
-query I
-SELECT glue.retries FROM read_json('{TEST_DIR}/glue_throttled_sdk_profile.json');
+query II
+SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT
+FROM read_json_objects('{TEST_DIR}/glue_throttled_sdk_profile.json') t(j);
 ----
-1
-
-query I
-SELECT count(*) FROM (SELECT unnest(json_keys(to_json(glue))) AS metric FROM read_json('{TEST_DIR}/glue_throttled_sdk_profile.json'))
-WHERE metric IN ('requests', 'request_time');
-----
-0
+1	2
 
 statement ok
 RESET glue_network_calls_via_duckdb;

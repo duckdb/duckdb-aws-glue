@@ -1,9 +1,7 @@
 #include "api/glue_http_client.hpp"
-#include "api/glue_request_metrics.hpp"
 
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
-#include "duckdb/common/profiler.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -132,19 +130,6 @@ public:
 	MakeRequest(const std::shared_ptr<Aws::Http::HttpRequest> &request, Aws::Utils::RateLimits::RateLimiterInterface *,
 	            Aws::Utils::RateLimits::RateLimiterInterface *) const override {
 		auto aws_response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("GlueDuckDBHttp", request);
-		// the cheap checks come first: a query that is not profiled reads no clock
-		auto metrics_context = GlueHttpClientContextScope::Current().get();
-		auto measure = GlueRequestMetrics::ShouldRecord(metrics_context, *request);
-		Profiler timer;
-		if (measure) {
-			timer.Start();
-		}
-		auto record = [&]() {
-			if (measure) {
-				timer.End();
-				GlueRequestMetrics::Record(*metrics_context, timer.ElapsedNanos());
-			}
-		};
 		try {
 			string url = EnsureUrlHasPath(request->GetUri().GetURIString(true).c_str());
 
@@ -219,7 +204,6 @@ public:
 
 			if (!response) {
 				aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
-				record();
 				return aws_response;
 			}
 			if (response->HasRequestError()) {
@@ -230,7 +214,6 @@ public:
 				aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
 				aws_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
 				aws_response->SetClientErrorMessage(response->GetRequestError().c_str());
-				record();
 				return aws_response;
 			}
 			aws_response->SetResponseCode(static_cast<Aws::Http::HttpResponseCode>(static_cast<int>(response->status)));
@@ -248,7 +231,6 @@ public:
 			aws_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
 			aws_response->SetClientErrorMessage(ex.what());
 		}
-		record();
 		return aws_response;
 	}
 

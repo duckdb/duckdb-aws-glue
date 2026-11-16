@@ -48,13 +48,61 @@ SELECT count(*) FROM my_datalake.default.grm_orders;
 statement ok
 SET enable_profiling = 'no_output';
 
-query III
-SELECT (j->>'$.glue.requests')::UBIGINT >= 2,
-       (j->>'$.glue.request_time')::DOUBLE > 0,
-       j->>'$.glue.retries' IS NULL
+query II
+SELECT (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.retries IS NULL
 FROM read_json_objects('{TEST_DIR}/glue_request_metrics.json') t(j);
 ----
-true	true	true
+2	true
+
+# each parallel GetPartitions segment is a request of its own: 1 GetTable + 4 GetPartitions
+statement ok
+SET glue_get_partitions_segments = 4;
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_request_metrics_segments.json';
+
+statement ok
+SELECT count(*) FROM my_datalake.default.grm_orders;
+
+statement ok
+SET enable_profiling = 'no_output';
+
+statement ok
+RESET glue_get_partitions_segments;
+
+query I
+SELECT (j::VARIANT).glue.requests::UBIGINT
+FROM read_json_objects('{TEST_DIR}/glue_request_metrics_segments.json') t(j);
+----
+5
+
+# the requests are counted for the AWS SDK's own HTTP client too
+statement ok
+SET glue_network_calls_via_duckdb = false;
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_request_metrics_sdk.json';
+
+statement ok
+SELECT count(*) FROM my_datalake.default.grm_orders;
+
+statement ok
+SET enable_profiling = 'no_output';
+
+statement ok
+RESET glue_network_calls_via_duckdb;
+
+query I
+SELECT (j::VARIANT).glue.requests::UBIGINT
+FROM read_json_objects('{TEST_DIR}/glue_request_metrics_sdk.json') t(j);
+----
+2
 
 # a query that makes no Glue request reports none: the metrics are absent, not zero
 statement ok
@@ -70,7 +118,7 @@ statement ok
 SET enable_profiling = 'no_output';
 
 query III
-SELECT j->>'$.glue.requests' IS NULL, j->>'$.glue.request_time' IS NULL, j->>'$.glue' IS NULL
+SELECT (j::VARIANT).glue.requests IS NULL, (j::VARIANT).glue.request_time IS NULL, (j::VARIANT).glue IS NULL
 FROM read_json_objects('{TEST_DIR}/glue_request_metrics_none.json') t(j);
 ----
 true	true	true

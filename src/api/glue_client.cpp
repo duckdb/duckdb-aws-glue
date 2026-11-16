@@ -124,7 +124,7 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	if (!config.retryStrategy) {
 		config.retryStrategy = config.configFactories.retryStrategyCreateFn();
 	}
-	config.retryStrategy = std::make_shared<GlueLoggingRetryStrategy>(std::move(config.retryStrategy));
+	config.retryStrategy = std::make_shared<GlueRetryStrategy>(std::move(config.retryStrategy));
 
 	Aws::Auth::AWSCredentials credentials(key_id, secret, session_token);
 	auto provider = std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(credentials);
