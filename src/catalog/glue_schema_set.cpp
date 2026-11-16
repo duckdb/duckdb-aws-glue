@@ -104,6 +104,49 @@ void GlueSchemaSet::LoadEntries(ClientContext &context) {
 	is_loaded = true;
 }
 
+void GlueSchemaSet::LoadChildCatalogs(ClientContext &context) {
+	if (child_catalogs_loaded || !catalog.options.list_child_catalogs) {
+		return;
+	}
+	for (auto &info : GlueAPI::GetCatalogs(context, catalog, GlueAPI::OwnCatalog())) {
+		vector<string> path;
+		if (!catalog.TryGetChildCatalogPath(context, info.catalog_id, path)) {
+			continue;
+		}
+		auto child = ChildCatalogEntry(context, path);
+		if (!child) {
+			continue;
+		}
+		child->SetCatalogInfo(info);
+		MarkKnown(path);
+		vector<GlueDatabaseInfo> databases;
+		try {
+			databases = GlueAPI::GetDatabases(context, catalog, child->GetCatalogId());
+		} catch (const GlueException &ex) {
+			// a child catalog whose databases we may not list must not fail listing the others
+			if (!ex.access_denied) {
+				throw;
+			}
+			ErrorData error(ex);
+			DUCKDB_LOG_WARNING(context, "Not listing the databases of Glue catalog '%s': %s", child->GetCatalogId(),
+			                   error.RawMessage());
+			continue;
+		}
+		for (auto &database : databases) {
+			auto database_path = path;
+			database_path.push_back(database.name);
+			auto key = PathKey(database_path);
+			auto entry = entries.find(key);
+			if (entry != entries.end()) {
+				entry->second->SetSchemaInfo(database);
+				continue;
+			}
+			entries.emplace(key, CreateSchemaEntryInternal(context, database_path, database, true));
+		}
+	}
+	child_catalogs_loaded = true;
+}
+
 optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const string &name) {
 	if (name.empty()) {
 		return nullptr;
@@ -220,6 +263,7 @@ void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(Catalo
 	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	LoadEntries(context);
+	LoadChildCatalogs(context);
 	for (auto &entry : entries) {
 		callback(*entry.second);
 	}
@@ -235,6 +279,7 @@ void GlueSchemaSet::ScanChildren(ClientContext &context, const vector<string> &p
                                  const std::function<void(CatalogEntry &)> &callback) {
 	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
+	LoadChildCatalogs(context);
 	auto prefix = StringUtil::Lower(PathKey(path)) + "\x1f";
 	auto is_child = [&](const string &key) {
 		return key.size() > prefix.size() && StringUtil::StartsWith(StringUtil::Lower(key), prefix) &&
@@ -256,6 +301,7 @@ void GlueSchemaSet::ScanNested(ClientContext &context, const string &name,
                                const std::function<void(CatalogEntry &)> &callback) {
 	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
+	LoadChildCatalogs(context);
 	auto suffix = "\x1f" + StringUtil::Lower(name);
 	for (auto &entry : entries) {
 		if (StringUtil::EndsWith(StringUtil::Lower(entry.first), suffix)) {

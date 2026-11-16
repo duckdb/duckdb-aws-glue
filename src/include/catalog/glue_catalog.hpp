@@ -91,6 +91,8 @@ public:
 	//! The Glue CatalogId of the child catalog 'path' names: this catalog's own id, extended by the path. False when
 	//! this catalog was attached as ':' and Glue does not report its account
 	bool TryGetChildCatalogId(ClientContext &context, const vector<string> &path, string &result);
+	//! The reverse: the path of the child catalog with that Glue CatalogId. False if it is not below this catalog
+	bool TryGetChildCatalogPath(ClientContext &context, const string &catalog_id, vector<string> &result);
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
 	//! The S3 location a new table gets when none is given: <default_location>/<database>/<table> when the catalog

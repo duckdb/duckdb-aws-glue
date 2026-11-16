@@ -57,6 +57,9 @@ private:
 	};
 
 	void LoadEntries(ClientContext &context);
+	//! With LIST_CHILD_CATALOGS: every child catalog and its databases, asked from Glue once. Called with entry_lock
+	//! held.
+	void LoadChildCatalogs(ClientContext &context);
 	//! Move an entry out of the set; the transaction manager keeps it, and the tables it caches, alive while a
 	//! running statement may use them. Called with entry_lock held.
 	void RetireEntry(const string &name);
@@ -76,6 +79,7 @@ private:
 	case_insensitive_map_t<unique_ptr<GlueSchemaEntry>> entries;
 	case_insensitive_map_t<ChildCatalog> child_catalogs;
 	bool is_loaded = false;
+	bool child_catalogs_loaded = false;
 };
 
 } // namespace duckdb

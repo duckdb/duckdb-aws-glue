@@ -506,6 +506,33 @@ bool GlueCatalog::TryGetChildCatalogId(ClientContext &context, const vector<stri
 	return true;
 }
 
+//! A catalog id without the account it leads with: empty for the Data Catalog of an account
+static string WithoutAccountId(const string &catalog_id) {
+	if (!StartsWithAccountId(catalog_id)) {
+		return catalog_id;
+	}
+	auto separator = catalog_id.find(':');
+	return separator == string::npos ? string() : catalog_id.substr(separator + 1);
+}
+
+bool GlueCatalog::TryGetChildCatalogPath(ClientContext &context, const string &catalog_id, vector<string> &result) {
+	string own_id;
+	if (!TryGetChildCatalogId(context, vector<string>(), own_id)) {
+		return false;
+	}
+	// Glue may spell either id with or without the account
+	auto own = StringUtil::Lower(WithoutAccountId(own_id));
+	auto child = StringUtil::Lower(WithoutAccountId(catalog_id));
+	if (!own.empty()) {
+		if (!StringUtil::StartsWith(child, own + "/")) {
+			return false;
+		}
+		child = child.substr(own.size() + 1);
+	}
+	result = StringUtil::Split(child, '/');
+	return !result.empty();
+}
+
 string GlueCatalog::KnownCatalogId() {
 	{
 		lock_guard<mutex> guard(reported_id_lock);

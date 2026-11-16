@@ -30,6 +30,9 @@ struct GlueAttachOptions {
 	bool verify_connection = true;
 	//! The attached Iceberg catalog that reads this catalog's Iceberg tables in Glue views
 	Identifier iceberg_catalog;
+	//! Whether listing the schemas asks Glue for the child catalogs and their databases: one GetCatalogs and a
+	//! GetDatabases per child catalog. Without it a listing shows the ones a query has named.
+	bool list_child_catalogs = false;
 };
 
 } // namespace duckdb
