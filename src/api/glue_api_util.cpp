@@ -28,15 +28,6 @@ vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input)
 	return result;
 }
 
-bool IsSameCatalogId(const string &left, const string &right) {
-	// Glue names a catalog with or without the account it is in
-	auto without_account = [](const string &catalog_id) {
-		auto separator = catalog_id.find(':');
-		return StringUtil::Lower(separator == string::npos ? catalog_id : catalog_id.substr(separator + 1));
-	};
-	return without_account(left) == without_account(right);
-}
-
 GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database) {
 	GlueDatabaseInfo result;
 	if (database.CatalogIdHasBeenSet()) {

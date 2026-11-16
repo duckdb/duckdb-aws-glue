@@ -25,6 +25,7 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_view.hpp"
+#include "core/helpers.hpp"
 #include "catalog/scan_filter_equality.hpp"
 #include "planning/glue_hive_insert.hpp"
 
@@ -506,23 +507,20 @@ bool GlueCatalog::TryGetChildCatalogId(ClientContext &context, const vector<stri
 	return true;
 }
 
-//! A catalog id without the account it leads with: empty for the Data Catalog of an account
-static string WithoutAccountId(const string &catalog_id) {
-	if (!StartsWithAccountId(catalog_id)) {
-		return catalog_id;
-	}
-	auto separator = catalog_id.find(':');
-	return separator == string::npos ? string() : catalog_id.substr(separator + 1);
-}
-
 bool GlueCatalog::TryGetChildCatalogPath(ClientContext &context, const string &catalog_id, vector<string> &result) {
 	string own_id;
 	if (!TryGetChildCatalogId(context, vector<string>(), own_id)) {
 		return false;
 	}
 	// Glue may spell either id with or without the account
-	auto own = StringUtil::Lower(WithoutAccountId(own_id));
-	auto child = StringUtil::Lower(WithoutAccountId(catalog_id));
+	string own_account, own, child_account, child;
+	SplitGlueCatalogId(own_id, own_account, own);
+	SplitGlueCatalogId(catalog_id, child_account, child);
+	if (!own_account.empty() && !child_account.empty() && own_account != child_account) {
+		return false;
+	}
+	own = StringUtil::Lower(own);
+	child = StringUtil::Lower(child);
 	if (!own.empty()) {
 		if (!StringUtil::StartsWith(child, own + "/")) {
 			return false;

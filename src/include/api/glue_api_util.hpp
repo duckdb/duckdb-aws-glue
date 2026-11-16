@@ -2,6 +2,7 @@
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "core/helpers.hpp"
 #include "duckdb/common/exception.hpp"
 
 #include <aws/glue/GlueClient.h>
@@ -32,13 +33,14 @@ const Aws::Glue::Model::Partition &FetchedPartition(const GluePartitionDetails &
                                                     const string &table_name);
 
 string ToStdString(const Aws::String &input);
-bool IsSameCatalogId(const string &left, const string &right);
-//! Whether an object Glue returned for a request with the child catalog id 'catalog_id' says it is in that catalog.
-//! A server that ignores the CatalogId of a request answers with the attached catalog's object of the same name.
+//! Whether an object Glue returned for a request with the child catalog id 'catalog_id' says it is in that catalog:
+//! an answer that names another catalog, or none, is not taken. A server that ignores the CatalogId of a request
+//! answers with the attached catalog's object of the same name. Requests for the attached catalog itself
+//! ('catalog_id' empty) take any answer, as they always did.
 template <class OBJECT>
 bool IsInChildCatalog(const OBJECT &object, const string &catalog_id) {
-	return catalog_id.empty() || !object.CatalogIdHasBeenSet() ||
-	       IsSameCatalogId(catalog_id, ToStdString(object.GetCatalogId()));
+	return catalog_id.empty() ||
+	       (object.CatalogIdHasBeenSet() && IsSameGlueCatalogId(catalog_id, ToStdString(object.GetCatalogId())));
 }
 unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> &input);
 vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input);
