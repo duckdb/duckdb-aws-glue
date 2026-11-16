@@ -36,6 +36,28 @@ public:
 	string DescribeSortOrder() const;
 };
 
+//! What a child catalog of a Glue Data Catalog is backed by
+enum class GlueCatalogKind : uint8_t { GLUE, S3_TABLES, REDSHIFT, FEDERATED };
+
+//! A Glue "Catalog" below the Data Catalog of an account, exposed as a DuckDB schema that only holds schemas
+struct GlueCatalogInfo {
+	//! '<account>:<catalog>[/<catalog>...]'
+	string catalog_id;
+	string name;
+	string description;
+	//! FederatedCatalog.ConnectionName, e.g. 'aws:s3tables'; empty for a catalog that is not federated
+	string connection_name;
+	//! CatalogProperties.DataLakeAccessProperties.CatalogType, e.g. 'aws:redshift'
+	string catalog_type;
+	//! TargetRedshiftCatalog is set: a link to a Redshift catalog
+	bool targets_redshift = false;
+
+public:
+	GlueCatalogKind Kind() const;
+	//! 'an S3 Tables catalog', 'a Redshift catalog', ... for error messages
+	string Describe() const;
+};
+
 //! A Glue "Database", exposed as a DuckDB schema
 struct GlueDatabaseInfo {
 	//! the catalog the database resides in

@@ -45,6 +45,13 @@ public:
 	//! OwnCatalog() for the attached catalog itself
 	static const string &OwnCatalog();
 
+	//! Fetch a child catalog by its id, returns false if it does not exist
+	static bool GetCatalog(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+	                       GlueCatalogInfo &result);
+	//! List every catalog below 'parent_catalog_id', at any depth; OwnCatalog() lists those below the attached one
+	static vector<GlueCatalogInfo> GetCatalogs(ClientContext &context, GlueCatalog &catalog,
+	                                           const string &parent_catalog_id);
+
 	//! List all databases of the catalog
 	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog,
 	                                             const string &catalog_id);
