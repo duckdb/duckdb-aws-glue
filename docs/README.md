@@ -584,12 +584,13 @@ With profiling enabled (`SET enable_profiling = 'json'`), the query profile repo
   does not count the credential calls of an AWS credential chain.
 - `glue.request_time`: time the query spent inside Glue API calls, in seconds, including the retries and the time the
   AWS SDK waits between them (backoff). The parallel `GetPartitions` segments of one call are timed once, as the time
-  the query waited for all of them. Calls that run at the same time on different threads, such as prefetches, are each
-  timed, so only then can the total exceed the query's wall time. Creating the Glue client for the first call, which
+  the query waited for all of them. If calls ever run at the same time on different threads, each one is timed, so only
+  then can the total exceed the query's wall time. Creating the Glue client for the first call, which
   reads the secret, is included.
 - `glue.retries`: attempts the AWS SDK repeated after a failed one. Each of them is also counted in `glue.requests`.
 
-All three work with both HTTP clients, whatever `glue_network_calls_via_duckdb` is.
+All three work with both HTTP clients, whatever `glue_network_calls_via_duckdb` is. Two small calls that a
+`CREATE TABLE AS` makes while it is set up and undone, a table lookup and a table drop, are neither counted nor timed.
 
 A query that fails while it is bound, for example on a missing table (`GetTable` returns `EntityNotFound`), writes a
 profile without a `glue` entry, because DuckDB only gathers the metrics once a plan exists. Detail per request is in
