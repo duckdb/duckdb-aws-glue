@@ -25,6 +25,10 @@ CREATE TABLE my_datalake.default.ls_events (v INTEGER, part INTEGER) PARTITIONED
 statement ok
 INSERT INTO my_datalake.default.ls_events SELECT i, i % 1100 FROM range(2200) t(i);
 
+# the choice between the location and one listing per partition, without prefix ranges
+statement ok
+SET hive_partition_listing_ranges = false;
+
 statement ok
 SET redact_http_logs = false;
 
@@ -128,6 +132,9 @@ RESET hive_partition_listing_threshold;
 
 statement ok
 RESET threads;
+
+statement ok
+RESET hive_partition_listing_ranges;
 
 statement ok
 DROP TABLE my_datalake.default.ls_events;

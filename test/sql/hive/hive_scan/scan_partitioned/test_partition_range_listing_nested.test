@@ -1,0 +1,66 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_range_listing_nested.test
+# description: A partition registered inside another partition's directory splits its keys in two: the sample must not take the outer one as fully listed when the fetched pages end inside the nested one
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rl_nested;
+
+statement ok
+CREATE TABLE my_datalake.default.rl_nested (v INTEGER, part VARCHAR) PARTITIONED BY (part);
+
+statement ok
+INSERT INTO my_datalake.default.rl_nested SELECT 0, 'b' || lpad(i::VARCHAR, 3, '0') FROM range(1000) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.rl_nested VALUES (1, 'a0'), (10, 'a1');
+
+# a file of part=a1 sorting after the nested partition's keys
+statement ok
+COPY (SELECT 100 AS v) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rl_nested/part=a1/zz.parquet';
+
+statement ok
+CALL glue_add_partition('my_datalake.default.rl_nested', {part: 'p'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rl_nested/part=a1/sub');
+
+# a thousand keys inside part=a1, so the first page ends inside them
+statement ok
+COPY (SELECT i AS v, i AS k FROM range(1000) t(i)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rl_nested/part=a1/sub'
+    (FORMAT parquet, PARTITION_BY (k));
+
+statement ok
+SET threads = 1;
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_nested WHERE part IN ('a0', 'a1');
+----
+3	111
+
+statement ok
+SET hive_partition_listing_ranges = false;
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_nested WHERE part IN ('a0', 'a1');
+----
+3	111
+
+statement ok
+RESET hive_partition_listing_ranges;
+
+statement ok
+RESET threads;
+
+statement ok
+DROP TABLE my_datalake.default.rl_nested;

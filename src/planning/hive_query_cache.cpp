@@ -1,7 +1,5 @@
 #include "planning/hive_query_cache.hpp"
 
-#include "core/hive_location.hpp"
-
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -15,19 +13,31 @@ namespace duckdb {
 static constexpr const char *HIVE_QUERY_CACHE = "glue_hive_query_cache";
 static constexpr const char *HIVE_LISTING_CACHE = "glue_listing_cache";
 
+shared_ptr<MultiFileList> HiveDirectoryListingEntry::GetOrList(ClientContext &context, const string &glob) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	if (!listing) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		listing = shared_ptr<MultiFileList>(fs.GlobFileList(glob, FileGlobOptions::ALLOW_EMPTY));
+	}
+	return listing;
+}
+
 namespace {
 
 //! The directory listings of Glue tables, kept across statements under glue_cache_listings
 class HiveListingCache : public ClientContextState {
 public:
-	shared_ptr<MultiFileList> GetListing(ClientContext &context, const string &directory) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto &listing = listings[directory];
-		if (!listing) {
-			auto &fs = FileSystem::GetFileSystem(context);
-			listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
+	shared_ptr<MultiFileList> GetListing(ClientContext &context, const string &glob) {
+		shared_ptr<HiveDirectoryListingEntry> entry;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			auto &slot = listings[glob];
+			if (!slot) {
+				slot = make_shared_ptr<HiveDirectoryListingEntry>();
+			}
+			entry = slot;
 		}
-		return listing;
+		return entry->GetOrList(context, glob);
 	}
 
 	void Clear() {
@@ -55,7 +65,7 @@ public:
 
 private:
 	annotated_mutex lock;
-	unordered_map<string, shared_ptr<MultiFileList>> listings DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> listings DUCKDB_GUARDED_BY(lock);
 };
 
 } // namespace
@@ -106,31 +116,22 @@ shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) 
 	return entry;
 }
 
-shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
-                                                              bool cache_in_connection) {
-	auto key = directory;
-	StringUtil::RTrim(key, "/");
+shared_ptr<MultiFileList> HiveQueryCache::GetListing(ClientContext &context, const string &glob,
+                                                     bool cache_in_connection) {
 	if (cache_in_connection) {
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
-		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, key);
+		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, glob);
 	}
 	shared_ptr<HiveDirectoryListingEntry> entry;
 	{
 		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto &slot = directory_listings[key];
+		auto &slot = directory_listings[glob];
 		if (!slot) {
 			slot = make_shared_ptr<HiveDirectoryListingEntry>();
 		}
 		entry = slot;
 	}
-	// lock per directory: GlobFileList fetches the first page right away, and listings of other directories must not
-	// wait behind it
-	annotated_lock_guard<annotated_mutex> guard(entry->lock);
-	if (!entry->listing) {
-		auto &fs = FileSystem::GetFileSystem(context);
-		entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, key));
-	}
-	return entry->listing;
+	return entry->GetOrList(context, glob);
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {

@@ -136,8 +136,17 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   listed in whichever way takes fewer rounds of requests: the location once, recursively (one S3 request per 1000
   keys, one after another), with the files matched to their partitions by prefix, or each partition on its own,
   several at the same time. On a tie the location is listed when that makes a tenth of the requests, so a table
-  of up to 1000 partitions lists its location from 10 partitions read (or fewer, when they take more than one round). The estimate assumes one file per partition;
+  of up to 1000 partitions lists its location from 10 partitions read (or fewer, when they take more than one
+  round). The estimate counts one key per partition until the scan has sampled the table, and then as many keys as
+  the sample's listing holds per partition on average, data files or not (`_SUCCESS`, `.crc`, stale directories;
+  `SET hive_partition_listing_measure_files = false` keeps one);
   `SET hive_partition_listing_threshold = n` replaces it with a fixed rule (the location from n partitions read).
+  A location of more than one page can also be listed in ranges of its partitions that share a key prefix
+  (`part=24*`), about one page each (a single partition's may take more) and all at the same time, skipping the
+  ranges that hold no partition read and those the sample holds; they replace the location or the partitions when
+  they take fewer rounds, or as many and a tenth of the requests (with a threshold set, only the location;
+  `SET hive_partition_listing_ranges = false` turns them off). The sample lists the first range only as far as the
+  first partition read.
   Partitions at custom locations are always listed on their own. They are listed as tasks on DuckDB's threads, as many at a time as
   `SET threads`. A directory is listed once per
   query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
