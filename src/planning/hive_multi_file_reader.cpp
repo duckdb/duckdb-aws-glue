@@ -626,7 +626,8 @@ bool HiveMultiFileList::ExpandNextPath() const {
 	if (next_job >= listing_jobs.size()) {
 		return false;
 	}
-	auto &job = listing_jobs[next_job++];
+	// a listing that fails is not done: the next expansion tries it again
+	auto &job = listing_jobs[next_job];
 	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "listing");
 	auto files_before = expanded_files.size();
 	string mode;
@@ -650,6 +651,7 @@ bool HiveMultiFileList::ExpandNextPath() const {
 			mode = "partition";
 		}
 	}
+	next_job++;
 	if (!scan_info->partition_keys.empty()) {
 		event.partitions_read = job.partitions.size();
 	}
