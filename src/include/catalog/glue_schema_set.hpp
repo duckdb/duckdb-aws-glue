@@ -80,6 +80,10 @@ private:
 	case_insensitive_map_t<ChildCatalog> child_catalogs;
 	bool is_loaded = false;
 	bool child_catalogs_loaded = false;
+	//! Guarded by entry_lock
+	bool get_catalog_failure_warned = false;
+	//! The endpoint does not have GetCatalog: a schema that is no database is not found. Guarded by entry_lock
+	bool get_catalog_unavailable = false;
 };
 
 } // namespace duckdb

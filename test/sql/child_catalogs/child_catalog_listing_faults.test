@@ -1,0 +1,94 @@
+# name: test/sql/child_catalogs/child_catalog_listing_faults.test
+# description: with LIST_CHILD_CATALOGS a child catalog whose databases can not be listed is left out with a warning and the listing goes on; a GetCatalogs that fails is an error that names the catalog it asked for
+# group: [child_catalogs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_FLOCI_ENDPOINT
+
+# scripts/glue_fault_proxy.py in front of Floci: GetDatabases on the catalog fault_federation_down fails with
+# FederationSourceException, GetCatalogs below fault_catalogs_denied with AccessDeniedException
+require-env GLUE_FLOCI_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FLOCI_FAULT_ENDPOINT}',
+    LIST_CHILD_CATALOGS true
+);
+
+statement ok
+CALL enable_logging(storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# the catalog that failed is listed, without databases; the others are complete
+query II
+SELECT schema_name, parent_schema FROM duckdb_schemas() WHERE database_name = 'lake'
+AND (parent_schema IS NOT NULL OR schema_name IN ('s3tablescatalog', 'fault_federation_down')) ORDER BY ALL;
+----
+archive	s3tablescatalog
+fault_federation_down	NULL
+retail	archive
+retail	salesdemo
+s3tablescatalog	NULL
+salesdemo	s3tablescatalog
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE log_level = 'WARNING'
+AND message LIKE 'Not listing the databases of Glue catalog ''{GLUE_FLOCI_CATALOG_ID}:fault_federation_down''%FederationSourceException%';
+----
+1
+
+statement ok
+CALL disable_logging();
+
+# the listings that scan every schema work too
+query III
+SELECT s.parent_schema, t.table_name, t.tags['table_type'] FROM duckdb_tables() t JOIN duckdb_schemas() s
+ON t.schema_oid = s.oid WHERE t.database_name = 'lake' AND s.parent_schema IN ('salesdemo', 'archive') ORDER BY ALL;
+----
+archive	widget_sales	ICEBERG
+salesdemo	pending	ICEBERG
+salesdemo	widget_sales	ICEBERG
+
+query I
+SELECT count(*) > 0 FROM information_schema.schemata WHERE catalog_name = 'lake';
+----
+true
+
+# asked once: the catalog that failed is not asked again by the next listing
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = 'fault_federation_down';
+----
+1
+
+# a path below it is still asked for when it is named, and reports what Glue answers
+statement error
+SELECT * FROM lake.fault_federation_down.retail.widget_sales;
+----
+does not exist
+
+# the listing of the child catalogs themselves is not optional once it was asked for
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}:fault_catalogs_denied' as denied (
+    TYPE glue,
+    ENDPOINT '{GLUE_FLOCI_FAULT_ENDPOINT}',
+    LIST_CHILD_CATALOGS true
+);
+
+statement error
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'denied';
+----
+<REGEX>:.*GetCatalogs \(below catalog '000000000000:fault_catalogs_denied'\) failed.*AccessDeniedException.*
+
+statement ok
+DETACH denied;
+
+query I
+SELECT count(*) > 0 FROM duckdb_schemas() WHERE database_name = 'lake';
+----
+true

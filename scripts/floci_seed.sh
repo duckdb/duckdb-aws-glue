@@ -6,6 +6,8 @@
 #   s3tablescatalog/salesdemo            a table bucket, with the namespace 'retail' and the tables 'widget_sales'
 #                                        (columns i, s) and 'pending' (no Iceberg metadata yet, so no columns)
 #   s3tablescatalog/archive              another table bucket, also with retail.widget_sales (column archived_at)
+#   fault_federation_down                a federated catalog without databases, whose GetDatabases fails behind
+#   fault_catalogs_denied                scripts/glue_fault_proxy.py, as does GetCatalogs below this one
 # and the S3 bucket 'glue-floci-test' for the Hive tables the tests create in the account's own catalog.
 # Usage: scripts/floci_seed.sh [endpoint], default http://localhost:4566. Running it again changes nothing.
 set -eu
@@ -59,6 +61,11 @@ floci glue create-catalog --cli-input-json '{"Name": "s3tablescatalog", "Catalog
 	{"Identifier": "arn:aws:s3tables:'$REGION':'$ACCOUNT':bucket/*", "ConnectionName": "aws:s3tables"},
 	"AllowFullTableExternalDataAccess": "True", "CreateDatabaseDefaultPermissions": [],
 	"CreateTableDefaultPermissions": []}}' >/dev/null 2>&1 || true
+for catalog in fault_federation_down fault_catalogs_denied; do
+	floci glue create-catalog --cli-input-json '{"Name": "'$catalog'", "CatalogInput": {"FederatedCatalog":
+		{"Identifier": "arn:aws:s3tables:'$REGION':'$ACCOUNT':bucket/no-such-bucket", "ConnectionName": "aws:s3tables"},
+		"CreateDatabaseDefaultPermissions": [], "CreateTableDefaultPermissions": []}}' >/dev/null 2>&1 || true
+done
 for bucket in salesdemo archive; do
 	floci s3tables create-table-bucket --name $bucket >/dev/null 2>&1 || true
 	floci s3tables create-namespace --table-bucket-arn arn:aws:s3tables:$REGION:$ACCOUNT:bucket/$bucket \

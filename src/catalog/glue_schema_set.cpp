@@ -123,10 +123,8 @@ void GlueSchemaSet::LoadChildCatalogs(ClientContext &context) {
 		try {
 			databases = GlueAPI::GetDatabases(context, catalog, child->GetCatalogId());
 		} catch (const GlueException &ex) {
-			// a child catalog whose databases we may not list must not fail listing the others
-			if (!ex.access_denied) {
-				throw;
-			}
+			// a child catalog whose databases can not be listed (a federated source that is down, a refused
+			// permission) must not fail listing the others, and with them every catalog listing of the session
 			ErrorData error(ex);
 			DUCKDB_LOG_WARNING(context, "Not listing the databases of Glue catalog '%s': %s", child->GetCatalogId(),
 			                   error.RawMessage());
@@ -186,8 +184,9 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 	if (!parent) {
 		return nullptr;
 	}
+	// Glue keeps database names in lower case, as it does the catalog names the id was built from
 	GlueDatabaseInfo database;
-	if (!GlueAPI::GetDatabase(context, catalog, parent->GetCatalogId(), path.back(), database)) {
+	if (!GlueAPI::GetDatabase(context, catalog, parent->GetCatalogId(), StringUtil::Lower(path.back()), database)) {
 		return nullptr;
 	}
 	// a database Glue returned proves the catalogs above it
@@ -209,7 +208,7 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetChildCatalog(ClientContext &context
 		return existing->second.entry.get();
 	}
 	string catalog_id;
-	if (!catalog.TryGetChildCatalogId(context, path, catalog_id)) {
+	if (get_catalog_unavailable || !catalog.TryGetChildCatalogId(context, path, catalog_id)) {
 		return nullptr;
 	}
 	GlueCatalogInfo info;
@@ -218,10 +217,26 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetChildCatalog(ClientContext &context
 			return nullptr;
 		}
 	} catch (const GlueException &ex) {
-		// Reached after a database of this name was not found. A Glue endpoint without GetCatalog, or a role that
-		// may not call it, has no child catalog to offer: the name stays not found.
+		// Reached after a database of this name was not found: the name stays not found. The first failure is a
+		// warning, so that a role without glue:GetCatalog can tell why no child catalog exists.
 		ErrorData error(ex);
-		DUCKDB_LOG_DEBUG(context, "Not looking for a child catalog '%s': %s", catalog_id, error.RawMessage());
+		if (ex.unknown_call) {
+			// A stand-in for Glue without the call answers every name this way, after the retries of the SDK: it
+			// is not asked again
+			get_catalog_unavailable = true;
+			DUCKDB_LOG_WARNING(context,
+			                   "Glue catalog \"%s\" no longer looks for child catalogs, its endpoint does not answer "
+			                   "GetCatalog: %s",
+			                   catalog.GetName().GetIdentifierName(), error.RawMessage());
+		} else if (!get_catalog_failure_warned) {
+			get_catalog_failure_warned = true;
+			DUCKDB_LOG_WARNING(context,
+			                   "Glue catalog \"%s\" finds no child catalogs while GetCatalog fails: %s. Further "
+			                   "failures are logged at the debug level",
+			                   catalog.GetName().GetIdentifierName(), error.RawMessage());
+		} else {
+			DUCKDB_LOG_DEBUG(context, "Not looking for a child catalog '%s': %s", catalog_id, error.RawMessage());
+		}
 		return nullptr;
 	}
 	auto entry = ChildCatalogEntry(context, path);

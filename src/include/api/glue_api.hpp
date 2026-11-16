@@ -26,10 +26,13 @@ class Value;
 
 class GlueException : public IOException {
 public:
-	GlueException(const string &message, bool access_denied) : IOException(message), access_denied(access_denied) {
+	GlueException(const string &message, bool access_denied, bool unknown_call = false)
+	    : IOException(message), access_denied(access_denied), unknown_call(unknown_call) {
 	}
 
 	bool access_denied;
+	//! The server answered, but not with a Glue error: what a Glue stand-in answers to a call it does not have
+	bool unknown_call;
 };
 
 //! How a create call ended: the object exists afterwards either way, another client may have created it first

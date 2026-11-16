@@ -114,6 +114,25 @@ retail	NULL
 s3tablescatalog	NULL
 salesdemo	s3tablescatalog
 
+# Glue keeps catalog and database names in lower case: any spelling of the path reaches the same schema, through
+# the table and through the schema alone
+query II
+SELECT column_name, column_type FROM (DESCRIBE lake.S3TablesCatalog.SalesDemo.Retail.widget_sales);
+----
+i	INTEGER
+s	VARCHAR
+
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as spelled (TYPE glue, ENDPOINT '{GLUE_FLOCI_ENDPOINT}');
+
+statement error
+CREATE TABLE spelled.S3TablesCatalog.SalesDemo.Retail.created (i INTEGER);
+----
+CREATE TABLE is not supported in "s3tablescatalog.salesdemo.retail"
+
+statement ok
+DETACH spelled;
+
 # reading is refused, with the way to read an Iceberg table
 statement error
 SELECT * FROM lake.s3tablescatalog.salesdemo.retail.widget_sales;

@@ -11,12 +11,30 @@
 
 namespace duckdb {
 
+static thread_local bool unknown_call_scope_active = false;
+
+GlueUnknownCallScope::GlueUnknownCallScope() : previous(unknown_call_scope_active) {
+	unknown_call_scope_active = true;
+}
+
+GlueUnknownCallScope::~GlueUnknownCallScope() {
+	unknown_call_scope_active = previous;
+}
+
+bool GlueUnknownCallScope::Active() {
+	return unknown_call_scope_active;
+}
+
 GlueLoggingRetryStrategy::GlueLoggingRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> strategy_p)
     : strategy(std::move(strategy_p)) {
 }
 
 bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
                                            long attempted_retries) const {
+	if (GlueUnknownCallScope::Active() && error.GetExceptionName().empty() &&
+	    static_cast<int>(error.GetResponseCode()) > 0) {
+		return false;
+	}
 	auto retry = strategy->ShouldRetry(error, attempted_retries);
 	auto context = GlueHttpClientContextScope::Current();
 	if (retry && context && Logger::Get(*context).ShouldLog(GlueRetryLogType::NAME, GlueRetryLogType::LEVEL)) {

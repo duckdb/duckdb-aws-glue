@@ -217,6 +217,9 @@ SELECT schema_name, table_name, tags['table_type'] FROM duckdb_tables() WHERE da
 - The levels of a path are assumed to be what the path says: a table costs the one GetTable it always did, sent with
   the catalog id the path names. A schema on its own (`USE`, the search path) is asked for as a database first and
   as a child catalog second. An answer is only taken if it says it comes from the catalog that was asked for.
+- That second request is a GetCatalog. If it fails, the schema is not found and the first failure is a warning in
+  the log, so a role without `glue:GetCatalog` can tell why. An endpoint that does not have the call at all (a Glue
+  stand-in) is asked once per attached catalog, without the retries of the SDK.
 - A database of the attached catalog and a child catalog can share a name. They are one schema, which holds the
   tables of the database and the schemas of the child catalog.
 - A quoted name with dots (`lake."a.b".t`) is still one database.
@@ -233,7 +236,8 @@ SELECT schema_name, table_name, tags['table_type'] FROM duckdb_tables() WHERE da
   below a child catalog that a query on this attached catalog has named. Glue can not say what is below a catalog
   without one GetDatabases per child catalog, so listing all of them is the attach option `LIST_CHILD_CATALOGS true`:
   the first listing then costs one GetCatalogs and one GetDatabases per child catalog. A child catalog whose
-  databases may not be listed is left out with a warning in the log.
+  databases can not be listed (a refused permission, a federated source that does not answer) is listed without
+  them, with a warning in the log. A GetCatalogs that fails is an error.
 
 ## Writing
 
@@ -665,8 +669,10 @@ The tests are written against three `--test-config` files, which decide where th
   `s3tablescatalog` and each table bucket as one. `test/sql/child_catalogs/` only runs with this config
   (`require-env GLUE_FLOCI_ENDPOINT`), and the tests of the other configs skip themselves under it.
   `scripts/floci_seed.sh` creates the catalog, two table buckets and their tables; start Floci first
-  (`floci start`, or its Docker image), then `make test-floci`. It is not part of `scripts/docker-compose.yml` or CI
-  yet.
+  (`floci start`, or its Docker image), then `make test-floci`. That target also runs `scripts/glue_fault_proxy.py`
+  in front of Floci (`GLUE_FLOCI_FAULT_ENDPOINT`, port 4567), which fails GetDatabases on the catalog
+  `fault_federation_down` and GetCatalogs below `fault_catalogs_denied`. It is not part of
+  `scripts/docker-compose.yml` or CI yet.
 
 A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT` and `DEFAULT_S3_LOCATION`,
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under

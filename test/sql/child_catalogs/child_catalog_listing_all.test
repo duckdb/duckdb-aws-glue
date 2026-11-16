@@ -40,11 +40,11 @@ retail	salesdemo
 s3tablescatalog	NULL
 salesdemo	s3tablescatalog
 
-# the attached catalog, s3tablescatalog and its two table buckets
+# the attached catalog, s3tablescatalog with its two table buckets, and the two catalogs the fault tests use
 query II
 SELECT glue_calls('GetCatalogs'), glue_calls('GetDatabases');
 ----
-1	4
+1	6
 
 # listed once: the next listing asks nothing
 statement ok

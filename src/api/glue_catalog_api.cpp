@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_retry_strategy.hpp"
 
 #include "duckdb/common/string_util.hpp"
 
@@ -28,6 +29,8 @@ static GlueCatalogInfo ToCatalogInfo(const Aws::Glue::Model::Catalog &catalog) {
 bool GlueAPI::GetCatalog(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
                          GlueCatalogInfo &result) {
 	GlueHttpClientContextScope http_scope(context);
+	// a lookup falls back to this call after a database was not found, on endpoints that may not have it
+	GlueUnknownCallScope unknown_call_scope;
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetCatalogRequest request;
 	request.SetCatalogId(catalog_id);
@@ -47,13 +50,13 @@ vector<GlueCatalogInfo> GlueAPI::GetCatalogs(ClientContext &context, GlueCatalog
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	vector<GlueCatalogInfo> result;
+	// without a parent Glue lists the catalogs below the Data Catalog of the current account
+	auto &parent = parent_catalog_id.empty() ? catalog.options.catalog_id : parent_catalog_id;
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetCatalogsRequest request;
-		if (!parent_catalog_id.empty()) {
-			request.SetParentCatalogId(parent_catalog_id);
-		} else if (!catalog.options.catalog_id.empty()) {
-			request.SetParentCatalogId(catalog.options.catalog_id);
+		if (!parent.empty()) {
+			request.SetParentCatalogId(parent);
 		}
 		request.SetRecursive(true);
 		if (!next_token.empty()) {
@@ -61,7 +64,9 @@ vector<GlueCatalogInfo> GlueAPI::GetCatalogs(ClientContext &context, GlueCatalog
 		}
 		auto outcome = client->GetCatalogs(request);
 		if (!outcome.IsSuccess()) {
-			ThrowGlueError(outcome, StringUtil::Format("GetCatalogs (catalog '%s')", catalog.options.path));
+			ThrowGlueError(outcome, parent.empty()
+			                            ? string("GetCatalogs (below the Data Catalog of the current account)")
+			                            : StringUtil::Format("GetCatalogs (below catalog '%s')", parent));
 		}
 		for (auto &child : outcome.GetResult().GetCatalogList()) {
 			result.push_back(ToCatalogInfo(child));

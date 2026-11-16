@@ -59,7 +59,9 @@ template <class OUTCOME>
 	auto &error = outcome.GetError();
 	auto message = Exception::ConstructMessage("Glue %s failed: %s (%s)", operation, ToStdString(error.GetMessage()),
 	                                           ToStdString(error.GetExceptionName()));
-	throw GlueException(message, error.GetErrorType() == Aws::Glue::GlueErrors::ACCESS_DENIED);
+	bool unknown_call =
+	    error.GetExceptionName().empty() && error.GetResponseCode() != Aws::Http::HttpResponseCode::REQUEST_NOT_MADE;
+	throw GlueException(message, error.GetErrorType() == Aws::Glue::GlueErrors::ACCESS_DENIED, unknown_call);
 }
 
 template <class OUTCOME>
