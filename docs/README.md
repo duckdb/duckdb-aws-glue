@@ -125,8 +125,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   registered, including a `//` in its path. A table without data files (just created) scans as empty.
 - A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
   rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
-  ones, which such a table usually has none of, so a scan would silently read nothing. `glue_repair_table` is refused
-  for the same reason. To read it, set `projection.enabled` to `false` and register its partitions (`ALTER TABLE ...
+  ones, which such a table usually has none of, so a scan would silently read nothing. Changing its partitions
+  (`glue_add_partition`, `glue_drop_partition`, `glue_rename_partition`, `glue_set_partition_location`,
+  `glue_repair_table` and their `ALTER TABLE` forms) is refused for the same reason. To read it, set `projection.enabled` to `false` and register its partitions (`ALTER TABLE ...
   ADD PARTITION`, `glue_add_partition`, `glue_repair_table`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its

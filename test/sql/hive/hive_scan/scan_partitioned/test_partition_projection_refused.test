@@ -66,11 +66,47 @@ COPY my_datalake.default.pp_events FROM '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_src
 ----
 INSERT into Glue table 'pp_events' is not supported: the table uses Athena partition projection
 
-# and so is a repair: the partitions it would register are ignored by Athena too
+# and so is any change to its partitions, which Athena ignores too
 statement error
 SELECT * FROM glue_repair_table('my_datalake.default.pp_events');
 ----
-Not implemented Error: glue_repair_table of Glue table 'default.pp_events' is not supported: the table uses Athena partition projection (projection.enabled), so the partitions it would register are ignored by Athena. Set projection.enabled to false to repair it
+Not implemented Error: glue_repair_table on Glue table 'default.pp_events' is not supported: the table uses Athena partition projection (projection.enabled), so Athena ignores the partitions registered in Glue. Set projection.enabled to false to change its partitions
+
+statement error
+CALL glue_add_partition('my_datalake.default.pp_events', {region: 'us', hour: 7});
+----
+Not implemented Error: glue_add_partition on Glue table 'default.pp_events' is not supported: the table uses Athena partition projection
+
+statement error
+CALL glue_drop_partition('my_datalake.default.pp_events', {region: 'us', hour: 7}, if_exists := true);
+----
+Not implemented Error: glue_drop_partition on Glue table 'default.pp_events' is not supported: the table uses Athena partition projection
+
+statement error
+CALL glue_rename_partition('my_datalake.default.pp_events', {region: 'us', hour: 7}, {region: 'eu', hour: 7});
+----
+Not implemented Error: glue_rename_partition on Glue table 'default.pp_events' is not supported: the table uses Athena partition projection
+
+statement error
+CALL glue_set_partition_location('my_datalake.default.pp_events', {region: 'us', hour: 7}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_elsewhere');
+----
+Not implemented Error: glue_set_partition_location on Glue table 'default.pp_events' is not supported: the table uses Athena partition projection
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement error
+ALTER TABLE my_datalake.default.pp_events ADD PARTITION (region = 'us', hour = 7);
+----
+Not implemented Error: ALTER TABLE ADD PARTITION on Glue table 'default.pp_events' is not supported: the table uses Athena partition projection
+
+statement error
+ALTER TABLE my_datalake.default.pp_events DROP IF EXISTS PARTITION (region = 'us', hour = 7);
+----
+Not implemented Error: ALTER TABLE DROP PARTITION on Glue table 'default.pp_events' is not supported: the table uses Athena partition projection
+
+statement ok
+RESET active_grammar_extensions;
 
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.pp_events');

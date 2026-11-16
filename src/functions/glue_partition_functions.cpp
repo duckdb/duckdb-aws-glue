@@ -68,6 +68,16 @@ void ThrowIfForeignLayout(const string &operation, const GluePartitionTarget &ta
 	    operation, target.TableName(), table.input_format, HiveFileFormatToString(file_format));
 }
 
+void ThrowIfPartitionProjected(const string &operation, const GluePartitionTarget &target) {
+	if (!target.table.IsPartitionProjected()) {
+		return;
+	}
+	throw NotImplementedException("%s on Glue table '%s' is not supported: the table uses Athena partition projection "
+	                              "(projection.enabled), so Athena ignores the partitions registered in Glue. Set "
+	                              "projection.enabled to false to change its partitions",
+	                              operation, target.TableName());
+}
+
 Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
                             const LogicalType &type) {
 	try {
@@ -316,6 +326,7 @@ unique_ptr<FunctionData> GlueAddPartitionBind(ClientContext &context, TableFunct
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_add_partition", input.inputs[0]);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_add_partition");
+	ThrowIfPartitionProjected("glue_add_partition", result->target);
 	ThrowIfForeignLayout("glue_add_partition", result->target);
 	result->values = ParsePartitionSpec("glue_add_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
@@ -362,6 +373,7 @@ unique_ptr<FunctionData> GlueDropPartitionBind(ClientContext &context, TableFunc
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_drop_partition", input.inputs[0]);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_drop_partition");
+	ThrowIfPartitionProjected("glue_drop_partition", result->target);
 	result->values = ParsePartitionSpec("glue_drop_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
@@ -400,6 +412,7 @@ unique_ptr<FunctionData> GlueRenamePartitionBind(ClientContext &context, TableFu
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_rename_partition", input.inputs[0]);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_rename_partition");
+	ThrowIfPartitionProjected("glue_rename_partition", result->target);
 	result->values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[1]);
 	result->new_values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[2]);
 	names = {"location"};
@@ -448,6 +461,7 @@ unique_ptr<FunctionData> GlueSetPartitionLocationBind(ClientContext &context, Ta
 	auto result = make_uniq<GluePartitionChangeBindData>();
 	result->target = ResolveGlueTable(context, "glue_set_partition_location", input.inputs[0]);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_set_partition_location");
+	ThrowIfPartitionProjected("glue_set_partition_location", result->target);
 	result->values = ParsePartitionSpec("glue_set_partition_location", result->target, input.inputs[1]);
 	result->location = ParseLocation("glue_set_partition_location", input.inputs[2]);
 	names = {"location"};
@@ -778,19 +792,23 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		step.if_not_exists = !if_not_exists.IsNull() && if_not_exists.GetValue<bool>();
 		step.if_exists = !if_exists.IsNull() && if_exists.GetValue<bool>();
 		if (name == "add") {
+			ThrowIfPartitionProjected("ALTER TABLE ADD PARTITION", result->target);
 			ThrowIfForeignLayout("ALTER TABLE ADD PARTITION", result->target);
 			step.action = GlueAlterAction::ADD;
 			step.values = ParsePartitionPairsValue("ALTER TABLE ADD PARTITION", result->target, partition);
 			step.location = location.IsNull() ? DefaultPartitionLocation(result->target, step.values)
 			                                  : ParseLocation("ALTER TABLE ADD PARTITION", location);
 		} else if (name == "drop") {
+			ThrowIfPartitionProjected("ALTER TABLE DROP PARTITION", result->target);
 			step.action = GlueAlterAction::DROP;
 			step.values = ParsePartitionPairsValue("ALTER TABLE DROP PARTITION", result->target, partition);
 		} else if (name == "rename") {
+			ThrowIfPartitionProjected("ALTER TABLE RENAME PARTITION", result->target);
 			step.action = GlueAlterAction::RENAME;
 			step.values = ParsePartitionPairsValue("ALTER TABLE RENAME PARTITION", result->target, partition);
 			step.new_values = ParsePartitionPairsValue("ALTER TABLE RENAME PARTITION", result->target, new_partition);
 		} else if (name == "set_partition_location") {
+			ThrowIfPartitionProjected("ALTER TABLE PARTITION SET LOCATION", result->target);
 			step.action = GlueAlterAction::SET_PARTITION_LOCATION;
 			step.values = ParsePartitionPairsValue("ALTER TABLE PARTITION SET LOCATION", result->target, partition);
 			step.location = ParseLocation("ALTER TABLE PARTITION SET LOCATION", location);

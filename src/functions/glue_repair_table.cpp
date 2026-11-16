@@ -67,13 +67,7 @@ unique_ptr<FunctionData> GlueRepairTableBind(ClientContext &context, TableFuncti
 	auto result = make_uniq<GlueRepairTableBindData>();
 	result->target = ResolveGlueTable(context, "glue_repair_table", input.inputs[0]);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_repair_table");
-	// Athena derives the partitions of such a table from its projection.* parameters, not from the ones in Glue
-	if (result->target.table.IsPartitionProjected()) {
-		throw NotImplementedException("glue_repair_table of Glue table '%s' is not supported: the table uses Athena "
-		                              "partition projection (projection.enabled), so the partitions it would register "
-		                              "are ignored by Athena. Set projection.enabled to false to repair it",
-		                              result->target.TableName());
-	}
+	ThrowIfPartitionProjected("glue_repair_table", result->target);
 	auto &table = result->target.table;
 	// the partitions are read from the directory layout Hive writes; another engine's InputFormat lays files out its
 	// way
