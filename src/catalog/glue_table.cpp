@@ -219,6 +219,17 @@ namespace {
 //! once it runs: every Glue request of a real scan would carry the id of the attached catalog.
 struct ChildCatalogTableData : public TableFunctionData {
 	string error;
+
+public:
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<ChildCatalogTableData>();
+		result->column_ids = column_ids;
+		result->error = error;
+		return std::move(result);
+	}
+	bool Equals(const FunctionData &other) const override {
+		return error == other.Cast<ChildCatalogTableData>().error;
+	}
 };
 
 unique_ptr<GlobalTableFunctionState> ChildCatalogTableInit(ClientContext &context, TableFunctionInitInput &input) {
