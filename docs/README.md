@@ -202,9 +202,9 @@ their codec themselves.
   parameters, except other engines' spellings of options this extension spells differently, which would do nothing
   there: `partitioned_by`, `partitioning`, `partition_by`, `partition_columns`, `partition_keys` and `PartitionKeys`
   (use `PARTITIONED BY (...)`), `external_location` (use `location`) and
-  `field_delimiter` (use `delimiter`) are refused. Column types are stored as Hive types. `HUGEINT` and `UHUGEINT`
-  (e.g. `sum()` of an integer column) are stored as `decimal(38,0)`, and `CREATE TABLE ... AS` writes them as such, so
-  a value beyond 38 digits fails the statement. Other DuckDB types without a Hive type are refused, e.g. `UBIGINT`,
+  `field_delimiter` (use `delimiter`) are refused. Column types are stored as Hive types. `HUGEINT` (e.g. `sum()` of
+  an integer column) is stored as `decimal(38,0)`, and `CREATE TABLE ... AS` writes it as such, so a value beyond 38
+  digits fails the statement. Other DuckDB types without a Hive type are refused, e.g. `UBIGINT`, `UHUGEINT`,
   `INTERVAL` and `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with

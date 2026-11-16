@@ -240,7 +240,6 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	case LogicalTypeId::UINTEGER:
 		return "bigint";
 	case LogicalTypeId::HUGEINT:
-	case LogicalTypeId::UHUGEINT:
 		return "decimal(38,0)";
 	case LogicalTypeId::FLOAT:
 		return "float";
