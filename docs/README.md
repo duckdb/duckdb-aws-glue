@@ -272,7 +272,7 @@ their codec themselves.
   USING <expr>` is refused, since the data files can not be rewritten.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`, and avro
-  with `avro.output.codec`. A table without its format's codec parameter is written with `write_compression`, if it
+  with `avro.output.codec` (snappy, deflate, bzip2 or zstandard). A table without its format's codec parameter is written with `write_compression`, if it
   records one. Another codec is an error.
 - `ALTER TABLE ... RENAME COLUMN` is supported for csv tables, whose files are read by position. Parquet, json and
   avro files are matched by name, so a rename would make the existing data read as NULL and is refused (replace the
