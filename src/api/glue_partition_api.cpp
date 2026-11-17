@@ -322,99 +322,162 @@ static constexpr idx_t GLUE_DEFAULT_PARTITION_SEGMENTS = 8;
 //! The maximum Glue accepts for Segment::TotalSegments
 static constexpr idx_t GLUE_MAX_PARTITION_SEGMENTS = 10;
 
-//! Whether Glue refused a request for its rate (ThrottlingException, an HTTP 429 or 503), which retrying later may get
-//! through, rather than for the request itself
-template <class ERROR>
-static bool IsThrottlingError(const ERROR &error) {
-	auto type = error.GetErrorType();
-	auto code = error.GetResponseCode();
-	return type == Aws::Glue::GlueErrors::THROTTLING || type == Aws::Glue::GlueErrors::SLOW_DOWN ||
-	       code == Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS ||
-	       code == Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE ||
-	       error.GetExceptionName() == "ThrottlingException";
+//! One GetPartitions request for segment 'segment_number' of a table (the whole table when 'total_segments' is 1):
+//! appends the page at 'next_token' to 'result' and returns the token of the next page, empty after the last one
+static Aws::String FetchPartitionPage(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
+                                      const string &database_name, const string &table_name, int segment_number,
+                                      int total_segments, const Aws::String &next_token,
+                                      vector<GluePartitionInfo> &result) {
+	Aws::Glue::Model::GetPartitionsRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetTableName(table_name);
+	request.SetMaxResults(GLUE_PARTITIONS_PAGE_SIZE);
+	if (total_segments > 1) {
+		Aws::Glue::Model::Segment segment;
+		segment.SetSegmentNumber(segment_number);
+		segment.SetTotalSegments(total_segments);
+		request.SetSegment(segment);
+	}
+	if (!next_token.empty()) {
+		request.SetNextToken(next_token);
+	}
+	auto outcome = client.GetPartitions(request);
+	if (!outcome.IsSuccess()) {
+		ThrowGlueError(outcome, StringUtil::Format("GetPartitions '%s.%s'", database_name, table_name));
+	}
+	auto &partitions = outcome.GetResult();
+	for (auto &partition : partitions.GetPartitions()) {
+		GluePartitionInfo info;
+		for (auto &value : partition.GetValues()) {
+			info.values.push_back(ToStdString(value));
+		}
+		auto &storage_descriptor = partition.GetStorageDescriptor();
+		info.location = ToStdString(storage_descriptor.GetLocation());
+		info.input_format = ToStdString(storage_descriptor.GetInputFormat());
+		info.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
+		info.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
+		info.partition_columns = ToColumns(storage_descriptor.GetColumns());
+		result.push_back(std::move(info));
+	}
+	return partitions.GetNextToken();
 }
 
-//! One chain of GetPartitions requests: pages through the partitions of segment 'segment_number' (the whole table
-//! when 'total_segments' is 1) and appends them to 'result'. A failed request throws, and sets 'throttled' when Glue
-//! refused it for its rate. With 'stop', returns false without sending the next request once it is set.
-static bool FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
-                                  const string &database_name, const string &table_name, int segment_number,
-                                  int total_segments, vector<GluePartitionInfo> &result, bool *throttled = nullptr,
-                                  const std::atomic<bool> *stop = nullptr) {
-	Aws::String next_token;
-	do {
-		if (stop && stop->load()) {
-			return false;
-		}
-		Aws::Glue::Model::GetPartitionsRequest request;
-		SetCatalogId(request, catalog);
-		request.SetDatabaseName(database_name);
-		request.SetTableName(table_name);
-		request.SetMaxResults(GLUE_PARTITIONS_PAGE_SIZE);
-		if (total_segments > 1) {
-			Aws::Glue::Model::Segment segment;
-			segment.SetSegmentNumber(segment_number);
-			segment.SetTotalSegments(total_segments);
-			request.SetSegment(segment);
-		}
-		if (!next_token.empty()) {
-			request.SetNextToken(next_token);
-		}
-		auto outcome = client.GetPartitions(request);
-		if (!outcome.IsSuccess()) {
-			if (throttled) {
-				*throttled = IsThrottlingError(outcome.GetError());
-			}
-			ThrowGlueError(outcome, StringUtil::Format("GetPartitions '%s.%s'", database_name, table_name));
-		}
-		auto &partitions = outcome.GetResult();
-		for (auto &partition : partitions.GetPartitions()) {
-			GluePartitionInfo info;
-			for (auto &value : partition.GetValues()) {
-				info.values.push_back(ToStdString(value));
-			}
-			auto &storage_descriptor = partition.GetStorageDescriptor();
-			info.location = ToStdString(storage_descriptor.GetLocation());
-			info.input_format = ToStdString(storage_descriptor.GetInputFormat());
-			info.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
-			info.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
-			info.partition_columns = ToColumns(storage_descriptor.GetColumns());
-			result.push_back(std::move(info));
-		}
-		next_token = partitions.GetNextToken();
-	} while (!next_token.empty());
-	return true;
-}
+namespace {
 
+//! The partitions of one segment of a table
+struct PartitionSegment {
+	PartitionSegment(const string &database_name, const string &table_name, int number)
+	    : database_name(database_name), table_name(table_name), number(number) {
+	}
+
+	const string &database_name;
+	const string &table_name;
+	int number;
+	vector<GluePartitionInfo> partitions;
+	//! Set once the last page was fetched
+	bool complete = false;
+};
+
+//! What the tasks of one TaskExecutor share
+struct PartitionFetchState {
+	Aws::Glue::GlueClient &client;
+	const GlueCatalog &catalog;
+	int total_segments;
+	//! glue_debug_fail_partition_loads: the AWS error each request fails with before it is sent, or empty
+	string injected_error;
+	//! Set when Glue refused a request for the request rate
+	std::atomic<bool> throttled {false};
+};
+
+//! Pages through one segment. A failed request throws, which makes the executor drop the tasks that have not started;
+//! a task already paging stops before its next request, leaving its segment incomplete.
 class FetchPartitionSegmentTask : public BaseExecutorTask {
 public:
-	FetchPartitionSegmentTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
-	                          const GlueCatalog &catalog, const string &database_name, const string &table_name,
-	                          int segment_number, int total_segments, vector<GluePartitionInfo> &result)
-	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), database_name(database_name),
-	      table_name(table_name), segment_number(segment_number), total_segments(total_segments), result(result) {
+	FetchPartitionSegmentTask(TaskExecutor &executor, ClientContext &context, PartitionFetchState &state,
+	                          PartitionSegment &segment)
+	    : BaseExecutorTask(executor), context(context), state(state), segment(segment) {
 	}
 
 	void ExecuteTask() override {
 		// thread local: without it a worker's requests use the database level HTTP settings and stay out of this
 		// connection's HTTP log
 		GlueHttpClientContextScope http_scope(context);
-		FetchPartitionSegment(client, catalog, database_name, table_name, segment_number, total_segments, result);
+		Aws::String next_token;
+		do {
+			if (executor.HasError()) {
+				return;
+			}
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			try {
+				next_token = FetchPage(next_token);
+			} catch (GlueException &ex) {
+				if (ex.throttled) {
+					state.throttled = true;
+				}
+				throw;
+			}
+		} while (!next_token.empty());
+		segment.complete = true;
 	}
 	string TaskType() const override {
 		return "FetchPartitionSegmentTask";
 	}
 
 private:
+	Aws::String FetchPage(const Aws::String &next_token) {
+		if (!state.injected_error.empty()) {
+			throw GlueException(StringUtil::Format("Glue GetPartitions '%s.%s' failed: injected by "
+			                                       "glue_debug_fail_partition_loads (%s)",
+			                                       segment.database_name, segment.table_name, state.injected_error),
+			                    false, state.injected_error == "ThrottlingException");
+		}
+		return FetchPartitionPage(state.client, state.catalog, segment.database_name, segment.table_name,
+		                          segment.number, state.total_segments, next_token, segment.partitions);
+	}
+
+private:
 	ClientContext &context;
-	Aws::Glue::GlueClient &client;
-	const GlueCatalog &catalog;
-	const string &database_name;
-	const string &table_name;
-	int segment_number;
-	int total_segments;
-	vector<GluePartitionInfo> &result;
+	PartitionFetchState &state;
+	PartitionSegment &segment;
 };
+
+} // namespace
+
+//! Runs the segments as tasks on DuckDB's async threads; the first error is returned
+static ErrorData FetchPartitionSegments(ClientContext &context, PartitionFetchState &state,
+                                        vector<unique_ptr<PartitionSegment>> &segments) {
+	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+	vector<unique_ptr<BaseExecutorTask>> tasks;
+	for (auto &segment : segments) {
+		tasks.push_back(make_uniq<FetchPartitionSegmentTask>(executor, context, state, *segment));
+	}
+	try {
+		executor.ScheduleTasks(std::move(tasks));
+		executor.WorkOnTasks();
+	} catch (std::exception &ex) {
+		return ErrorData(ex);
+	}
+	return ErrorData();
+}
+
+//! The partitions of a table's segments, in segment order. A Glue compatible server that ignores Segment answers every
+//! segment with the whole table: the values identify a partition, so one seen already is dropped
+static vector<GluePartitionInfo> MergeSegments(vector<reference<PartitionSegment>> &segments) {
+	vector<GluePartitionInfo> result;
+	unordered_set<string> seen;
+	for (auto &segment : segments) {
+		for (auto &partition : segment.get().partitions) {
+			if (segments.size() > 1 && !seen.insert(StringUtil::Join(partition.values, "\x1f")).second) {
+				continue;
+			}
+			result.push_back(std::move(partition));
+		}
+	}
+	return result;
+}
 
 //! The number of GetPartitions requests to run at the same time: the setting when it is given, otherwise one request
 //! against a server given with ENDPOINT (moto ignores Segment and answers every segment with the whole table) and
@@ -439,37 +502,30 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	auto total_segments = GetPartitionSegmentCount(context, catalog);
-	vector<vector<GluePartitionInfo>> segment_results(NumericCast<idx_t>(total_segments));
-
 	if (total_segments == 1) {
-		FetchPartitionSegment(*client, catalog, database_name, table_name, 0, 1, segment_results[0]);
-	} else {
-		// the segments do not overlap, so their requests can run at the same time
-		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
-		for (int segment = 0; segment < total_segments; segment++) {
-			executor.ScheduleTask(make_uniq<FetchPartitionSegmentTask>(
-			    executor, context, *client, catalog, database_name, table_name, segment, total_segments,
-			    segment_results[NumericCast<idx_t>(segment)]));
-		}
-		executor.WorkOnTasks();
+		vector<GluePartitionInfo> result;
+		Aws::String next_token;
+		do {
+			next_token = FetchPartitionPage(*client, catalog, database_name, table_name, 0, 1, next_token, result);
+		} while (!next_token.empty());
+		return result;
 	}
-
-	vector<GluePartitionInfo> result;
-	unordered_set<string> seen;
-	for (auto &segment_result : segment_results) {
-		for (auto &partition : segment_result) {
-			// A Glue compatible server that ignores Segment answers every segment with the whole table: the values
-			// identify the partition, so what was seen already is dropped here
-			if (total_segments > 1 && !seen.insert(StringUtil::Join(partition.values, "\x1f")).second) {
-				continue;
-			}
-			result.push_back(std::move(partition));
-		}
+	// the segments do not overlap, so their requests can run at the same time
+	PartitionFetchState state {*client, catalog, total_segments, string()};
+	vector<unique_ptr<PartitionSegment>> segments;
+	vector<reference<PartitionSegment>> table_segments;
+	for (int segment = 0; segment < total_segments; segment++) {
+		segments.push_back(make_uniq<PartitionSegment>(database_name, table_name, segment));
+		table_segments.push_back(*segments.back());
 	}
-	return result;
+	auto error = FetchPartitionSegments(context, state, segments);
+	if (error.HasError()) {
+		error.Throw();
+	}
+	return MergeSegments(table_segments);
 }
 
-//! glue_debug_fail_partition_loads: the AWS error every request of GetPartitionsOfTables fails with, unsent
+//! glue_debug_fail_partition_loads
 static string DebugFailPartitionLoads(ClientContext &context) {
 	Value setting;
 	if (context.TryGetCurrentSetting("glue_debug_fail_partition_loads", setting) && !setting.IsNull()) {
@@ -478,132 +534,39 @@ static string DebugFailPartitionLoads(ClientContext &context) {
 	return string();
 }
 
-namespace {
-
-//! What the segments of one table of GetPartitionsOfTables fetched, and its first error
-struct PartitionLoadSlot {
-	mutex lock;
-	vector<vector<GluePartitionInfo>> segments;
-	vector<bool> fetched;
-	string error;
-	bool throttled = false;
-};
-
-//! A failure is kept in the table's slot and stops the requests not yet sent; an interrupt is rethrown
-class PartitionLoadSegmentTask : public BaseExecutorTask {
-public:
-	PartitionLoadSegmentTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
-	                         const GlueCatalog &catalog, const GluePartitionLoad &table, int segment_number,
-	                         int total_segments, const string &injected, std::atomic<bool> &stop,
-	                         PartitionLoadSlot &slot)
-	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), table(table),
-	      segment_number(segment_number), total_segments(total_segments), injected(injected), stop(stop), slot(slot) {
-	}
-
-	void ExecuteTask() override {
-		GlueHttpClientContextScope http_scope(context);
-		if (stop.load()) {
-			return;
-		}
-		bool throttled = false;
-		try {
-			if (context.IsInterrupted()) {
-				throw InterruptException();
-			}
-			if (!injected.empty()) {
-				throttled = injected == "ThrottlingException";
-				throw GlueException(StringUtil::Format("Glue GetPartitions '%s.%s' failed: injected by "
-				                                       "glue_debug_fail_partition_loads (%s)",
-				                                       table.database_name, table.table_name, injected),
-				                    false);
-			}
-			vector<GluePartitionInfo> result;
-			if (!FetchPartitionSegment(client, catalog, table.database_name, table.table_name, segment_number,
-			                           total_segments, result, &throttled, &stop)) {
-				return;
-			}
-			lock_guard<mutex> guard(slot.lock);
-			slot.segments[NumericCast<idx_t>(segment_number)] = std::move(result);
-			slot.fetched[NumericCast<idx_t>(segment_number)] = true;
-		} catch (std::exception &ex) {
-			stop = true;
-			ErrorData error(ex);
-			if (error.Type() == ExceptionType::INTERRUPT) {
-				throw;
-			}
-			lock_guard<mutex> guard(slot.lock);
-			if (slot.error.empty()) {
-				slot.error = error.RawMessage();
-				slot.throttled = throttled;
-			}
-		}
-	}
-	string TaskType() const override {
-		return "PartitionLoadSegmentTask";
-	}
-
-private:
-	ClientContext &context;
-	Aws::Glue::GlueClient &client;
-	const GlueCatalog &catalog;
-	const GluePartitionLoad &table;
-	int segment_number;
-	int total_segments;
-	const string &injected;
-	std::atomic<bool> &stop;
-	PartitionLoadSlot &slot;
-};
-
-} // namespace
-
-void GlueAPI::GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog, vector<GluePartitionLoad> &tables) {
+GluePartitionLoadResult GlueAPI::GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog,
+                                                       vector<GluePartitionLoad> &tables) {
+	GluePartitionLoadResult result;
 	if (tables.empty()) {
-		return;
+		return result;
 	}
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	auto total_segments = GetPartitionSegmentCount(context, catalog);
-	auto injected = DebugFailPartitionLoads(context);
-	vector<unique_ptr<PartitionLoadSlot>> slots;
-	std::atomic<bool> stop {false};
-	{
-		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
-		for (auto &table : tables) {
-			auto slot = make_uniq<PartitionLoadSlot>();
-			slot->segments.resize(NumericCast<idx_t>(total_segments));
-			slot->fetched.resize(NumericCast<idx_t>(total_segments), false);
-			for (int segment = 0; segment < total_segments; segment++) {
-				executor.ScheduleTask(make_uniq<PartitionLoadSegmentTask>(
-				    executor, context, *client, catalog, table, segment, total_segments, injected, stop, *slot));
-			}
-			slots.push_back(std::move(slot));
+	PartitionFetchState state {*client, catalog, total_segments, DebugFailPartitionLoads(context)};
+	vector<unique_ptr<PartitionSegment>> segments;
+	for (auto &table : tables) {
+		for (int segment = 0; segment < total_segments; segment++) {
+			segments.push_back(make_uniq<PartitionSegment>(table.database_name, table.table_name, segment));
 		}
-		executor.WorkOnTasks();
 	}
-	for (idx_t i = 0; i < tables.size(); i++) {
-		auto &table = tables[i];
-		auto &slot = *slots[i];
-		table.error = std::move(slot.error);
-		table.throttled = slot.throttled;
-		bool complete = table.error.empty();
-		for (auto fetched : slot.fetched) {
-			complete = complete && fetched;
+	result.error = FetchPartitionSegments(context, state, segments);
+	result.throttled = state.throttled;
+	auto segments_per_table = NumericCast<idx_t>(total_segments);
+	for (idx_t table_index = 0; table_index < tables.size(); table_index++) {
+		vector<reference<PartitionSegment>> table_segments;
+		bool complete = true;
+		for (idx_t segment = 0; segment < segments_per_table; segment++) {
+			auto &table_segment = *segments[table_index * segments_per_table + segment];
+			complete = complete && table_segment.complete;
+			table_segments.push_back(table_segment);
 		}
-		if (!complete) {
-			continue;
+		if (complete) {
+			tables[table_index].partitions =
+			    make_shared_ptr<const vector<GluePartitionInfo>>(MergeSegments(table_segments));
 		}
-		// as GetPartitions assembles one table's segments
-		unordered_set<string> seen;
-		for (auto &segment_result : slot.segments) {
-			for (auto &partition : segment_result) {
-				if (total_segments > 1 && !seen.insert(StringUtil::Join(partition.values, "\x1f")).second) {
-					continue;
-				}
-				table.partitions.push_back(std::move(partition));
-			}
-		}
-		table.loaded = true;
 	}
+	return result;
 }
 
 //! glue_debug_fail_partition_registration, '<error code>:<index>': the partition at 'index' of a registration and

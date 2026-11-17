@@ -5,6 +5,7 @@
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/planner/planner_extension.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "catalog/glue_attach.hpp"
@@ -13,6 +14,7 @@
 #include "functions/glue_repair_table.hpp"
 #include "execution/glue_written_files.hpp"
 #include "grammar/glue_grammar.hpp"
+#include "planning/hive_partition_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
@@ -81,16 +83,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	config.AddExtensionOption("glue_partition_load_parallelism",
-	                          "How many partitioned Glue tables of a query load their partitions at the same time, "
-	                          "when the query first estimates its scans; each scan would otherwise load its table "
-	                          "after the one before it. The same requests are sent either way. A table whose load "
-	                          "fails is loaded by its scan as before, and the query's remaining tables one at a "
-	                          "time. 1 loads one table at a time. Default 8.",
+	                          "The number of partitioned Glue tables a statement scans whose partitions are loaded "
+	                          "concurrently, once the statement is bound. 1 loads each table's partitions on its own, "
+	                          "when its scan first needs them. Default 8.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(8));
 	config.AddExtensionOption("glue_partition_load_cooldown",
-	                          "Seconds the partitions of a Glue catalog load one table at a time, in every connection, "
-	                          "after Glue throttled a load of several tables at once "
-	                          "(glue_partition_load_parallelism). Default 300.",
+	                          "After Glue throttles a concurrent partition load (glue_partition_load_parallelism), the "
+	                          "number of seconds every connection loads that Glue catalog's tables one at a time. "
+	                          "Default 300.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(300));
 	config.AddExtensionOption("glue_max_retries",
 	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
@@ -179,9 +179,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "nothing.",
 	    LogicalType::VARCHAR, Value(""), GlueAPI::CheckDebugFailPartitionRegistration, SetScope::SESSION, true);
 	config.AddExtensionOption("glue_debug_fail_partition_loads",
-	                          "For tests: an AWS error name (ThrottlingException, InternalServiceException, ...) with "
-	                          "which every GetPartitions request of a load of several tables at once fails before it "
-	                          "is sent; a scan's own load is left alone. Empty, the default, injects nothing.",
+	                          "For tests: an AWS error name (ThrottlingException, InternalServiceException, ...) that "
+	                          "every GetPartitions request of a concurrent partition load fails with, before it is "
+	                          "sent. A scan loading its own table's partitions is not affected. Empty, the default, "
+	                          "injects nothing.",
 	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::SESSION, true);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
@@ -201,6 +202,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	}
 	// ATTACH '<catalog id>' (TYPE GLUE)
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
+	PlannerExtension partition_prefetch;
+	partition_prefetch.post_bind_function = PrefetchHivePartitions;
+	PlannerExtension::Register(config, std::move(partition_prefetch));
 
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());
 	loader.RegisterFunction(GetGlueGetDatabaseResponseFunction());

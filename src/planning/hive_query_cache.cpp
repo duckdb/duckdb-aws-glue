@@ -85,55 +85,16 @@ string HiveQueryCache::TableKey(const string &catalog, const string &database, c
 }
 
 void HiveQueryCache::QueryEnd(ClientContext &context) {
+	partitions.Clear();
 	annotated_lock_guard<annotated_mutex> guard(lock);
-	glue_tables.clear();
 	samples.clear();
 	directory_listings.clear();
 	scan_count = 0;
-	registered_scans.clear();
-	parallel_loads_stopped = false;
 }
 
 idx_t HiveQueryCache::NextScanId() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	return ++scan_count;
-}
-
-void HiveQueryCache::RegisterScan(const shared_ptr<HiveScanInfo> &scan) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	registered_scans.push_back(scan);
-}
-
-vector<shared_ptr<HiveScanInfo>> HiveQueryCache::TakeRegisteredScans() {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	vector<shared_ptr<HiveScanInfo>> scans;
-	for (auto &registered : registered_scans) {
-		auto scan = registered.lock();
-		if (scan) {
-			scans.push_back(std::move(scan));
-		}
-	}
-	registered_scans.clear();
-	return scans;
-}
-
-bool HiveQueryCache::ParallelLoadsStopped() {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	return parallel_loads_stopped;
-}
-
-void HiveQueryCache::StopParallelLoads() {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	parallel_loads_stopped = true;
-}
-
-shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &entry = glue_tables[key];
-	if (!entry) {
-		entry = make_shared_ptr<GlueTableEntry>();
-	}
-	return entry;
 }
 
 shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) {
@@ -170,23 +131,6 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 		entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, key));
 	}
 	return entry->listing;
-}
-
-shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {
-	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
-	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
-	// per table, so the Glue calls for different tables do not wait on each other
-	annotated_lock_guard<annotated_mutex> guard(entry->lock);
-	if (!entry->partitions) {
-		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
-		auto load = [&]() {
-			return make_shared_ptr<const vector<GluePartitionInfo>>(
-			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
-		};
-		auto cache = GlueTransactionCache::Of(context, catalog);
-		entry->partitions = cache ? cache->GetPartitions(info.database_name, info.table_name, load) : load();
-	}
-	return entry->partitions;
 }
 
 } // namespace duckdb

@@ -6,17 +6,11 @@
 #include "duckdb/main/client_context_state.hpp"
 
 #include "core/glue_info.hpp"
+#include "planning/hive_partition_cache.hpp"
 
 namespace duckdb {
 struct HiveScanInfo;
 struct HiveTableSample;
-
-//! What Glue said about a table the running query scans
-struct GlueTableEntry {
-	annotated_mutex lock;
-	//! Null until the first scan of a partitioned table asks Glue for them
-	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
-};
 
 //! The sample of a table, measured once per query for every scan of the table
 struct HiveTableSampleEntry {
@@ -39,13 +33,14 @@ struct HiveDirectoryListingEntry {
 class HiveQueryCache : public ClientContextState {
 public:
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);
-	//! The key of a Glue table in GetGlueTable
+	//! The key of a Glue table in the query's caches
 	static string TableKey(const string &catalog, const string &database, const string &table);
 
 	void QueryEnd(ClientContext &context) override;
 
-	//! 'key' identifies the table (TableKey)
-	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
+	HivePartitionCache &Partitions() {
+		return partitions;
+	}
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
 	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
@@ -54,28 +49,15 @@ public:
 	                                              bool cache_in_connection = false);
 	//! The id of the next scan bound in this query, starting at 1
 	idx_t NextScanId();
-	//! Held weakly: a scan the optimizer removes is gone with its bind data, and its table is not loaded for it
-	void RegisterScan(const shared_ptr<HiveScanInfo> &scan);
-	vector<shared_ptr<HiveScanInfo>> TakeRegisteredScans();
-	//! Set once a parallel load of this query failed: its remaining tables load one at a time
-	bool ParallelLoadsStopped();
-	void StopParallelLoads();
 
 private:
+	HivePartitionCache partitions;
 	annotated_mutex lock;
-	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
 	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;
-	vector<weak_ptr<HiveScanInfo>> registered_scans DUCKDB_GUARDED_BY(lock);
-	bool parallel_loads_stopped DUCKDB_GUARDED_BY(lock) = false;
 };
 
-//! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table
-shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info);
-//! Load at once the partitions the query's remaining scans would load one after another as each is estimated. A
-//! table whose load fails is left to its scan; only an interrupt is thrown.
-void LoadPartitionsTogether(ClientContext &context);
 //! Drop the connection's cached directory listings
 void ClearHiveListingCache(ClientContext &context);
 

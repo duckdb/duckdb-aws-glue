@@ -1,0 +1,138 @@
+# name: test/sql/hive/logging/partition_prefetch_throttling.test
+# description: a partition prefetch Glue answers with a real ThrottlingException stops prefetches against that catalog for glue_partition_load_cooldown, and the error reaches the query from the scans' own loads
+# group: [logging]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.fault_throttled_ppt;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.fault_throttled_ppt.a;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.fault_throttled_ppt.b;
+
+statement ok
+CREATE TABLE my_datalake.fault_throttled_ppt.a (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.fault_throttled_ppt.a VALUES (1, 'x'), (2, 'y');
+
+statement ok
+CREATE TABLE my_datalake.fault_throttled_ppt.b (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.fault_throttled_ppt.b VALUES (1, 'x'), (2, 'y');
+
+# every request on a fault_throttled* database is refused once with ThrottlingException, then let through
+statement ok
+attach '{GLUE_CATALOG_ID}' as throttled (TYPE glue, ENDPOINT '{GLUE_FAULT_ENDPOINT}');
+
+# the tables are resolved (with retries) and kept, so that only GetPartitions runs without retries below
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok
+DESCRIBE throttled.fault_throttled_ppt.a;
+
+statement ok
+DESCRIBE throttled.fault_throttled_ppt.b;
+
+statement ok
+CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
+
+# Without retries the prefetch is throttled, and so are the scans' own loads after it
+statement ok
+SET glue_max_retries = 0;
+
+statement error
+SELECT count(*) FROM throttled.fault_throttled_ppt.a JOIN throttled.fault_throttled_ppt.b USING (id);
+----
+<REGEX>:.*GetPartitions 'fault_throttled_ppt\.(a|b)' failed:.*ThrottlingException.*
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') LIKE
+           'loaded 0 of 2 tables; the others load when their scans need them: %ThrottlingException%; Glue throttled the requests: no prefetch against this catalog for 300 s'
+FROM duckdb_logs_parsed('GlueScan');
+----
+true
+
+# With retries the query gets through, its tables loaded one at a time during the cool-down
+statement ok
+RESET glue_max_retries;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM throttled.fault_throttled_ppt.a JOIN throttled.fault_throttled_ppt.b USING (id);
+----
+2
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+skipped 2 tables: Glue throttled a prefetch against this catalog less than 300 s ago
+
+# The cool-down is per Glue catalog: the same tables through moto directly are prefetched
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.fault_throttled_ppt.a JOIN my_datalake.fault_throttled_ppt.b USING (id);
+----
+2
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 2 of 2 tables
+
+# A retried throttle that then succeeds is not a throttled prefetch
+statement ok
+SET glue_partition_load_cooldown = 0;
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM throttled.fault_throttled_ppt.a JOIN throttled.fault_throttled_ppt.b USING (id);
+----
+2
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 2 of 2 tables
+
+statement ok
+RESET glue_partition_load_cooldown;
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DROP TABLE my_datalake.fault_throttled_ppt.a;
+
+statement ok
+DROP TABLE my_datalake.fault_throttled_ppt.b;
+
+statement ok
+DROP SCHEMA my_datalake.fault_throttled_ppt;

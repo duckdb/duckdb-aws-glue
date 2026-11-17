@@ -474,6 +474,10 @@ string GlueCatalog::KnownCatalogId() {
 	return StartsWithAccountId(options.catalog_id) ? options.catalog_id : string();
 }
 
+string GlueCatalog::GlueCatalogIdentity() const {
+	return options.catalog_id + "\x1f" + options.region + "\x1f" + options.endpoint;
+}
+
 string GlueCatalog::FetchCatalogId(ClientContext &context) {
 	{
 		lock_guard<mutex> guard(reported_id_lock);
