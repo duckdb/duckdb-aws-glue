@@ -12,12 +12,10 @@
 
 namespace duckdb {
 
-//! The longest expression GetPartitions accepts
 static constexpr idx_t GLUE_MAX_PARTITION_EXPRESSION_LENGTH = 2048;
 
 namespace {
 
-//! Writes the filters of one scan in Glue's partition filter syntax
 class GlueFilterWriter {
 public:
 	GlueFilterWriter(const HiveScanInfo &info, TableIndex table_index,
@@ -35,9 +33,6 @@ private:
 	const vector<PartitionKeyProjection> &projections;
 };
 
-} // namespace
-
-//! The partition key 'expr' refers to, if it is a column of this scan and the key's name needs no quoting
 optional_ptr<const string> GlueFilterWriter::PartitionKeyOf(const Expression &expr) const {
 	if (expr.GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 		return nullptr;
@@ -213,22 +208,24 @@ bool GlueFilterWriter::TryWrite(const Expression &filter, string &result) const 
 	return false;
 }
 
+} // namespace
+
 string GluePartitionExpression(const HiveScanInfo &info, TableIndex table_index,
                                const vector<PartitionKeyProjection> &projections,
                                const vector<unique_ptr<Expression>> &filters, unordered_set<idx_t> &used_filters) {
 	GlueFilterWriter writer(info, table_index, projections);
-	vector<string> parts;
+	string expression;
 	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
 		string part;
-		if (writer.TryWrite(*filters[filter_index], part)) {
-			parts.push_back("(" + part + ")");
-			used_filters.insert(filter_index);
+		if (!writer.TryWrite(*filters[filter_index], part)) {
+			continue;
 		}
-	}
-	auto expression = StringUtil::Join(parts, " AND ");
-	if (expression.size() > GLUE_MAX_PARTITION_EXPRESSION_LENGTH) {
-		used_filters.clear();
-		return string();
+		auto candidate = expression.empty() ? "(" + part + ")" : expression + " AND (" + part + ")";
+		if (candidate.size() > GLUE_MAX_PARTITION_EXPRESSION_LENGTH) {
+			continue;
+		}
+		expression = std::move(candidate);
+		used_filters.insert(filter_index);
 	}
 	return expression;
 }
