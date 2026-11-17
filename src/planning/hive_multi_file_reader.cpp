@@ -1047,6 +1047,46 @@ static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &ge
 	}
 }
 
+//! The footers the optimizer had read for this query, if they are those of the scan's files in its order
+static vector<shared_ptr<BaseUnionData>> FootersOfScan(ClientContext &context, const MultiFileBindData &bind_data,
+                                                       const HiveScanInfo &scan_info) {
+	auto footers = HiveCachedFooters(context, scan_info);
+	if (footers.empty()) {
+		return footers;
+	}
+	idx_t file_index = 0;
+	for (const auto &file : bind_data.file_list->Files()) {
+		if (file_index >= footers.size() || !footers[file_index] || footers[file_index]->GetFileName() != file.path) {
+			return {};
+		}
+		file_index++;
+	}
+	if (file_index != footers.size()) {
+		return {};
+	}
+	return footers;
+}
+
+static unique_ptr<GlobalTableFunctionState> HiveScanInitGlobal(ClientContext &context, TableFunctionInitInput &input) {
+	auto &bind_data = input.bind_data->CastNoConst<MultiFileBindData>();
+	auto &scan_info = bind_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
+	if (!bind_data.union_readers.empty()) {
+		return scan_info.format_init_global(context, input);
+	}
+	// the reader opens files from their footers, so a file whose footer was read for statistics is not read again.
+	// Only for this run: a prepared statement's next execution lists the files again
+	bind_data.union_readers = FootersOfScan(context, bind_data, scan_info);
+	unique_ptr<GlobalTableFunctionState> result;
+	try {
+		result = scan_info.format_init_global(context, input);
+	} catch (...) {
+		bind_data.union_readers.clear();
+		throw;
+	}
+	bind_data.union_readers.clear();
+	return result;
+}
+
 //! The standard reader of a file format, which BindHiveScan wraps and HiveScanGetReaderCall names
 static string ReaderFunctionName(HiveFileFormat format) {
 	switch (format) {
@@ -1162,6 +1202,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	// and the row count comes from a sampled file rather than the format's constant
 	scan_info->format_cardinality = scan_function.cardinality;
 	scan_function.cardinality = HiveScanCardinality;
+	scan_info->format_init_global = scan_function.init_global;
+	scan_function.init_global = HiveScanInitGlobal;
 	scan_function.get_table_entry = HiveScanGetTableEntry;
 	// EXPLAIN (SQL) shows the scan as the standard reader calls that read its files
 	scan_function.to_sql = HiveScanToSQL;

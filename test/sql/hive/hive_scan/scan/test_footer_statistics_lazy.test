@@ -100,6 +100,66 @@ SELECT count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'footers';
 statement ok
 CALL disable_logging();
 
+# the scan opens its files from the footers read for statistics: each file gets one GET for its footer and one for
+# its data, and no range of a file is fetched twice
+statement ok
+SET enable_external_file_cache = false;
+
+statement ok
+SET parquet_metadata_cache = false;
+
+# the listing is told apart by its query string, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CREATE MACRO file_gets() AS TABLE
+    SELECT count(DISTINCT request.url) AS files, count(*) AS gets,
+           count(*) - count(DISTINCT (request.url, request.headers['Range'])) AS repeated
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.type = 'GET' AND request.url NOT LIKE '%list-type=2%';
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT sum(i) FROM lazy_lake.default.lazy_footers;
+----
+210
+
+query III
+FROM file_gets();
+----
+2	4	0
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT sum(i) FROM lazy_scan();
+----
+210
+
+query III
+FROM file_gets();
+----
+2	4	0
+
+statement ok
+CALL disable_logging();
+
+statement ok
+RESET redact_http_logs;
+
+statement ok
+RESET enable_external_file_cache;
+
+statement ok
+RESET parquet_metadata_cache;
+
 # with hive_footer_statistics_max_files = 0 there are none
 statement ok
 SET hive_footer_statistics_max_files = 0;

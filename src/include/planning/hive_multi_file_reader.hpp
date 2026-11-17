@@ -50,6 +50,9 @@ struct HiveScanInfo : public TableFunctionInfo {
 	table_statistics_extended_t format_statistics = nullptr;
 	//! The cardinality function of the bound file format reader, used once the footers of every file are read
 	table_function_cardinality_t format_cardinality = nullptr;
+	//! The init_global of the bound file format reader, which BindHiveScan wraps to reuse the footers read for
+	//! statistics
+	table_function_init_global_t format_init_global = nullptr;
 	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
 	//! columns
 	table_function_get_virtual_columns_t format_virtual_columns = nullptr;

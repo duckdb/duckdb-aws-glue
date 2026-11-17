@@ -270,11 +270,19 @@ static unique_ptr<NodeStatistics> UnsampledCardinality(ClientContext &context, c
 	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
+//! The key of the table a scan reads in the query cache: a Glue table by name, a hive_scan by its location
+static string ScanTableKey(const HiveScanInfo &info) {
+	if (info.catalog_name.empty()) {
+		return HiveQueryCache::TableKey(string(), string(), info.root_location);
+	}
+	return HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name);
+}
+
 //! The sample of the table 'hive_list' reads, measured by the first scan of the table in this query to ask
 static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, const MultiFileBindData &bind_data,
                                                      const HiveMultiFileList &hive_list) {
 	auto &info = hive_list.ScanInfo();
-	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
+	auto entry = HiveQueryCache::Get(context)->GetSample(ScanTableKey(info));
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->sample) {
 		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
@@ -324,20 +332,37 @@ static vector<shared_ptr<BaseUnionData>> ReadFooters(ClientContext &context, con
 	return std::move(reading->union_readers);
 }
 
-//! The scan's bind data with the footers of all its files, or null when a small unpartitioned parquet scan has none.
-//! They are read when the optimizer first asks, once per query for every scan of the table
-static unique_ptr<MultiFileBindData>
-FooterStatisticsBindData(ClientContext &context, const MultiFileBindData &bind_data, const HiveScanInfo &info) {
-	if (info.file_format != HiveFileFormat::PARQUET || !info.partition_keys.empty()) {
-		return nullptr;
-	}
+static bool ReadsFooterStatistics(const HiveScanInfo &info) {
+	return info.file_format == HiveFileFormat::PARQUET && info.partition_keys.empty();
+}
+
+static string FootersKey(const HiveScanInfo &info) {
 	// the footers are read with the scan's binary_as_string, which follows its schema
-	auto key = info.catalog_name + "." + info.Describe();
+	auto key = ScanTableKey(info);
 	auto binary_as_string = info.reader_parameters.find("binary_as_string");
 	if (binary_as_string != info.reader_parameters.end()) {
 		key += "\x1f" + binary_as_string->second.ToString();
 	}
-	auto entry = HiveQueryCache::Get(context)->GetFooters(key);
+	return key;
+}
+
+vector<shared_ptr<BaseUnionData>> HiveCachedFooters(ClientContext &context, const HiveScanInfo &info) {
+	if (!ReadsFooterStatistics(info)) {
+		return {};
+	}
+	auto entry = HiveQueryCache::Get(context)->GetFooters(FootersKey(info));
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	return entry->footers;
+}
+
+//! The scan's bind data with the footers of all its files, or null when a small unpartitioned parquet scan has none.
+//! They are read when the optimizer first asks, once per query for every scan of the table
+static unique_ptr<MultiFileBindData>
+FooterStatisticsBindData(ClientContext &context, const MultiFileBindData &bind_data, const HiveScanInfo &info) {
+	if (!ReadsFooterStatistics(info)) {
+		return nullptr;
+	}
+	auto entry = HiveQueryCache::Get(context)->GetFooters(FootersKey(info));
 	vector<shared_ptr<BaseUnionData>> footers;
 	{
 		annotated_lock_guard<annotated_mutex> guard(entry->lock);
