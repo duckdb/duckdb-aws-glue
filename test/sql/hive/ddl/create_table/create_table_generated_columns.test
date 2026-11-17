@@ -8,47 +8,50 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.gencol_t;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.gencol_t;
 
 statement error
-CREATE TABLE my_datalake.default.gencol_t (a INTEGER, b INTEGER GENERATED ALWAYS AS (a + 1));
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.gencol_t (a INTEGER, b INTEGER GENERATED ALWAYS AS (a + 1));
 ----
 Not implemented Error: Generated column "b" is not supported for tables in a Glue catalog
 
 statement error
-CREATE TABLE my_datalake.default.gencol_t (a INTEGER, b AS (a + 1) VIRTUAL);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.gencol_t (a INTEGER, b AS (a + 1) VIRTUAL);
 ----
 Generated column "b" is not supported
 
 statement error
-CREATE TABLE my_datalake.default.gencol_t (a INTEGER, dt VARCHAR, b AS (a * 2)) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.gencol_t (a INTEGER, dt VARCHAR, b AS (a * 2)) PARTITIONED BY (dt);
 ----
 Generated column "b" is not supported
 
 # nothing was created in Glue
 statement error
-SELECT * FROM my_datalake.default.gencol_t;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.gencol_t;
 ----
 does not exist
 
 statement ok
-CREATE TABLE my_datalake.default.gencol_t (a INTEGER, b INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.gencol_t (a INTEGER, b INTEGER);
 
 statement ok
-INSERT INTO my_datalake.default.gencol_t VALUES (1, 2);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.gencol_t VALUES (1, 2);
 
 query II
-SELECT a, b FROM my_datalake.default.gencol_t;
+SELECT a, b FROM my_datalake.{GLUE_TEST_DB}.gencol_t;
 ----
 1	2
 
 statement ok
-DROP TABLE my_datalake.default.gencol_t;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.gencol_t;

@@ -10,30 +10,33 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.custom_loc_dates;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.custom_loc_dates;
 
 statement ok
-CREATE TABLE my_datalake.default.custom_loc_dates (v VARCHAR, y INTEGER, m INTEGER, region VARCHAR) PARTITIONED BY (y, m, region);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.custom_loc_dates (v VARCHAR, y INTEGER, m INTEGER, region VARCHAR) PARTITIONED BY (y, m, region);
 
 # a year/month layout, and a NULL partition value
 statement ok
-CALL glue_add_partition('my_datalake.default.custom_loc_dates', {y: 2024, m: 1, region: 'eu'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_dates/eu/2024/01');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.custom_loc_dates', {y: 2024, m: 1, region: 'eu'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_dates/eu/2024/01');
 
 statement ok
-CALL glue_add_partition('my_datalake.default.custom_loc_dates', {y: 2024, m: 1, region: NULL},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_dates/unknown/2024/01');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.custom_loc_dates', {y: 2024, m: 1, region: NULL},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_dates/unknown/2024/01');
 
 statement ok
-INSERT INTO my_datalake.default.custom_loc_dates VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_dates VALUES
     ('a', 2024, 1, 'eu'),
     ('b', 2024, 1, NULL),
     ('c', 2024, 2, 'eu'),
@@ -42,7 +45,7 @@ INSERT INTO my_datalake.default.custom_loc_dates VALUES
 
 query II
 SELECT regexp_extract(file, 'custom_loc_dates/(.*)/[^/]*$', 1) AS dir, count(*)
-FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_dates/**')
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_dates/**')
 GROUP BY dir ORDER BY dir;
 ----
 eu/2024/01	1
@@ -52,7 +55,7 @@ y=2024/m=2/region=__HIVE_DEFAULT_PARTITION__	1
 y=2024/m=2/region=eu	1
 
 query IIII
-SELECT v, y, m, region FROM my_datalake.default.custom_loc_dates ORDER BY v;
+SELECT v, y, m, region FROM my_datalake.{GLUE_TEST_DB}.custom_loc_dates ORDER BY v;
 ----
 a	2024	1	eu
 b	2024	1	NULL
@@ -61,75 +64,75 @@ d	2024	2	NULL
 e	2024	1	us
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.custom_loc_dates');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.custom_loc_dates');
 ----
 5
 
 statement ok
-DROP TABLE my_datalake.default.custom_loc_dates;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.custom_loc_dates;
 
 #---------------------------------------------------------------------------
 # the JSON writer projects the rows into a single json column before the partition columns
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.custom_loc_json;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.custom_loc_json;
 
 statement ok
-CREATE TABLE my_datalake.default.custom_loc_json (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year) WITH (format = 'json');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.custom_loc_json (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year) WITH (format = 'json');
 
 statement ok
-CALL glue_add_partition('my_datalake.default.custom_loc_json', {year: 2023},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_json/archive/2023');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.custom_loc_json', {year: 2023},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_json/archive/2023');
 
 statement ok
-INSERT INTO my_datalake.default.custom_loc_json VALUES ('LH1', 5, 2023), ('LH2', 10, 2024);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_json VALUES ('LH1', 5, 2023), ('LH2', 10, 2024);
 
 query II
 SELECT regexp_extract(file, 'custom_loc_json/(.*)/[^/]*$', 1) AS dir, count(*)
-FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_json/**')
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_json/**')
 GROUP BY dir ORDER BY dir;
 ----
 archive/2023	1
 year=2024	1
 
 query III
-SELECT flight, delay, year FROM my_datalake.default.custom_loc_json ORDER BY flight;
+SELECT flight, delay, year FROM my_datalake.{GLUE_TEST_DB}.custom_loc_json ORDER BY flight;
 ----
 LH1	5	2023
 LH2	10	2024
 
 statement ok
-DROP TABLE my_datalake.default.custom_loc_json;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.custom_loc_json;
 
 #---------------------------------------------------------------------------
 # CSV
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.custom_loc_csv;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.custom_loc_csv;
 
 statement ok
-CREATE TABLE my_datalake.default.custom_loc_csv (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year) WITH (format = 'csv');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.custom_loc_csv (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year) WITH (format = 'csv');
 
 statement ok
-CALL glue_add_partition('my_datalake.default.custom_loc_csv', {year: 2023},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_csv/archive/2023');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.custom_loc_csv', {year: 2023},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_csv/archive/2023');
 
 statement ok
-INSERT INTO my_datalake.default.custom_loc_csv VALUES ('LH1', 5, 2023), ('LH2', 10, 2024);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_csv VALUES ('LH1', 5, 2023), ('LH2', 10, 2024);
 
 query II
 SELECT regexp_extract(file, 'custom_loc_csv/(.*)/[^/]*$', 1) AS dir, count(*)
-FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_csv/**')
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_csv/**')
 GROUP BY dir ORDER BY dir;
 ----
 archive/2023	1
 year=2024	1
 
 query III
-SELECT flight, delay, year FROM my_datalake.default.custom_loc_csv ORDER BY flight;
+SELECT flight, delay, year FROM my_datalake.{GLUE_TEST_DB}.custom_loc_csv ORDER BY flight;
 ----
 LH1	5	2023
 LH2	10	2024
 
 statement ok
-DROP TABLE my_datalake.default.custom_loc_csv;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.custom_loc_csv;

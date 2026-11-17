@@ -8,57 +8,60 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.tsprec_bad;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.tsprec_bad;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.tsprec_ok;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.tsprec_ok;
 
 foreach type TIMESTAMP_NS TIMESTAMP_MS TIMESTAMP_S
 
 statement error
-CREATE TABLE my_datalake.default.tsprec_bad (ts {type});
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.tsprec_bad (ts {type});
 ----
 can not be converted to a Glue type
 
 statement error
-CREATE TABLE my_datalake.default.tsprec_bad (l {type}[]);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.tsprec_bad (l {type}[]);
 ----
 can not be converted to a Glue type
 
 statement error
-CREATE TABLE my_datalake.default.tsprec_bad AS SELECT TIMESTAMP '2008-09-15 03:04:05.123456789'::{type} AS ts;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.tsprec_bad AS SELECT TIMESTAMP '2008-09-15 03:04:05.123456789'::{type} AS ts;
 ----
 can not be converted to a Glue type
 
 endloop
 
 statement error
-SELECT * FROM my_datalake.default.tsprec_bad;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.tsprec_bad;
 ----
 does not exist
 
 statement ok
-CREATE TABLE my_datalake.default.tsprec_ok (id INTEGER, ts TIMESTAMP);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.tsprec_ok (id INTEGER, ts TIMESTAMP);
 
 statement error
-ALTER TABLE my_datalake.default.tsprec_ok ADD COLUMN ns TIMESTAMP_NS;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.tsprec_ok ADD COLUMN ns TIMESTAMP_NS;
 ----
 can not be converted to a Glue type
 
 # an explicit TIMESTAMP column stores the value rounded to microseconds
 statement ok
-INSERT INTO my_datalake.default.tsprec_ok VALUES (1, TIMESTAMP_NS '2008-09-15 03:04:05.123456789');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.tsprec_ok VALUES (1, TIMESTAMP_NS '2008-09-15 03:04:05.123456789');
 
 query II
-SELECT id, ts FROM my_datalake.default.tsprec_ok;
+SELECT id, ts FROM my_datalake.{GLUE_TEST_DB}.tsprec_ok;
 ----
 1	2008-09-15 03:04:05.123457
 
@@ -69,4 +72,4 @@ id	INTEGER
 ts	TIMESTAMP
 
 statement ok
-DROP TABLE my_datalake.default.tsprec_ok;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.tsprec_ok;

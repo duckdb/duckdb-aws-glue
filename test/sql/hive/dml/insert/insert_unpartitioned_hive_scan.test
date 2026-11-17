@@ -10,35 +10,38 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ins_plain;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ins_plain;
 
 statement ok
-CREATE TABLE my_datalake.default.ins_plain (id INTEGER, name VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ins_plain (id INTEGER, name VARCHAR);
 
 # every INSERT writes a new file below the table location
 statement ok
-INSERT INTO my_datalake.default.ins_plain VALUES (1, 'a'), (2, 'b');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ins_plain VALUES (1, 'a'), (2, 'b');
 
 statement ok
-INSERT INTO my_datalake.default.ins_plain VALUES (3, 'c');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ins_plain VALUES (3, 'c');
 
 # files written before a column was added do not have it: it reads as NULL
 statement ok
-ALTER TABLE my_datalake.default.ins_plain ADD COLUMN score DOUBLE;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ins_plain ADD COLUMN score DOUBLE;
 
 statement ok
-INSERT INTO my_datalake.default.ins_plain VALUES (4, 'd', 4.5);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ins_plain VALUES (4, 'd', 4.5);
 
 query III
-SELECT id, name, score FROM my_datalake.default.ins_plain ORDER BY id;
+SELECT id, name, score FROM my_datalake.{GLUE_TEST_DB}.ins_plain ORDER BY id;
 ----
 1	a	NULL
 2	b	NULL
@@ -52,7 +55,7 @@ statement ok
 DETACH my_datalake;
 
 query III
-SELECT id, name, score FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_plain',
+SELECT id, name, score FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_plain',
     schema := {id: 'INTEGER', name: 'VARCHAR', score: 'DOUBLE'})
 ORDER BY id;
 ----
@@ -63,7 +66,7 @@ ORDER BY id;
 
 # the schema decides what is read: a subset of the columns, with a wider type
 query II
-SELECT id, typeof(id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_plain',
+SELECT id, typeof(id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_plain',
     schema := {id: 'BIGINT', name: 'VARCHAR'})
 ORDER BY id LIMIT 1;
 ----
@@ -79,8 +82,9 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE my_datalake.default.ins_plain;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ins_plain;

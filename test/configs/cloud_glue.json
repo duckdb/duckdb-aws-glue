@@ -21,6 +21,14 @@
 			"env_value": "176760123605"
 		},
 		{
+			"env_name": "GLUE_TEST_DB",
+			"env_value": "default"
+		},
+		{
+			"env_name": "GLUE_TEST_DB_SQL",
+			"env_value": "\"default\""
+		},
+		{
 			"env_name": "GLUE_ENDPOINT",
 			"env_value": ""
 		},

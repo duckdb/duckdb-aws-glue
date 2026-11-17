@@ -8,21 +8,24 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ddl_drop_column;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ddl_drop_column;
 
 statement ok
-CREATE TABLE my_datalake.default.ddl_drop_column (id INTEGER, name VARCHAR, score DOUBLE);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column (id INTEGER, name VARCHAR, score DOUBLE);
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_drop_column DROP COLUMN name;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column DROP COLUMN name;
 
 query II
 SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ddl_drop_column' ORDER BY column_index;
@@ -31,16 +34,16 @@ id	INTEGER
 score	DOUBLE
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_drop_column DROP COLUMN IF EXISTS name;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column DROP COLUMN IF EXISTS name;
 
 # dropping a column that does not exist without IF EXISTS is an error
 statement error
-ALTER TABLE my_datalake.default.ddl_drop_column DROP COLUMN name;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column DROP COLUMN name;
 ----
 
 # the last data column can not be dropped
 statement error
-ALTER TABLE my_datalake.default.ddl_drop_column DROP COLUMN id, DROP COLUMN score;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column DROP COLUMN id, DROP COLUMN score;
 ----
 
 # a second attach sees the change, it is stored in Glue and not only in the cached entry
@@ -48,7 +51,8 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake_2 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
@@ -58,31 +62,31 @@ id	INTEGER
 score	DOUBLE
 
 statement ok
-DROP TABLE my_datalake.default.ddl_drop_column;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column;
 
 # a bucket or sort column can not be dropped: Glue would go on naming it in BucketColumns / SortColumns
 statement ok
 SET glue_create_bucketed_tables = true;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ddl_drop_bucket_column;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ddl_drop_bucket_column;
 
 statement ok
-CREATE TABLE my_datalake.default.ddl_drop_bucket_column (id INTEGER, region VARCHAR, score DOUBLE, note VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_bucket_column (id INTEGER, region VARCHAR, score DOUBLE, note VARCHAR)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'region', 'SortOrder': 0}]);
 
 statement error
-ALTER TABLE my_datalake.default.ddl_drop_bucket_column DROP COLUMN id;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_bucket_column DROP COLUMN id;
 ----
 Column "id" is a bucket column of table "ddl_drop_bucket_column" and can not be dropped
 
 statement error
-ALTER TABLE my_datalake.default.ddl_drop_bucket_column DROP COLUMN REGION;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_bucket_column DROP COLUMN REGION;
 ----
 is a sort column of table "ddl_drop_bucket_column" and can not be dropped
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_drop_bucket_column DROP COLUMN note;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_bucket_column DROP COLUMN note;
 
 query I
 SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ddl_drop_bucket_column' ORDER BY column_index;
@@ -93,35 +97,35 @@ score
 
 query II
 SELECT response.StorageDescriptor.BucketColumns::VARCHAR[], response.StorageDescriptor.SortColumns[1].Column::VARCHAR
-FROM glue_get_table_response('my_datalake.default.ddl_drop_bucket_column');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_drop_bucket_column');
 ----
 [id]	region
 
 statement ok
-DROP TABLE my_datalake.default.ddl_drop_bucket_column;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_bucket_column;
 
 #---------------------------------------------------------------------------
 # a csv (text) table is read by position, so DROP COLUMN would silently shift
 # existing files' bytes into the wrong columns - refuse it (as Athena V3 does)
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ddl_drop_column_csv;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ddl_drop_column_csv;
 
 statement ok
-CREATE TABLE my_datalake.default.ddl_drop_column_csv (id INTEGER, name VARCHAR, score DOUBLE) WITH (format = 'csv');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column_csv (id INTEGER, name VARCHAR, score DOUBLE) WITH (format = 'csv');
 
 statement error
-ALTER TABLE my_datalake.default.ddl_drop_column_csv DROP COLUMN name;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column_csv DROP COLUMN name;
 ----
 DROP COLUMN is not supported for csv
 
 # IF EXISTS on a nonexistent column short-circuits before the format check
 statement ok
-ALTER TABLE my_datalake.default.ddl_drop_column_csv DROP COLUMN IF EXISTS nonexistent;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column_csv DROP COLUMN IF EXISTS nonexistent;
 
 # IF EXISTS on an existing column still hits the format rejection
 statement error
-ALTER TABLE my_datalake.default.ddl_drop_column_csv DROP COLUMN IF EXISTS name;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column_csv DROP COLUMN IF EXISTS name;
 ----
 DROP COLUMN is not supported for csv
 
@@ -130,7 +134,8 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake_3 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query I
@@ -141,4 +146,4 @@ name
 score
 
 statement ok
-DROP TABLE my_datalake.default.ddl_drop_column_csv;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column_csv;

@@ -10,18 +10,21 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.vr_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.vr_view;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.vr_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.vr_orders;
 
 statement ok
 DROP VIEW IF EXISTS my_datalake.vr_db2.vr_view2;
@@ -33,13 +36,13 @@ statement ok
 DROP SCHEMA IF EXISTS my_datalake.vr_db2;
 
 statement ok
-CREATE TABLE my_datalake.default.vr_orders (id INTEGER, amount DOUBLE);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.vr_orders (id INTEGER, amount DOUBLE);
 
 statement ok
-INSERT INTO my_datalake.default.vr_orders VALUES (1, 10.0), (2, 20.0);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.vr_orders VALUES (1, 10.0), (2, 20.0);
 
 statement ok
-CREATE VIEW my_datalake.default.vr_view AS SELECT id, amount FROM vr_orders WHERE id > 0;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.vr_view AS SELECT id, amount FROM vr_orders WHERE id > 0;
 
 # a table of the same name in the session's default catalog must not capture the view's unqualified name
 statement ok
@@ -52,7 +55,7 @@ statement ok
 USE memory;
 
 query II
-SELECT * FROM my_datalake.default.vr_view ORDER BY id;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.vr_view ORDER BY id;
 ----
 1	10.0
 2	20.0
@@ -76,7 +79,7 @@ statement ok
 USE my_datalake.vr_db2;
 
 query II
-SELECT * FROM my_datalake.default.vr_view ORDER BY id;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.vr_view ORDER BY id;
 ----
 1	10.0
 2	20.0
@@ -87,7 +90,7 @@ SELECT * FROM vr_view2;
 7	70.0
 
 statement ok
-USE my_datalake.default;
+USE my_datalake.{GLUE_TEST_DB};
 
 query II
 SELECT * FROM vr_view ORDER BY id;
@@ -113,10 +116,10 @@ statement ok
 DROP SCHEMA my_datalake.vr_db2;
 
 statement ok
-DROP VIEW my_datalake.default.vr_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.vr_view;
 
 statement ok
-DROP TABLE my_datalake.default.vr_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.vr_orders;
 
 statement ok
 DROP TABLE vr_orders;

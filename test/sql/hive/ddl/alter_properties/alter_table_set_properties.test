@@ -8,25 +8,28 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ddl_properties;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ddl_properties;
 
 statement ok
-CREATE TABLE my_datalake.default.ddl_properties (id INTEGER, name VARCHAR) WITH (owner = 'analytics');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties (id INTEGER, name VARCHAR) WITH (owner = 'analytics');
 
 statement ok
-INSERT INTO my_datalake.default.ddl_properties VALUES (1, 'ann');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ddl_properties VALUES (1, 'ann');
 
 # what CREATE TABLE stored
 query I
-SELECT parameters['owner'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['owner'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 analytics
 
@@ -34,98 +37,98 @@ analytics
 # SET adds and overwrites, other parameters stay
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties SET (comment = 'customer names', retention_days = 30);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET (comment = 'customer names', retention_days = 30);
 
 query III
 SELECT parameters['owner'], parameters['comment'], parameters['retention_days']
-FROM glue_get_table_response('my_datalake.default.ddl_properties');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 analytics	customer names	30
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties SET (owner = 'finance');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET (owner = 'finance');
 
 query II
-SELECT parameters['owner'], parameters['comment'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['owner'], parameters['comment'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 finance	customer names
 
 # a dotted Hive property name, and the value the way Glue stores it: a string
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties SET ('parquet.compression' = 'ZSTD', 'compression_level' = 4);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET ('parquet.compression' = 'ZSTD', 'compression_level' = 4);
 
 query II
 SELECT parameters['parquet.compression'], parameters['compression_level']
-FROM glue_get_table_response('my_datalake.default.ddl_properties');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 ZSTD	4
 
 # the value can be an expression (DuckDB's option grammar takes a leading string literal as the whole value, so an
 # expression must not start with one)
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties SET (batch = concat('run_', 40 + 2));
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET (batch = concat('run_', 40 + 2));
 
 query I
-SELECT parameters['batch'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['batch'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 run_42
 
 # the parameters CreateTable wrote are untouched
 query II
-SELECT parameters['EXTERNAL'], parameters['classification'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['EXTERNAL'], parameters['classification'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 TRUE	parquet
 
 # the Athena documentation examples, spelled natively: a value with spaces and a quote is stored verbatim
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties SET (notes = 'Please don''t drop this table.');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET (notes = 'Please don''t drop this table.');
 
 query I
-SELECT parameters['notes'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['notes'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 Please don't drop this table.
 
 # Athena: "EXTERNAL = FALSE has no effect": the parameter is stored, the table stays a readable Hive table
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties SET (EXTERNAL = 'FALSE');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET (EXTERNAL = 'FALSE');
 
 query II
-SELECT parameters['EXTERNAL'], table_type FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['EXTERNAL'], table_type FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 FALSE	HIVE
 
 query II
-SELECT id, name FROM my_datalake.default.ddl_properties;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.ddl_properties;
 ----
 1	ann
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties SET (EXTERNAL = 'TRUE', 'skip.header.line.count' = 1);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET (EXTERNAL = 'TRUE', 'skip.header.line.count' = 1);
 
 query I
-SELECT parameters['skip.header.line.count'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['skip.header.line.count'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 1
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties RESET (notes, 'skip.header.line.count');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties RESET (notes, 'skip.header.line.count');
 
 #---------------------------------------------------------------------------
 # RESET removes; a key the table does not have is not an error
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties RESET (retention_days, batch);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties RESET (retention_days, batch);
 
 query I
-SELECT list_sort(map_keys(parameters)) FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT list_sort(map_keys(parameters)) FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 [EXTERNAL, classification, comment, compression_level, owner, parquet.compression]
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_properties RESET (does_not_exist);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties RESET (does_not_exist);
 
 query I
-SELECT parameters['owner'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['owner'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 finance
 
@@ -133,7 +136,7 @@ finance
 # the Hive spelling is not part of this extension: it is a plain parser error, grammar extension or not
 #---------------------------------------------------------------------------
 statement error
-ALTER TABLE my_datalake.default.ddl_properties SET TBLPROPERTIES ('owner' = 'x');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET TBLPROPERTIES ('owner' = 'x');
 ----
 Parser Error
 
@@ -141,7 +144,7 @@ statement ok
 SET active_grammar_extensions = ['glue_hive_ddl'];
 
 statement error
-ALTER TABLE my_datalake.default.ddl_properties SET TBLPROPERTIES ('owner' = 'x');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET TBLPROPERTIES ('owner' = 'x');
 ----
 Parser Error
 
@@ -152,38 +155,38 @@ RESET active_grammar_extensions;
 # errors: the format parameters, NULL values, a missing table
 #---------------------------------------------------------------------------
 statement error
-ALTER TABLE my_datalake.default.ddl_properties SET (table_type = 'ICEBERG');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET (table_type = 'ICEBERG');
 ----
 Table property 'table_type' decides how the table is read and can not be changed with ALTER TABLE
 
 statement error
-ALTER TABLE my_datalake.default.ddl_properties SET ('spark.sql.sources.provider' = 'delta');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET ('spark.sql.sources.provider' = 'delta');
 ----
 can not be changed with ALTER TABLE
 
 statement error
-ALTER TABLE my_datalake.default.ddl_properties RESET (metadata_location);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties RESET (metadata_location);
 ----
 can not be changed with ALTER TABLE
 
 statement error
-ALTER TABLE my_datalake.default.ddl_properties SET (owner = NULL);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties SET (owner = NULL);
 ----
 NULL is not a valid value for ALTER TABLE SET option 'owner'
 
 statement error
-ALTER TABLE my_datalake.default.ddl_missing SET (owner = 'x');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_missing SET (owner = 'x');
 ----
 does not exist
 
 # nothing above changed the table or its data
 query I
-SELECT parameters['owner'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['owner'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 finance
 
 query II
-SELECT id, name FROM my_datalake.default.ddl_properties;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.ddl_properties;
 ----
 1	ann
 
@@ -192,11 +195,12 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake_2 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
-SELECT parameters['owner'], parameters['comment'] FROM glue_get_table_response('my_datalake_2.default.ddl_properties');
+SELECT parameters['owner'], parameters['comment'] FROM glue_get_table_response('my_datalake_2.{GLUE_TEST_DB}.ddl_properties');
 ----
 finance	customer names
 
@@ -213,31 +217,32 @@ attach '{GLUE_CATALOG_ID}' as ro_datalake (
     TYPE glue,
     READ_ONLY,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query I
-SELECT parameters['owner'] FROM glue_get_table_response('ro_datalake.default.ddl_properties');
+SELECT parameters['owner'] FROM glue_get_table_response('ro_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 finance
 
 statement error
-ALTER TABLE ro_datalake.default.ddl_properties SET (owner = 'hijacked');
+ALTER TABLE ro_datalake.{GLUE_TEST_DB}.ddl_properties SET (owner = 'hijacked');
 ----
 Cannot execute statement of type "ALTER" on database "ro_datalake" which is attached in read-only mode!
 
 statement error
-ALTER TABLE ro_datalake.default.ddl_properties RESET (owner);
+ALTER TABLE ro_datalake.{GLUE_TEST_DB}.ddl_properties RESET (owner);
 ----
 Cannot execute statement of type "ALTER" on database "ro_datalake" which is attached in read-only mode!
 
 query II
-SELECT parameters['owner'], parameters['comment'] FROM glue_get_table_response('my_datalake.default.ddl_properties');
+SELECT parameters['owner'], parameters['comment'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_properties');
 ----
 finance	customer names
 
 statement ok
-DROP TABLE my_datalake.default.ddl_properties;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ddl_properties;
 
 #---------------------------------------------------------------------------
 # COMMENT ON TABLE: SET_COMMENT branch, routed through UpdateTable's Description
@@ -246,13 +251,13 @@ DROP TABLE my_datalake.default.ddl_properties;
 # surfaces the same value.
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ddl_table_comment;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ddl_table_comment;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.ddl_table_comment_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.ddl_table_comment_view;
 
 statement ok
-CREATE TABLE my_datalake.default.ddl_table_comment (id INTEGER, name VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ddl_table_comment (id INTEGER, name VARCHAR);
 
 # starts with no description
 query I
@@ -261,7 +266,7 @@ SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND tabl
 NULL
 
 statement ok
-COMMENT ON TABLE my_datalake.default.ddl_table_comment IS 'first comment';
+COMMENT ON TABLE my_datalake.{GLUE_TEST_DB}.ddl_table_comment IS 'first comment';
 
 query I
 SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ddl_table_comment';
@@ -269,13 +274,13 @@ SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND tabl
 first comment
 
 query I
-SELECT parameters['comment'] FROM glue_get_table_response('my_datalake.default.ddl_table_comment');
+SELECT parameters['comment'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_table_comment');
 ----
 first comment
 
 # single-quote escaping
 statement ok
-COMMENT ON TABLE my_datalake.default.ddl_table_comment IS 'it''s a comment';
+COMMENT ON TABLE my_datalake.{GLUE_TEST_DB}.ddl_table_comment IS 'it''s a comment';
 
 query I
 SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ddl_table_comment';
@@ -284,7 +289,7 @@ it's a comment
 
 # overwrite with a different value
 statement ok
-COMMENT ON TABLE my_datalake.default.ddl_table_comment IS 'second comment';
+COMMENT ON TABLE my_datalake.{GLUE_TEST_DB}.ddl_table_comment IS 'second comment';
 
 query I
 SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ddl_table_comment';
@@ -293,7 +298,7 @@ second comment
 
 # NULL clears both Description and the Parameters.comment mirror
 statement ok
-COMMENT ON TABLE my_datalake.default.ddl_table_comment IS NULL;
+COMMENT ON TABLE my_datalake.{GLUE_TEST_DB}.ddl_table_comment IS NULL;
 
 query I
 SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ddl_table_comment';
@@ -301,21 +306,21 @@ SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND tabl
 NULL
 
 query I
-SELECT parameters['comment'] FROM glue_get_table_response('my_datalake.default.ddl_table_comment');
+SELECT parameters['comment'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ddl_table_comment');
 ----
 NULL
 
 # views are intentionally not supported yet
 statement ok
-CREATE VIEW my_datalake.default.ddl_table_comment_view AS SELECT 1 AS a;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.ddl_table_comment_view AS SELECT 1 AS a;
 
 statement error
-COMMENT ON TABLE my_datalake.default.ddl_table_comment_view IS 'x';
+COMMENT ON TABLE my_datalake.{GLUE_TEST_DB}.ddl_table_comment_view IS 'x';
 ----
 Comments on Glue views are not supported yet
 
 statement ok
-DROP VIEW my_datalake.default.ddl_table_comment_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.ddl_table_comment_view;
 
 statement ok
-DROP TABLE my_datalake.default.ddl_table_comment;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ddl_table_comment;

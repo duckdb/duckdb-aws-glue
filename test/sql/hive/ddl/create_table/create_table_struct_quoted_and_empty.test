@@ -10,26 +10,29 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.structname_quoted;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.structname_quoted;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.structname_empty;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.structname_empty;
 
 statement ok
-CREATE TABLE my_datalake.default.structname_quoted AS
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.structname_quoted AS
 SELECT {'quoted ''"field name"': 42} """quoted col name""",
        {'Estimated Cardinality': '1', 'children': [{'Operator Type': 'SCAN', 'it''s': 1.5}]} profile;
 
 query II
-SELECT name, type FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.structname_quoted'));
+SELECT name, type FROM (SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.structname_quoted'));
 ----
 "quoted col name"	struct<quoted '"field name":int>
 profile	struct<Estimated Cardinality:string,children:array<struct<Operator Type:string,it's:decimal(2,1)>>>
@@ -41,7 +44,8 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
@@ -51,34 +55,34 @@ SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_da
 profile	STRUCT("Estimated Cardinality" VARCHAR, children STRUCT("Operator Type" VARCHAR, "it's" DECIMAL(2,1))[])
 
 query III
-SELECT """quoted col name"""['quoted ''"field name"'], profile."Estimated Cardinality", profile.children[1]."it's" FROM my_datalake.default.structname_quoted;
+SELECT """quoted col name"""['quoted ''"field name"'], profile."Estimated Cardinality", profile.children[1]."it's" FROM my_datalake.{GLUE_TEST_DB}.structname_quoted;
 ----
 42	1	1.5
 
 statement error
-CREATE TABLE my_datalake.default.structname_empty (i INTEGER, s STRUCT);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.structname_empty (i INTEGER, s STRUCT);
 ----
 DuckDB type 'STRUCT' can not be converted to a Glue type
 
 statement error
-CREATE TABLE my_datalake.default.structname_empty (i INTEGER, s STRUCT(a STRUCT)[]);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.structname_empty (i INTEGER, s STRUCT(a STRUCT)[]);
 ----
 can not be converted to a Glue type
 
 statement error
-CREATE TABLE my_datalake.default.structname_empty AS SELECT {} AS s;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.structname_empty AS SELECT {} AS s;
 ----
 can not be converted to a Glue type
 
 statement error
-ALTER TABLE my_datalake.default.structname_quoted ADD COLUMN s STRUCT;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.structname_quoted ADD COLUMN s STRUCT;
 ----
 can not be converted to a Glue type
 
 statement error
-SELECT * FROM my_datalake.default.structname_empty;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.structname_empty;
 ----
 does not exist
 
 statement ok
-DROP TABLE my_datalake.default.structname_quoted;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.structname_quoted;

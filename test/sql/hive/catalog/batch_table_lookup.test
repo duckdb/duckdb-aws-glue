@@ -8,30 +8,33 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.btl_t1;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.btl_t1;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.btl_t2;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.btl_t2;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.btl_t3;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.btl_t3;
 
 statement ok
-CREATE TABLE my_datalake.default.btl_t1 AS SELECT 1 AS id;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.btl_t1 AS SELECT 1 AS id;
 
 statement ok
-CREATE TABLE my_datalake.default.btl_t2 AS SELECT 2 AS id;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.btl_t2 AS SELECT 2 AS id;
 
 statement ok
-CREATE TABLE my_datalake.default.btl_t3 AS SELECT 3 AS id;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.btl_t3 AS SELECT 3 AS id;
 
 statement ok
 CREATE MACRO glue_calls(api) AS (
@@ -50,7 +53,8 @@ statement ok con2
 attach '{GLUE_CATALOG_ID}' as dl2 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok con2
@@ -64,9 +68,9 @@ CALL truncate_duckdb_logs();
 
 query I con2
 SELECT count(*) FROM (
-    SELECT id FROM dl2.default.btl_t1
-    UNION ALL SELECT id FROM dl2.default.btl_t2
-    UNION ALL SELECT id FROM dl2.default.btl_t3
+    SELECT id FROM dl2.{GLUE_TEST_DB}.btl_t1
+    UNION ALL SELECT id FROM dl2.{GLUE_TEST_DB}.btl_t2
+    UNION ALL SELECT id FROM dl2.{GLUE_TEST_DB}.btl_t3
 );
 ----
 3
@@ -78,13 +82,13 @@ true
 
 # a miss after the bulk load stays direct: one GetTable, no second GetTables
 statement ok
-CREATE TABLE my_datalake.default.btl_t4 AS SELECT 4 AS id;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.btl_t4 AS SELECT 4 AS id;
 
 statement ok con2
 CALL truncate_duckdb_logs();
 
 query I con2
-SELECT id FROM dl2.default.btl_t4;
+SELECT id FROM dl2.{GLUE_TEST_DB}.btl_t4;
 ----
 4
 
@@ -99,7 +103,8 @@ statement ok con4
 attach '{GLUE_CATALOG_ID}' as dl4 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok con4
@@ -112,7 +117,7 @@ statement ok con4
 CALL truncate_duckdb_logs();
 
 query I con4
-SELECT id FROM dl4.default.btl_t1;
+SELECT id FROM dl4.{GLUE_TEST_DB}.btl_t1;
 ----
 1
 
@@ -126,7 +131,8 @@ statement ok con3
 attach '{GLUE_CATALOG_ID}' as dl3 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok con3
@@ -143,9 +149,9 @@ CALL truncate_duckdb_logs();
 
 query I con3
 SELECT count(*) FROM (
-    SELECT id FROM dl3.default.btl_t1
-    UNION ALL SELECT id FROM dl3.default.btl_t2
-    UNION ALL SELECT id FROM dl3.default.btl_t3
+    SELECT id FROM dl3.{GLUE_TEST_DB}.btl_t1
+    UNION ALL SELECT id FROM dl3.{GLUE_TEST_DB}.btl_t2
+    UNION ALL SELECT id FROM dl3.{GLUE_TEST_DB}.btl_t3
 );
 ----
 3
@@ -160,14 +166,15 @@ statement ok con5
 attach '{GLUE_CATALOG_ID}' as dl5 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 # two lookups trigger the bulk fetch; the page also carries btl_t3 and btl_t4, never referenced by con5
 query I con5
 SELECT count(*) FROM (
-    SELECT id FROM dl5.default.btl_t1
-    UNION ALL SELECT id FROM dl5.default.btl_t2
+    SELECT id FROM dl5.{GLUE_TEST_DB}.btl_t1
+    UNION ALL SELECT id FROM dl5.{GLUE_TEST_DB}.btl_t2
 );
 ----
 2
@@ -177,25 +184,26 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as ext_writer (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ext'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ext',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE my_datalake.default.btl_t4;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.btl_t4;
 
 statement ok
-CREATE TABLE ext_writer.default.btl_t4 AS SELECT 40 AS id, 'fresh' AS extra;
+CREATE TABLE ext_writer.{GLUE_TEST_DB}.btl_t4 AS SELECT 40 AS id, 'fresh' AS extra;
 
 # con5's first reference of btl_t4 resolves the current definition, not the page's snapshot
 query IT con5
-SELECT id, extra FROM dl5.default.btl_t4;
+SELECT id, extra FROM dl5.{GLUE_TEST_DB}.btl_t4;
 ----
 40	fresh
 
 # the table list stays live after a bulk fetch: a table created elsewhere after con5's page was read
 # still shows up in con5's first enumeration
 statement ok
-CREATE TABLE my_datalake.default.btl_t5 AS SELECT 5 AS id;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.btl_t5 AS SELECT 5 AS id;
 
 query I con5
 SELECT count(*) FROM duckdb_tables() WHERE database_name = 'dl5' AND table_name IN ('btl_t4', 'btl_t5');
@@ -203,16 +211,16 @@ SELECT count(*) FROM duckdb_tables() WHERE database_name = 'dl5' AND table_name 
 2
 
 statement ok
-DROP TABLE my_datalake.default.btl_t5;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.btl_t5;
 
 statement ok
-DROP TABLE my_datalake.default.btl_t1;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.btl_t1;
 
 statement ok
-DROP TABLE my_datalake.default.btl_t2;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.btl_t2;
 
 statement ok
-DROP TABLE my_datalake.default.btl_t3;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.btl_t3;
 
 statement ok
-DROP TABLE my_datalake.default.btl_t4;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.btl_t4;

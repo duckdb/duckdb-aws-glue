@@ -20,18 +20,21 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.gp_nullpart;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.gp_nullpart;
 
 statement ok
-CREATE TABLE my_datalake.default.gp_nullpart (id INTEGER, k INTEGER) PARTITIONED BY (k);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.gp_nullpart (id INTEGER, k INTEGER) PARTITIONED BY (k);
 
 # ===========================================================================
 # a NULL in the partition spec registers the sentinel
@@ -40,13 +43,13 @@ CREATE TABLE my_datalake.default.gp_nullpart (id INTEGER, k INTEGER) PARTITIONED
 # way to name the NULL partition -- 'NULL' as a string would be a partition whose value is the three characters NULL.
 
 statement ok
-CALL glue_add_partition('my_datalake.default.gp_nullpart', {k: NULL});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.gp_nullpart', {k: NULL});
 
 # the directory is the sentinel, un-escaped: it is a reserved name, not a value that needs escaping
 query I
-SELECT location FROM glue_partitions('my_datalake.default.gp_nullpart');
+SELECT location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.gp_nullpart');
 ----
-{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__
 
 # ===========================================================================
 # ...and it reads back as NULL, not as the sentinel string
@@ -57,19 +60,19 @@ SELECT location FROM glue_partitions('my_datalake.default.gp_nullpart');
 # this file).
 
 query I
-SELECT k IS NULL FROM glue_partitions('my_datalake.default.gp_nullpart');
+SELECT k IS NULL FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.gp_nullpart');
 ----
 true
 
 # typed as the column's declared type, not as VARCHAR
 query I
-SELECT typeof(k) FROM glue_partitions('my_datalake.default.gp_nullpart');
+SELECT typeof(k) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.gp_nullpart');
 ----
 INTEGER
 
 # exactly one partition, and it is the NULL one
 query II
-SELECT count(*), count(k) FROM glue_partitions('my_datalake.default.gp_nullpart');
+SELECT count(*), count(k) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.gp_nullpart');
 ----
 1	0
 
@@ -80,19 +83,19 @@ SELECT count(*), count(k) FROM glue_partitions('my_datalake.default.gp_nullpart'
 # to a drop, or the partition would be strandable -- creatable and not removable.
 
 statement ok
-CALL glue_add_partition('my_datalake.default.gp_nullpart', {k: 5});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.gp_nullpart', {k: 5});
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.gp_nullpart');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.gp_nullpart');
 ----
 2
 
 statement ok
-CALL glue_drop_partition('my_datalake.default.gp_nullpart', {k: NULL});
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.gp_nullpart', {k: NULL});
 
 # the NULL partition went, the ordinary one stayed
 query II
-SELECT k, k IS NULL FROM glue_partitions('my_datalake.default.gp_nullpart');
+SELECT k, k IS NULL FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.gp_nullpart');
 ----
 5	false
 
@@ -104,31 +107,31 @@ SELECT k, k IS NULL FROM glue_partitions('my_datalake.default.gp_nullpart');
 # them drifted.
 
 statement ok
-CALL glue_add_partition('my_datalake.default.gp_nullpart', {k: NULL});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.gp_nullpart', {k: NULL});
 
 statement ok
 COPY (SELECT 1 AS id)
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__/d.parquet' (FORMAT parquet);
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__/d.parquet' (FORMAT parquet);
 
 statement ok
 COPY (SELECT 2 AS id)
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=5/d.parquet' (FORMAT parquet);
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/gp_nullpart/k=5/d.parquet' (FORMAT parquet);
 
 query II
-SELECT id, k FROM my_datalake.default.gp_nullpart ORDER BY id;
+SELECT id, k FROM my_datalake.{GLUE_TEST_DB}.gp_nullpart ORDER BY id;
 ----
 1	NULL
 2	5
 
 # IS NULL finds it through the scan, so a NULL partition is queryable and not just listable
 query I
-SELECT id FROM my_datalake.default.gp_nullpart WHERE k IS NULL;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.gp_nullpart WHERE k IS NULL;
 ----
 1
 
 # and the non-NULL partition is unaffected by its presence
 query I
-SELECT id FROM my_datalake.default.gp_nullpart WHERE k = 5;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.gp_nullpart WHERE k = 5;
 ----
 2
 
@@ -140,15 +143,15 @@ SELECT id FROM my_datalake.default.gp_nullpart WHERE k = 5;
 # (glue_add_partition casts first); test/unittest/glue_partitions_test.cpp registers one through the API and sees
 # partition_values = [abc] next to a NULL k.
 query III
-SELECT k, partition_values, partition_values[1] = '__HIVE_DEFAULT_PARTITION__' FROM glue_partitions('my_datalake.default.gp_nullpart') ORDER BY k NULLS FIRST;
+SELECT k, partition_values, partition_values[1] = '__HIVE_DEFAULT_PARTITION__' FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.gp_nullpart') ORDER BY k NULLS FIRST;
 ----
 NULL	[__HIVE_DEFAULT_PARTITION__]	true
 5	[5]	false
 
 query I
-SELECT typeof(partition_values) FROM glue_partitions('my_datalake.default.gp_nullpart') LIMIT 1;
+SELECT typeof(partition_values) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.gp_nullpart') LIMIT 1;
 ----
 VARCHAR[]
 
 statement ok
-DROP TABLE my_datalake.default.gp_nullpart;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.gp_nullpart;

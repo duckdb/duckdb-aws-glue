@@ -8,18 +8,21 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ddl_add_column;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ddl_add_column;
 
 statement ok
-CREATE TABLE my_datalake.default.ddl_add_column (id INTEGER, name VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ddl_add_column (id INTEGER, name VARCHAR);
 
 query II
 SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ddl_add_column' ORDER BY column_index;
@@ -28,7 +31,7 @@ id	INTEGER
 name	VARCHAR
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_add_column ADD COLUMN score DOUBLE;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_add_column ADD COLUMN score DOUBLE;
 
 # the new column is appended after the existing ones
 query II
@@ -39,11 +42,11 @@ name	VARCHAR
 score	DOUBLE
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_add_column ADD COLUMN IF NOT EXISTS score DOUBLE;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_add_column ADD COLUMN IF NOT EXISTS score DOUBLE;
 
 # adding an existing column without IF NOT EXISTS is an error
 statement error
-ALTER TABLE my_datalake.default.ddl_add_column ADD COLUMN score DOUBLE;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_add_column ADD COLUMN score DOUBLE;
 ----
 
 # a second attach sees the change, it is stored in Glue and not only in the cached entry
@@ -51,7 +54,8 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake_2 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
@@ -62,4 +66,4 @@ name	VARCHAR
 score	DOUBLE
 
 statement ok
-DROP TABLE my_datalake.default.ddl_add_column;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ddl_add_column;

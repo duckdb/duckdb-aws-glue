@@ -8,13 +8,16 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 # VERIFY_CONNECTION false is accepted (attach succeeds with the reachability probe skipped)
 statement ok
 ATTACH '{GLUE_CATALOG_ID}' AS novrfy_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
-    VERIFY_CONNECTION false
+    VERIFY_CONNECTION false,
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 # VERIFY_CONNECTION true (the default) is accepted (attach succeeds with the probe run)
@@ -23,7 +26,8 @@ ATTACH '{GLUE_CATALOG_ID}' AS vrfy_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
-    VERIFY_CONNECTION true
+    VERIFY_CONNECTION true,
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 # an unrecognized attach option is rejected
@@ -31,7 +35,8 @@ statement error
 ATTACH '{GLUE_CATALOG_ID}' AS bad_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    NONEXISTENT_OPTION 'x'
+    NONEXISTENT_OPTION 'x',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 ----
 Unrecognized option for Glue attach

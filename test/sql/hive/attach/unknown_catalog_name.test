@@ -10,46 +10,49 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ucn_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ucn_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.ucn_orders (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ucn_orders (id INTEGER);
 
 statement ok
-INSERT INTO my_datalake.default.ucn_orders VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ucn_orders VALUES (1);
 
 # the Glue catalog is the default: DuckDB reads "x".db.t with an unknown catalog x as the schema path [x, db] in it,
 # which used to resolve to database db (and read the table). DuckDB looks schemas up with RETURN_NULL here and reports
 # its own "does not exist" message.
 statement ok
-USE my_datalake.default;
+USE my_datalake.{GLUE_TEST_DB};
 
 statement error
-SELECT id FROM "999999999999"."default".ucn_orders;
+SELECT id FROM "999999999999"."{GLUE_TEST_DB}".ucn_orders;
 ----
-schema "999999999999.default" does not exist
+schema "999999999999.{GLUE_TEST_DB}" does not exist
 
 statement error
-SELECT id FROM not_attached."default".ucn_orders;
+SELECT id FROM not_attached."{GLUE_TEST_DB}".ucn_orders;
 ----
-schema "not_attached.default" does not exist
+schema "not_attached.{GLUE_TEST_DB}" does not exist
 
 # the names that do resolve still do
 query I
-SELECT id FROM my_datalake."default".ucn_orders;
+SELECT id FROM my_datalake."{GLUE_TEST_DB}".ucn_orders;
 ----
 1
 
 query I
-SELECT id FROM "default".ucn_orders;
+SELECT id FROM "{GLUE_TEST_DB}".ucn_orders;
 ----
 1
 
@@ -62,4 +65,4 @@ statement ok
 USE memory;
 
 statement ok
-DROP TABLE my_datalake.default.ucn_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ucn_orders;

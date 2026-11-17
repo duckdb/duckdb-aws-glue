@@ -10,56 +10,59 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cy_c;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cy_c;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cy_b;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cy_b;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cy_a;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cy_a;
 
 statement ok
 DROP SCHEMA IF EXISTS my_datalake.cy_other_schema CASCADE;
 
 # through other views (the view read directly: test_create_view.test)
 statement ok
-CREATE VIEW my_datalake.default.cy_a AS SELECT 1 AS x;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cy_a AS SELECT 1 AS x;
 
 statement ok
-CREATE VIEW my_datalake.default.cy_b AS SELECT x FROM cy_a;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cy_b AS SELECT x FROM cy_a;
 
 statement ok
-CREATE VIEW my_datalake.default.cy_c AS SELECT x FROM my_datalake.default.cy_b;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cy_c AS SELECT x FROM my_datalake.{GLUE_TEST_DB}.cy_b;
 
 statement error
-CREATE OR REPLACE VIEW my_datalake.default.cy_a AS SELECT x FROM my_datalake.default.cy_c;
+CREATE OR REPLACE VIEW my_datalake.{GLUE_TEST_DB}.cy_a AS SELECT x FROM my_datalake.{GLUE_TEST_DB}.cy_c;
 ----
-Glue view "default.cy_a" can not be created: its query reads the view itself
+Glue view "{GLUE_TEST_DB}.cy_a" can not be created: its query reads the view itself
 
 query I
-SELECT response.ViewExpandedText FROM glue_get_table_response('my_datalake.default.cy_a');
+SELECT response.ViewExpandedText FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.cy_a');
 ----
 SELECT 1 AS x
 
 query I
-SELECT x FROM my_datalake.default.cy_c;
+SELECT x FROM my_datalake.{GLUE_TEST_DB}.cy_c;
 ----
 1
 
 # IF NOT EXISTS of an existing view leaves it as it is, whatever the new query
 statement ok
-CREATE VIEW IF NOT EXISTS my_datalake.default.cy_a AS SELECT x FROM cy_c;
+CREATE VIEW IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.cy_a AS SELECT x FROM cy_c;
 
 query I
-SELECT response.ViewExpandedText FROM glue_get_table_response('my_datalake.default.cy_a');
+SELECT response.ViewExpandedText FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.cy_a');
 ----
 SELECT 1 AS x
 
@@ -71,10 +74,10 @@ statement ok
 CREATE VIEW my_datalake.cy_other_schema.cy_a AS SELECT 2 AS x;
 
 statement ok
-CREATE OR REPLACE VIEW my_datalake.default.cy_a AS SELECT x FROM cy_other_schema.cy_a;
+CREATE OR REPLACE VIEW my_datalake.{GLUE_TEST_DB}.cy_a AS SELECT x FROM cy_other_schema.cy_a;
 
 query I
-SELECT x FROM my_datalake.default.cy_c;
+SELECT x FROM my_datalake.{GLUE_TEST_DB}.cy_c;
 ----
 2
 
@@ -83,18 +86,18 @@ DROP SCHEMA my_datalake.cy_other_schema CASCADE;
 
 # a CTE of the view's own name is not the view
 statement ok
-CREATE OR REPLACE VIEW my_datalake.default.cy_a AS WITH cy_a AS (SELECT 7 AS x) SELECT x FROM cy_a;
+CREATE OR REPLACE VIEW my_datalake.{GLUE_TEST_DB}.cy_a AS WITH cy_a AS (SELECT 7 AS x) SELECT x FROM cy_a;
 
 query I
-SELECT x FROM my_datalake.default.cy_c;
+SELECT x FROM my_datalake.{GLUE_TEST_DB}.cy_c;
 ----
 7
 
 statement ok
-DROP VIEW my_datalake.default.cy_c;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cy_c;
 
 statement ok
-DROP VIEW my_datalake.default.cy_b;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cy_b;
 
 statement ok
-DROP VIEW my_datalake.default.cy_a;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cy_a;
