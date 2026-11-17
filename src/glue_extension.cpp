@@ -203,7 +203,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// ATTACH '<catalog id>' (TYPE GLUE)
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
 	PlannerExtension partition_prefetch;
-	partition_prefetch.post_bind_function = PrefetchHivePartitions;
+	partition_prefetch.post_bind_function = RegisterHiveScansForPrefetch;
 	PlannerExtension::Register(config, std::move(partition_prefetch));
 
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());

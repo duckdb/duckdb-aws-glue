@@ -1,5 +1,5 @@
 # name: test/sql/hive/logging/partition_load_parallelism.test
-# description: once a statement is bound, the partitions of the partitioned Glue tables it scans load concurrently (glue_partition_load_parallelism), and a failed or throttled load falls back to each scan loading its own table
+# description: when the first scan of a statement needs partitions, the partitions of the partitioned Glue tables its scans still read load concurrently (glue_partition_load_parallelism), and a failed or throttled load falls back to each scan loading its own table
 # group: [logging]
 
 require httpfs
@@ -200,7 +200,7 @@ FROM duckdb_logs_parsed('GlueScan');
 ----
 loaded 3 of 3 tables	3
 
-# The prefetch runs at bind: a scan the optimizer removes afterwards is loaded too
+# A scan the optimizer removes before any scan needs partitions is not loaded, with the prefetch as without
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -217,9 +217,31 @@ SELECT max(detail) FILTER (event = 'prefetch'),
        tables_loaded()
 FROM duckdb_logs_parsed('GlueScan');
 ----
-loaded 3 of 3 tables	3
+loaded 2 of 2 tables	2
 
-# and so it runs without the optimizer, and for EXPLAIN
+statement ok
+SET glue_partition_load_parallelism = 1;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (
+    SELECT id FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id)
+    UNION ALL
+    SELECT id FROM plp.default.plp_c WHERE 1 = 0);
+----
+3
+
+query I
+SELECT tables_loaded();
+----
+2
+
+statement ok
+RESET glue_partition_load_parallelism;
+
+# Without the optimizer the first scan needs partitions when the query runs, and the prefetch runs then; EXPLAIN
 statement ok
 SET enable_optimizer = false;
 

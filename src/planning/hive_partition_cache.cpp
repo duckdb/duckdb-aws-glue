@@ -80,8 +80,8 @@ public:
 			// BindHiveScan sets this cardinality, on every scan of a Glue Hive table and only on those
 			if (get.function.cardinality == HiveScanCardinality && get.bind_data) {
 				auto &bind_data = get.bind_data->Cast<MultiFileBindData>();
-				auto &scan = bind_data.file_list->Cast<HiveMultiFileList>().ScanInfo();
-				if (!scan.catalog_name.empty() && !scan.partition_keys.empty() && !scan.PartitionsLoaded()) {
+				auto &scan = bind_data.file_list->Cast<HiveMultiFileList>().SharedScanInfo();
+				if (!scan->catalog_name.empty() && !scan->partition_keys.empty() && !scan->PartitionsLoaded()) {
 					scans.push_back(scan);
 				}
 			}
@@ -90,7 +90,7 @@ public:
 		VisitOperatorChildren(op);
 	}
 
-	vector<reference<const HiveScanInfo>> scans;
+	vector<shared_ptr<const HiveScanInfo>> scans;
 
 protected:
 	unique_ptr<Expression> VisitReplace(BoundSubqueryExpression &expr, unique_ptr<Expression> *expr_ptr) override {
@@ -130,6 +130,20 @@ shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Resolve(ClientCo
 }
 
 shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Get(ClientContext &context, const HiveScanInfo &scan) {
+	{
+		annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
+		if (!registered_scans.empty()) {
+			vector<shared_ptr<const HiveScanInfo>> scans;
+			for (auto &registered : registered_scans) {
+				auto alive = registered.lock();
+				if (alive) {
+					scans.push_back(std::move(alive));
+				}
+			}
+			registered_scans.clear();
+			Prefetch(context, scans);
+		}
+	}
 	auto &catalog = GetGlueCatalog(context, scan);
 	return Resolve(context, catalog, scan, [&]() {
 		return make_shared_ptr<const vector<GluePartitionInfo>>(
@@ -137,7 +151,18 @@ shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Get(ClientContex
 	});
 }
 
+void HivePartitionCache::RegisterScans(const vector<shared_ptr<const HiveScanInfo>> &scans) {
+	annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
+	for (auto &scan : scans) {
+		registered_scans.push_back(scan);
+	}
+}
+
 void HivePartitionCache::Clear() {
+	{
+		annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
+		registered_scans.clear();
+	}
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	tables.clear();
 }
@@ -190,7 +215,7 @@ bool HivePartitionCache::PrefetchBatch(ClientContext &context, GlueCatalog &cata
 	return !result.error.HasError();
 }
 
-void HivePartitionCache::Prefetch(ClientContext &context, const vector<reference<const HiveScanInfo>> &scans) {
+void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_ptr<const HiveScanInfo>> &scans) {
 	auto parallelism = GetIdxSetting(context, "glue_partition_load_parallelism", DEFAULT_PARTITION_LOAD_PARALLELISM);
 	if (parallelism <= 1) {
 		return;
@@ -199,7 +224,7 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<reference
 	map<string, vector<reference<const HiveScanInfo>>> by_catalog;
 	unordered_set<string> seen;
 	for (auto &scan : scans) {
-		auto &info = scan.get();
+		auto &info = *scan;
 		if (!seen.insert(HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name)).second) {
 			continue;
 		}
@@ -237,7 +262,7 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<reference
 	}
 }
 
-void PrefetchHivePartitions(PlannerExtensionInput &input, BoundStatement &statement) {
+void RegisterHiveScansForPrefetch(PlannerExtensionInput &input, BoundStatement &statement) {
 	if (!statement.plan) {
 		return;
 	}
@@ -246,7 +271,7 @@ void PrefetchHivePartitions(PlannerExtensionInput &input, BoundStatement &statem
 	if (collector.scans.size() < 2) {
 		return;
 	}
-	HiveQueryCache::Get(input.context)->Partitions().Prefetch(input.context, collector.scans);
+	HiveQueryCache::Get(input.context)->Partitions().RegisterScans(collector.scans);
 }
 
 } // namespace duckdb

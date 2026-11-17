@@ -532,11 +532,11 @@ Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s be
 
 Each scan fetches its table's partitions when it first needs them: at filter pushdown when a filter on a partition
 key is pushed into it, otherwise when join ordering first estimates it. For a statement that scans several
-partitioned tables, that is one table after another. So once a statement is bound, the partitions of every
-partitioned table it scans that no cache holds yet are fetched concurrently, `glue_partition_load_parallelism` tables
-at a time (default 8; each with its `glue_get_partitions_segments` requests), and the scans take them from the
-query's cache. Subqueries, `UNION ALL` branches and CTEs are included, and so is a scan the optimizer removes later
-(e.g. `WHERE 1 = 0`), which otherwise would not fetch anything. A table alone in its catalog is left to its scan.
+partitioned tables, that is one table after another. So when the first scan of a statement needs partitions, the
+partitions of every partitioned table its scans read that no cache holds yet are fetched concurrently,
+`glue_partition_load_parallelism` tables at a time (default 8; each with its `glue_get_partitions_segments`
+requests), and the scans take them from the query's cache. Subqueries, `UNION ALL` branches and CTEs are included; a
+scan the optimizer removed before then (e.g. `WHERE 1 = 0`) is not. A table alone in its catalog is left to its scan.
 
 When a request fails, the requests not sent yet are not sent, and the tables not fetched are fetched by their scans
 as before, which raise the error if it happens again. When Glue throttled a request (`ThrottlingException`,
