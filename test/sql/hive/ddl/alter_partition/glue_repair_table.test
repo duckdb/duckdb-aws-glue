@@ -367,5 +367,86 @@ SELECT count(*) FROM glue_repair_table('my_datalake.default.orders_repair_many')
 statement ok
 DROP TABLE my_datalake.default.orders_repair_many;
 
+#---------------------------------------------------------------------------
+# with missing := true, registered partitions with no file below their location are reported as missing, and kept
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.orders_repair_missing;
+
+statement ok
+CREATE TABLE my_datalake.default.orders_repair_missing (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=a/data.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=c/data.parquet';
+
+# a partition whose files were removed, one with files, and one outside the table location, which the listing of the
+# table location can not tell about
+statement ok
+CALL glue_add_partition('my_datalake.default.orders_repair_missing', {dt: 'b'});
+
+statement ok
+CALL glue_add_partition('my_datalake.default.orders_repair_missing', {dt: 'c'});
+
+statement ok
+CALL glue_add_partition('my_datalake.default.orders_repair_missing', {dt: 'x'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere/dt=x');
+
+# without it the result only has the added partitions, as before
+query II
+SELECT dt, location FROM glue_repair_table('my_datalake.default.orders_repair_missing') ORDER BY dt;
+----
+a	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=a
+
+statement ok
+CALL glue_drop_partition('my_datalake.default.orders_repair_missing', {dt: 'a'});
+
+query III
+SELECT dt, location, status FROM glue_repair_table('my_datalake.default.orders_repair_missing', missing := true) ORDER BY status, dt;
+----
+a	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=a	added
+b	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=b	missing
+
+query I
+SELECT dt FROM glue_partitions('my_datalake.default.orders_repair_missing') ORDER BY dt;
+----
+a
+b
+c
+x
+
+# a file anywhere below the location counts, not only data files directly in it
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=b/nested/data.parquet';
+
+query I
+SELECT count(*) FROM glue_repair_table('my_datalake.default.orders_repair_missing', missing := true);
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.orders_repair_missing;
+
+#---------------------------------------------------------------------------
+# a partition key called status: the status column becomes status_1
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.orders_repair_status;
+
+statement ok
+CREATE TABLE my_datalake.default.orders_repair_status (id INTEGER, status VARCHAR) PARTITIONED BY (status);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_status/status=open/data.parquet';
+
+query II
+SELECT status, status_1 FROM glue_repair_table('my_datalake.default.orders_repair_status', missing := true);
+----
+open	added
+
+statement ok
+DROP TABLE my_datalake.default.orders_repair_status;
+
 statement ok
 DROP TABLE my_datalake.default.orders_repair;

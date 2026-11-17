@@ -29,6 +29,8 @@ struct GlueRepairTableBindData : public TableFunctionData {
 	GluePartitionTarget target;
 	vector<LogicalType> key_types;
 	string root;
+	//! missing := true: also report the registered partitions that are gone, with a status column
+	bool report_missing = false;
 
 	//! The partitions are created from the table definition fetched at bind, so a prepared statement binds every time
 	bool SupportStatementCache() const override {
@@ -38,6 +40,8 @@ struct GlueRepairTableBindData : public TableFunctionData {
 
 struct GlueRepairTableState : public GlobalTableFunctionState {
 	vector<GluePartitionInput> added;
+	//! registered partitions below the table location without any file below their location
+	vector<GluePartitionInput> missing;
 	idx_t offset = 0;
 	bool applied = false;
 };
@@ -79,11 +83,16 @@ unique_ptr<FunctionData> GlueRepairTableBind(ClientContext &context, TableFuncti
 		                              HiveFileFormatToString(file_format));
 	}
 	ThrowIfReadWithFileCredentials(context, input.inputs[0], result->target);
+	auto missing = input.named_parameters.find("missing");
+	if (missing != input.named_parameters.end() && !missing->second.IsNull()) {
+		result->report_missing = BooleanValue::Get(missing->second);
+	}
 	result->root = result->target.table.location;
 	StringUtil::RTrim(result->root, "/");
 	if (result->root.empty()) {
 		throw InvalidInputException("Table '%s' has no location in Glue", result->target.TableName());
 	}
+	auto keys_count = result->target.table.partition_keys.size();
 	for (auto &key : result->target.table.partition_keys) {
 		auto type = GlueTypes::ToLogicalType(key.type);
 		result->key_types.push_back(type);
@@ -91,10 +100,16 @@ unique_ptr<FunctionData> GlueRepairTableBind(ClientContext &context, TableFuncti
 		return_types.push_back(type);
 	}
 	names.emplace_back("location");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	if (result->report_missing) {
+		names.emplace_back("status");
+		return_types.emplace_back(LogicalType::VARCHAR);
+	}
 	auto deduplicated = names;
 	QueryResult::DeduplicateColumns(deduplicated);
-	names.back() = deduplicated.back();
-	return_types.emplace_back(LogicalType::VARCHAR);
+	for (auto i = keys_count; i < names.size(); i++) {
+		names[i] = deduplicated[i];
+	}
 	return std::move(result);
 }
 
@@ -163,22 +178,36 @@ void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, Glue
 	auto &table = bind_data.target.table;
 	CheckWritable(catalog, "BatchCreatePartition");
 
+	auto root_prefix = bind_data.root + "/";
 	set<vector<string>> existing_values;
 	unordered_set<string> existing_locations;
+	// the registered partitions the listing below can tell are gone: those whose location is below the table location
+	map<vector<string>, string> listed_partitions;
 	for (auto &partition : GlueAPI::GetPartitions(context, catalog, table.schema_name, table.name)) {
 		existing_values.insert(partition.values);
 		auto location = partition.location;
 		StringUtil::RTrim(location, "/");
+		if (bind_data.report_missing && StringUtil::StartsWith(location, root_prefix)) {
+			listed_partitions.emplace(partition.values, location);
+		}
 		existing_locations.insert(std::move(location));
 	}
 
-	auto root_prefix = bind_data.root + "/";
+	// every directory below the table location that holds a file, at any depth: a partition location exists when
+	// an object is stored below it, as on S3
+	unordered_set<string> directories_with_files;
 	unordered_set<string> seen_directories;
 	// values -> location: the first directory found for the values wins
 	map<vector<string>, string> discovered;
 	// never from a listing kept by glue_cache_listings (it misses files added after it), and not kept: a table can
 	// hold more files than fit in memory
 	ListFilesBelow(FileSystem::GetFileSystem(context), bind_data.root, [&](const OpenFileInfo &file) {
+		for (auto end = file.path.find_last_of('/'); end != string::npos && end > bind_data.root.size();
+		     end = file.path.find_last_of('/', end - 1)) {
+			if (!directories_with_files.insert(file.path.substr(0, end)).second) {
+				break;
+			}
+		}
 		if (!IsDataFile(file, root_prefix)) {
 			return;
 		}
@@ -209,6 +238,14 @@ void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, Glue
 		partition.location = entry.second;
 		state.added.push_back(std::move(partition));
 	}
+	for (auto &entry : listed_partitions) {
+		if (!directories_with_files.count(entry.second)) {
+			GluePartitionInput partition;
+			partition.values = entry.first;
+			partition.location = entry.second;
+			state.missing.push_back(std::move(partition));
+		}
+	}
 	if (state.added.empty()) {
 		return;
 	}
@@ -224,13 +261,19 @@ void GlueRepairTableScan(ClientContext &context, TableFunctionInput &data, DataC
 	}
 	auto &keys = bind_data.target.table.partition_keys;
 	idx_t count = 0;
-	while (state.offset < state.added.size() && count < STANDARD_VECTOR_SIZE) {
-		auto &partition = state.added[state.offset++];
+	auto total = state.added.size() + state.missing.size();
+	while (state.offset < total && count < STANDARD_VECTOR_SIZE) {
+		auto is_added = state.offset < state.added.size();
+		auto &partition = is_added ? state.added[state.offset] : state.missing[state.offset - state.added.size()];
+		state.offset++;
 		for (idx_t k = 0; k < keys.size(); k++) {
 			output.data[k].Append(
 			    PartitionListingValue(context, keys[k].name, partition.values[k], bind_data.key_types[k]));
 		}
 		output.data[keys.size()].Append(Value(partition.location));
+		if (bind_data.report_missing) {
+			output.data[keys.size() + 1].Append(Value(is_added ? "added" : "missing"));
+		}
 		count++;
 	}
 }
@@ -240,6 +283,8 @@ void GlueRepairTableScan(ClientContext &context, TableFunctionInput &data, DataC
 TableFunction GetGlueRepairTableFunction() {
 	TableFunction function("glue_repair_table", {LogicalType::VARCHAR}, GlueRepairTableScan, GlueRepairTableBind,
 	                       GlueRepairTableInit);
+	function.GetSignature().WithTypedKwargs("options",
+	                                        [](TypedKwargs &options) { options.Add("missing", LogicalType::BOOLEAN); });
 	return function;
 }
 
