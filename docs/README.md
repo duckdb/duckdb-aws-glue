@@ -272,7 +272,7 @@ their codec themselves.
   USING <expr>` is refused, since the data files can not be rewritten.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`, and avro
-  with `avro.output.codec`. A table without its format's codec parameter is written with `write_compression`, if it
+  with `avro.output.codec` (snappy, deflate, bzip2 or zstandard). A table without its format's codec parameter is written with `write_compression`, if it
   records one. Another codec is an error.
 - `ALTER TABLE ... RENAME COLUMN` is supported for csv tables, whose files are read by position. Parquet, json and
   avro files are matched by name, so a rename would make the existing data read as NULL and is refused (replace the
@@ -338,8 +338,10 @@ this connection's cache: a write through it, a rollback, or DETACH.
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...` and `CREATE SECURE VIEW` create a Glue
   view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB. `OR REPLACE` updates it in place. Unqualified table
-  names in the SELECT refer to the view's own database. The view's columns store their DuckDB types (e.g. `HUGEINT`,
-  `INTEGER`), not Glue types.
+  names in the SELECT refer to the view's own database.
+- A view column's Glue type is its Hive type, or the closest one other engines read (`decimal(38,0)` for `HUGEINT`,
+  `timestamp` for `TIMESTAMP_NS`), or `string` when there is none (e.g. `TIME`, `UUID`). DuckDB uses only the
+  column names and binds the view's SQL for the types. Other engines don't query DuckDB views; Spark refuses them.
 - `CREATE VIEW ... WITH (DEFER_BINDING)` is not supported yet: the tables a view reads must exist when it is created.
 - A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
   `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a

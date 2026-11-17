@@ -214,6 +214,19 @@ private:
 	idx_t pos;
 };
 
+//! Hive type strings don't quote field names, and Spark reads a name starting with a digit as a number
+bool IsPlainHiveFieldName(const string &name) {
+	if (name.empty() || StringUtil::CharacterIsDigit(name[0])) {
+		return false;
+	}
+	for (auto c : name) {
+		if (!StringUtil::CharacterIsAlphaNumeric(c) && c != '_') {
+			return false;
+		}
+	}
+	return true;
+}
+
 } // namespace
 
 LogicalType GlueTypes::ToLogicalType(const string &glue_type) {
@@ -288,6 +301,66 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	}
 	default:
 		throw NotImplementedException("DuckDB type '%s' can not be converted to a Glue type", type.ToString());
+	}
+}
+
+string GlueTypes::FromLogicalTypeForView(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::BOOLEAN:
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::FLOAT:
+	case LogicalTypeId::DOUBLE:
+	case LogicalTypeId::DECIMAL:
+	case LogicalTypeId::VARCHAR:
+	case LogicalTypeId::BLOB:
+	case LogicalTypeId::DATE:
+	case LogicalTypeId::TIMESTAMP:
+		return FromLogicalType(type);
+	case LogicalTypeId::UBIGINT:
+		return "decimal(20,0)";
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UHUGEINT:
+		return "decimal(38,0)";
+	case LogicalTypeId::TIMESTAMP_SEC:
+	case LogicalTypeId::TIMESTAMP_MS:
+	case LogicalTypeId::TIMESTAMP_NS:
+	case LogicalTypeId::TIMESTAMP_TZ:
+	case LogicalTypeId::TIMESTAMP_TZ_NS:
+		return "timestamp";
+	case LogicalTypeId::LIST:
+		return "array<" + FromLogicalTypeForView(ListType::GetChildType(type)) + ">";
+	case LogicalTypeId::ARRAY:
+		return "array<" + FromLogicalTypeForView(ArrayType::GetChildType(type)) + ">";
+	case LogicalTypeId::MAP:
+		// Hive map keys are primitive
+		if (MapType::KeyType(type).IsNested()) {
+			return "string";
+		}
+		return "map<" + FromLogicalTypeForView(MapType::KeyType(type)) + "," +
+		       FromLogicalTypeForView(MapType::ValueType(type)) + ">";
+	case LogicalTypeId::STRUCT: {
+		auto &children = StructType::GetChildTypes(type);
+		if (children.empty()) {
+			return "string";
+		}
+		vector<string> fields;
+		for (auto &child : children) {
+			auto &name = child.first.GetIdentifierName();
+			if (!IsPlainHiveFieldName(name)) {
+				return "string";
+			}
+			fields.push_back(name + ":" + FromLogicalTypeForView(child.second));
+		}
+		return "struct<" + StringUtil::Join(fields, ",") + ">";
+	}
+	default:
+		return "string";
 	}
 }
 

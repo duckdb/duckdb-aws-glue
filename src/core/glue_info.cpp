@@ -305,9 +305,14 @@ string GlueTableInfo::GetCodec(HiveFileFormat format) const {
 		if (codec == "none" || codec == "uncompressed") {
 			return "null";
 		}
-		if (!codec.empty() && codec != "snappy" && codec != "deflate" && codec != "null") {
+		// write_compression names it ZSTD; Avro names it zstandard
+		if (codec == "zstd") {
+			return "zstandard";
+		}
+		if (!codec.empty() && codec != "snappy" && codec != "deflate" && codec != "bzip2" && codec != "zstandard" &&
+		    codec != "null") {
 			throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB "
-			                              "writes only snappy and deflate compressed avro files",
+			                              "writes only snappy, deflate, bzip2 and zstandard compressed avro files",
 			                              schema_name, name, codec);
 		}
 		return codec;

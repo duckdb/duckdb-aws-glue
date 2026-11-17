@@ -5,6 +5,8 @@
 		"zlib",
 		"snappy",
 		"liblzma",
+		"bzip2",
+		"zstd",
 		"jansson",
 		"roaring",
 		{
