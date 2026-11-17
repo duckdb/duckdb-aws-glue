@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/scan_partitioned/test_prefetch_scan_metadata.test
-# description: glue_prefetch_scan_metadata fetches a statement's Glue partitions and samples before it is optimized: the same results, estimates, errors and requests, except for a scan the optimizer drops
+# description: glue_prefetch_scan_metadata fetches a statement's Glue partitions, samples and footers before it is optimized: the same results, estimates, errors and requests, except for a scan the optimizer drops
 # group: [scan_partitioned]
 
 require httpfs
@@ -32,6 +32,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.pf_item;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.pf_item2;
+
+statement ok
 DROP TABLE IF EXISTS my_datalake.default.pf_failed_page;
 
 statement ok
@@ -58,6 +61,13 @@ INSERT INTO my_datalake.default.pf_stock SELECT i % 50, i % 11, 'd' || (i % 2) F
 statement ok
 CREATE TABLE my_datalake.default.pf_item AS SELECT range AS item, 'item ' || range AS name FROM range(50);
 
+# two files
+statement ok
+CREATE TABLE my_datalake.default.pf_item2 AS SELECT range AS item FROM range(25);
+
+statement ok
+INSERT INTO my_datalake.default.pf_item2 SELECT range FROM range(25, 50);
+
 statement ok
 SET enable_external_file_cache = false;
 
@@ -77,6 +87,12 @@ CREATE MACRO pf_requests() AS TABLE
     FROM duckdb_logs_parsed('HTTP')
     GROUP BY 1;
 
+# the GlueScan events that list a table, read its footers or sample it
+statement ok
+CREATE MACRO pf_events() AS TABLE
+    SELECT event, "table", count(*) AS n FROM duckdb_logs_parsed('GlueScan')
+    WHERE event IN ('listing', 'footers', 'sample') GROUP BY ALL;
+
 statement ok
 CREATE MACRO pf_query() AS TABLE
     SELECT s.dt, i.name, sum(s.qty) AS sold, sum(r.qty) AS returned, count(DISTINCT k.qty) AS stocked
@@ -84,6 +100,7 @@ CREATE MACRO pf_query() AS TABLE
     JOIN my_datalake.default.pf_returns r ON s.item = r.item AND s.dt = r.dt
     JOIN my_datalake.default.pf_stock k ON k.item = s.item
     JOIN my_datalake.default.pf_item i ON i.item = s.item
+    JOIN my_datalake.default.pf_item2 j ON j.item = s.item
     WHERE i.item < 3
     GROUP BY ALL ORDER BY ALL;
 
@@ -112,6 +129,9 @@ statement ok
 CREATE TEMP TABLE pf_off AS FROM pf_requests();
 
 statement ok
+CREATE TEMP TABLE pf_off_events AS FROM pf_events();
+
+statement ok
 RESET glue_prefetch_scan_metadata;
 
 statement ok
@@ -131,18 +151,24 @@ query TI
 (FROM pf_requests() EXCEPT FROM pf_off) UNION ALL (FROM pf_off EXCEPT FROM pf_requests());
 ----
 
+query TTI
+(FROM pf_events() EXCEPT FROM pf_off_events) UNION ALL (FROM pf_off_events EXCEPT FROM pf_events());
+----
+
 query I
 SELECT n FROM pf_requests() WHERE request = 'AWSGlue.GetPartitions';
 ----
 3
 
-# pf_item is counted from its footer, so it is not sampled
-query TI
-SELECT "table", count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'sample' GROUP BY ALL ORDER BY ALL;
+# pf_item and pf_item2 are counted from their footers, read once, so they are not sampled
+query TTI
+SELECT * FROM pf_events() WHERE event IN ('footers', 'sample') ORDER BY ALL;
 ----
-default.pf_returns	1
-default.pf_sales	1
-default.pf_stock	1
+footers	default.pf_item	1
+footers	default.pf_item2	1
+sample	default.pf_returns	1
+sample	default.pf_sales	1
+sample	default.pf_stock	1
 
 # without footer statistics pf_item is sampled once, with or without the prefetch
 statement ok
@@ -328,6 +354,9 @@ DESCRIBE my_datalake.default.pf_sales;
 statement ok
 PREPARE pf_prepared AS SELECT count(*) FROM my_datalake.default.pf_sales WHERE dt = ?;
 
+statement ok
+PREPARE pf_dropped AS SELECT count(*) FROM my_datalake.default.pf_item WHERE false;
+
 query I
 SELECT count(*) FROM pf_requests() WHERE request = 'AWSGlue.GetPartitions' OR request LIKE 'GET%';
 ----
@@ -337,6 +366,36 @@ query I
 EXECUTE pf_prepared('d2');
 ----
 334
+
+statement ok
+DEALLOCATE pf_dropped;
+
+# The prefetch reads the footers before the optimizer runs, so also those of a scan the optimizer then removes
+foreach setting false true
+
+statement ok
+SET glue_prefetch_scan_metadata = {setting};
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pf_item WHERE false;
+----
+0
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pf_footers_{setting} AS SELECT count(*) AS n FROM pf_events() WHERE event = 'footers';
+
+endloop
+
+query II
+SELECT f.n, t.n FROM pf_footers_false f, pf_footers_true t;
+----
+0	1
+
+statement ok
+RESET glue_prefetch_scan_metadata;
 
 # A failing GetPartitions fails the statement with the same error, asked once
 statement ok
@@ -526,3 +585,6 @@ DROP TABLE my_datalake.default.pf_stock;
 
 statement ok
 DROP TABLE my_datalake.default.pf_item;
+
+statement ok
+DROP TABLE my_datalake.default.pf_item2;

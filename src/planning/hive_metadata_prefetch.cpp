@@ -86,6 +86,31 @@ struct PrefetchTable {
 	unique_ptr<FunctionData> bind_data;
 	//! A filter may prune a scan of the table to some partitions, which the scan then lists and measures itself
 	bool filtered = false;
+	//! An unpartitioned parquet table: the optimizer counts it from its footers when it has few enough files
+	bool reads_footers = false;
+	//! Set once the footers are read: false when the table has more files than hive_footer_statistics_max_files
+	bool has_footers = false;
+};
+
+//! Reads the footers of a table for the optimizer, which finds them in the query cache
+class PrefetchFootersTask : public BaseExecutorTask {
+public:
+	PrefetchFootersTask(TaskExecutor &executor, ClientContext &context, PrefetchTable &table)
+	    : BaseExecutorTask(executor), context(context), table(table) {
+	}
+
+	void ExecuteTask() override {
+		auto &data = table.bind_data->Cast<MultiFileBindData>();
+		auto &info = data.file_list->Cast<HiveMultiFileList>().ScanInfo();
+		table.has_footers = info.FooterStatisticsBindData(context, data) != nullptr;
+	}
+	string TaskType() const override {
+		return "PrefetchFootersTask";
+	}
+
+private:
+	ClientContext &context;
+	PrefetchTable &table;
 };
 
 struct PrefetchPlan {
@@ -115,14 +140,20 @@ void CollectHiveScans(LogicalOperator &op, PrefetchPlan &plan) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op.Cast<LogicalGet>();
 		auto info = HiveScanInfo::TryGet(get);
-		// Glue tables only: a hive_scan of a location has its partitions already, and a table the optimizer counts from
-		// its footers is unpartitioned and not sampled
-		if (info && !info->catalog_name.empty() && !info->ReadsFooterStatistics()) {
+		// Glue tables only: a hive_scan of a location has its partitions already
+		if (info && !info->catalog_name.empty()) {
 			auto key = HiveQueryCache::TableKey(info->catalog_name, info->database_name, info->table_name);
 			auto entry = plan.table_by_key.emplace(key, plan.tables.size());
 			if (entry.second) {
 				plan.tables.emplace_back();
-				plan.tables.back().bind_data = get.bind_data->Copy();
+				auto &table = plan.tables.back();
+				table.bind_data = get.bind_data->Copy();
+				table.reads_footers = info->ReadsFooterStatistics();
+				if (table.reads_footers) {
+					// the scan's own list, as when the optimizer reads them: the scan does not list the table again
+					table.bind_data->Cast<MultiFileBindData>().file_list =
+					    get.bind_data->Cast<MultiFileBindData>().file_list;
+				}
 			}
 			auto &column_ids = get.GetColumnIds();
 			for (idx_t i = 0; i < column_ids.size(); i++) {
@@ -252,12 +283,28 @@ void HiveMetadataPrefetch::PreOptimize(OptimizerExtensionInput &input, unique_pt
 	auto &executor =
 	    context.registered_state->GetOrCreate<HiveMetadataPrefetchState>(HIVE_METADATA_PREFETCH)->Executor(context);
 	vector<unique_ptr<BaseExecutorTask>> tasks;
+	TaskExecutor footer_reads(context, TaskSchedulerType::ASYNC);
 	for (auto &table : prefetch.tables) {
-		tasks.push_back(make_uniq<PrefetchTableTask>(executor, context, std::move(table.bind_data), !table.filtered));
+		if (table.reads_footers) {
+			footer_reads.ScheduleTask(make_uniq<PrefetchFootersTask>(footer_reads, context, table));
+		} else {
+			tasks.push_back(
+			    make_uniq<PrefetchTableTask>(executor, context, std::move(table.bind_data), !table.filtered));
+		}
 	}
 	// not waited for: a scan that gets the cache entry's lock first fetches for itself, and one that needs the metadata
 	// while its task runs waits on that lock
 	executor.ScheduleTasks(std::move(tasks));
+	// the optimizer would read each table's footers at its first estimate of the table, one table after another.
+	// This thread reads too, and waits for the others
+	footer_reads.WorkOnTasks();
+	for (auto &table : prefetch.tables) {
+		if (table.reads_footers && !table.has_footers) {
+			// more files than hive_footer_statistics_max_files: the optimizer samples the table instead. A copy: the
+			// bind data's file list is the scan's own
+			executor.ScheduleTask(make_uniq<PrefetchTableTask>(executor, context, table.bind_data->Copy(), true));
+		}
+	}
 }
 
 } // namespace duckdb

@@ -194,6 +194,10 @@ EXECUTE count_above(100);
 statement ok
 SET disabled_filesystems = 'S3FileSystem';
 
+# the prefetch reads the footers of a scan before the optimizer removes it
+statement ok
+SET glue_prefetch_scan_metadata = false;
+
 statement ok
 PREPARE table_false AS SELECT * FROM lazy_lake.default.lazy_footers WHERE false;
 

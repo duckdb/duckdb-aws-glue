@@ -148,8 +148,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("glue_prefetch_scan_metadata",
 	                          "Before a statement is optimized, fetch the partitions and the cardinality sample of "
-	                          "every Glue table it scans at the same time. False fetches them one table at a time, "
-	                          "when the optimizer first needs each. Default true.",
+	                          "every Glue table it scans, and the footers of its small unpartitioned parquet tables, "
+	                          "at the same time. False fetches them one table at a time, when the optimizer first "
+	                          "needs each. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	config.AddExtensionOption("hive_csv_parallel",

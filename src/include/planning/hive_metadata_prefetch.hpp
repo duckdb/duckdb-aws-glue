@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-//! Fetches the partitions and samples of a statement's Glue tables at the same time, before it is optimized
+//! Fetches the partitions, samples and footers of a statement's Glue tables at the same time, before it is optimized
 class HiveMetadataPrefetch : public OptimizerExtension {
 public:
 	HiveMetadataPrefetch();
