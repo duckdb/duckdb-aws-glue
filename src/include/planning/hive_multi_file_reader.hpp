@@ -84,11 +84,19 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
+	//! Whether Glue returned only the partitions the partition expression matched
+	bool PartitionsFiltered() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+	//! The GetPartitions Expression of the fetch Partitions() makes; ignored once the partitions are loaded
+	void SetPartitionExpression(string expression) const;
 
 private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
+	mutable string partition_expression DUCKDB_GUARDED_BY(partitions_lock);
+
+	shared_ptr<const vector<GluePartitionInfo>> FetchPartitions(ClientContext &context) const
+	    DUCKDB_REQUIRES(partitions_lock);
 };
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on

@@ -133,18 +133,52 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 	return entry->listing;
 }
 
-shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {
+shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info,
+                                                               const string &expression, bool *filtered) {
+	if (filtered) {
+		*filtered = false;
+	}
 	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
 	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
 	// per table, so the Glue calls for different tables do not wait on each other
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	if (!expression.empty() && !entry->partitions && cache) {
+		entry->partitions = cache->CachedPartitions(info.database_name, info.table_name);
+	}
+	// with every partition at hand already, it is the scan's pruning that selects them, not Glue
+	if (!expression.empty() && !entry->partitions) {
+		if (entry->refused_expressions.count(expression)) {
+			// refused by an earlier scan: the caller falls back to all partitions without asking again
+			throw InvalidInputException(
+			    GlueAPI::PartitionExpressionRejectedInfo(),
+			    StringUtil::Format("Glue already refused the expression '%s' in this query", expression));
+		}
+		// a selection of the partitions: kept apart from the full list, and only for this query
+		auto &partitions = entry->filtered_partitions[expression];
+		if (!partitions) {
+			try {
+				partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
+				    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name, expression));
+			} catch (std::exception &ex) {
+				entry->filtered_partitions.erase(expression);
+				if (GlueAPI::IsPartitionExpressionRejected(ErrorData(ex))) {
+					entry->refused_expressions.insert(expression);
+				}
+				throw;
+			}
+		}
+		if (filtered) {
+			*filtered = true;
+		}
+		return partitions;
+	}
 	if (!entry->partitions) {
-		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
 		auto load = [&]() {
 			return make_shared_ptr<const vector<GluePartitionInfo>>(
 			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
 		};
-		auto cache = GlueTransactionCache::Of(context, catalog);
 		entry->partitions = cache ? cache->GetPartitions(info.database_name, info.table_name, load) : load();
 	}
 	return entry->partitions;

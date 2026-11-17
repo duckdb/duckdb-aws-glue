@@ -6,6 +6,7 @@
 
 #include "core/glue_info.hpp"
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/pair.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/set.hpp"
@@ -139,8 +140,14 @@ public:
 	                              const string &table_name, const GluePartitionDetails &partition,
 	                              const vector<string> &new_values);
 	//! List the partitions of a Hive table (GetPartitions, all pages)
+	//! With an 'expression' (Glue's partition filter syntax), only the partitions it matches
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
-	                                               const string &database_name, const string &table_name);
+	                                               const string &database_name, const string &table_name,
+	                                               const string &expression = string());
+	//! Whether Glue refused the GetPartitions expression itself, rather than the request failing
+	static bool IsPartitionExpressionRejected(const ErrorData &error);
+	//! The extra info that marks an exception as a refused GetPartitions expression
+	static unordered_map<string, string> PartitionExpressionRejectedInfo();
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
 	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
 	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.

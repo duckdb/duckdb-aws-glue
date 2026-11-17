@@ -1,5 +1,6 @@
 #include "planning/hive_multi_file_reader.hpp"
 #include "core/hive_location.hpp"
+#include "planning/glue_partition_expression.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "core/glue_log_types.hpp"
@@ -61,6 +62,7 @@
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
 #include "functions/hive_reader_call.hpp"
+#include "api/glue_api.hpp"
 
 namespace duckdb {
 
@@ -90,6 +92,30 @@ idx_t HiveScanInfo::GetPartitionKeyIndex(const string &name) const {
 	return DConstants::INVALID_INDEX;
 }
 
+shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::FetchPartitions(ClientContext &context) const {
+	if (partition_expression.empty()) {
+		return GetTablePartitions(context, *this);
+	}
+	try {
+		bool filtered;
+		auto result = GetTablePartitions(context, *this, partition_expression, &filtered);
+		if (!filtered) {
+			partition_expression.clear();
+		}
+		return result;
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		if (!GlueAPI::IsPartitionExpressionRejected(error)) {
+			throw;
+		}
+		// the filters are applied to the partition values anyway, so fetch them all; other errors fail the scan
+		DUCKDB_LOG_WARNING(context, "Glue could not filter the partitions of '%s' with '%s', listing all: %s",
+		                   Describe(), partition_expression, error.RawMessage());
+		partition_expression.clear();
+		return GetTablePartitions(context, *this);
+	}
+}
+
 shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientContext &context) const {
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
 	if (!partitions) {
@@ -98,13 +124,25 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 		} else {
 			GlueScanEvent event(Describe(), scan_id, "partitions");
-			partitions = GetTablePartitions(context, *this);
+			partitions = FetchPartitions(context);
 			event.partitions = partitions->size();
 			event.Finish();
 			DUCKDB_LOG(context, GlueScanLogType, event);
 		}
 	}
 	return partitions;
+}
+
+void HiveScanInfo::SetPartitionExpression(string expression) const {
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	if (!partitions) {
+		partition_expression = std::move(expression);
+	}
+}
+
+bool HiveScanInfo::PartitionsFiltered() const {
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	return partitions && !partition_expression.empty();
 }
 
 bool HiveScanInfo::PartitionsLoaded() const {
@@ -419,6 +457,9 @@ void HiveMultiFileList::PlanListings() const {
 	auto threshold = ListingThreshold(client_context);
 	if (threshold.IsValid()) {
 		list_root = below_root.size() >= threshold.GetIndex();
+	} else if (scan_info->PartitionsFiltered()) {
+		// Glue returned only the partitions read, so the root's other partitions, and its pages, are unknown
+		list_root = false;
 	} else {
 		list_root = root_pages < partition_rounds ||
 		            (root_pages == partition_rounds && partition_requests >= ROOT_REQUESTS_SAVED * root_pages);
@@ -1272,11 +1313,6 @@ void HiveMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &
 //===--------------------------------------------------------------------===//
 // Partition pruning
 //===--------------------------------------------------------------------===//
-struct PartitionKeyProjection {
-	idx_t projected_column_index;
-	idx_t partition_key_index;
-};
-
 //! Replace references to partition columns of the scanned table by the partition's values
 static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expression> &expr, TableIndex table_index,
                                        const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info,
@@ -1410,6 +1446,14 @@ static void RetainFileFilter(MultiFilePushdownInfo &pushdown_info, unique_ptr<Ex
 	retained->push_back(std::move(filter));
 }
 
+static bool GluePartitionFilterPushdownEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("glue_partition_filter_pushdown", setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return false;
+}
+
 unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
                                                                      const MultiFileOptions &options,
                                                                      MultiFilePushdownInfo &pushdown_info,
@@ -1426,12 +1470,16 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// before its directory is listed. Such a filter is then true of every row read and is removed, as DuckDB's own
 	// hive partitioning does: kept, the optimizer would cost it a second time (a range filter keeps a fifth of the
 	// rows the pruning already narrowed down).
-	// first use of the partitions: loaded here, with the filters known
+	// first use of the partitions, loaded here with the filters known; the ones Glue can evaluate go with the request
 	auto &hive_list = files.Cast<HiveMultiFileList>();
-	auto candidates = hive_list.PartitionIndexes();
-	auto partitions = info.Partitions(context);
 	unordered_set<idx_t> pruning_filters;
 	unordered_set<idx_t> decided_filters;
+	if (!info.PartitionsLoaded() && GluePartitionFilterPushdownEnabled(context)) {
+		info.SetPartitionExpression(
+		    GluePartitionExpression(info, pushdown_info.table_index, projections, filters, pruning_filters));
+	}
+	auto candidates = hive_list.PartitionIndexes();
+	auto partitions = info.Partitions(context);
 	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
 	                             filters, pruning_filters, decided_filters);
 	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);
