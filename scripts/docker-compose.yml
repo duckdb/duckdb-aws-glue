@@ -27,7 +27,8 @@
 # registers each value with a leading '0'. GetTable on a table named fault_denied_* fails with AccessDeniedException,
 # and GetTables leaves such tables out, as Lake Formation does for a table the caller may not describe. BatchCreatePartition is delayed on a fault_slow_partitions* database (a
 # timeout lands during registration) and, on a fault_recreated_during_write* database, finds the table dropped and
-# created again by another client and then fails.
+# created again by another client and then fails. The first GetTable of each table in a fault_get_table_once* database
+# fails with AccessDeniedException.
 # 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link
 # link_db whose target is target_db (scripts/resource_link_proxy.py).
 # Ports are published on 127.0.0.1 only, so the servers are not reachable from other machines.

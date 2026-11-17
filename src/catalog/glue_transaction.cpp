@@ -16,8 +16,8 @@ GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &
     : Transaction(manager, context), glue_catalog(glue_catalog),
       transaction_state(GlueTransactionState::TRANSACTION_NOT_YET_STARTED) {
 	if (GlueTransactionCache::ConnectionScoped(context)) {
-		auto state = context.registered_state->GetOrCreate<GlueMetadataCacheState>("glue_metadata_cache");
-		cache = state->GetCache(glue_catalog.GetName().GetIdentifierName(), glue_catalog.GetAttached().oid);
+		cache = GlueMetadataCacheState::Get(context)->GetCache(glue_catalog.GetName().GetIdentifierName(),
+		                                                       glue_catalog.GetAttached().oid);
 	} else {
 		cache = make_shared_ptr<GlueTransactionCache>();
 	}
@@ -103,9 +103,48 @@ void GlueTransaction::UndoHiveWrite() {
 	write->Undo(*client_context, glue_catalog);
 }
 
+shared_ptr<GlueMetadataCacheState> GlueMetadataCacheState::Get(ClientContext &context) {
+	return context.registered_state->GetOrCreate<GlueMetadataCacheState>(NAME);
+}
+
 idx_t GlueTransactionCache::NextId() {
 	static atomic<idx_t> next_id {0};
 	return ++next_id;
+}
+
+shared_ptr<const GlueTableInfo>
+GlueTransactionCache::GetTable(const string &database_name, const string &table_name,
+                               const std::function<shared_ptr<const GlueTableInfo>()> &load, transaction_t query) {
+	shared_ptr<CacheEntry<GlueTableInfo>> entry;
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		entry = FindEntry(tables, Key(database_name, table_name));
+	}
+	return Resolve(*entry, load, query);
+}
+
+void GlueTransactionCache::PutTable(const string &database_name, const string &table_name,
+                                    shared_ptr<const GlueTableInfo> table) {
+	if (!table) {
+		return;
+	}
+	shared_ptr<CacheEntry<GlueTableInfo>> entry;
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		entry = FindEntry(tables, Key(database_name, table_name));
+	}
+	annotated_lock_guard<annotated_mutex> guard(entry->load_lock);
+	if (entry->found) {
+		return;
+	}
+	entry->value = std::move(table);
+	entry->found = true;
+}
+
+bool GlueTransactionCache::IsTableResolved(const string &database_name, const string &table_name, transaction_t query) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	auto slot = tables.find(Key(database_name, table_name));
+	return slot != tables.end() && slot->second->IsResolved(query);
 }
 
 optional_ptr<GlueTransactionCache> GlueTransactionCache::Of(ClientContext &context, Catalog &catalog) {
@@ -122,11 +161,15 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 	// The scope setting can change between statements, so the active transaction's cache may not be the
 	// connection-level one this write would otherwise leave stale: clear those too (all of them, matching
 	// the rollback hook — a write through any alias of the same Glue catalog must not be hidden by another's cache)
-	auto state = context.registered_state->Get<GlueMetadataCacheState>("glue_metadata_cache");
+	auto state = context.registered_state->Get<GlueMetadataCacheState>(GlueMetadataCacheState::NAME);
 	if (state) {
 		state->ClearAll();
 	}
 	ClearHiveListingCache(context);
+}
+
+transaction_t GlueTransactionCache::ActiveQuery(ClientContext &context) {
+	return context.transaction.HasActiveTransaction() ? context.transaction.GetActiveQuery() : MAXIMUM_QUERY_ID;
 }
 
 bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {
@@ -139,7 +182,7 @@ bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {
 }
 
 void GlueTransactionCache::OnDetach(ClientContext &context, Catalog &catalog) {
-	auto state = context.registered_state->Get<GlueMetadataCacheState>("glue_metadata_cache");
+	auto state = context.registered_state->Get<GlueMetadataCacheState>(GlueMetadataCacheState::NAME);
 	if (state) {
 		state->EraseCache(catalog.GetName().GetIdentifierName(), catalog.GetAttached().oid);
 	}

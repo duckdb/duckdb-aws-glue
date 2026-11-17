@@ -64,7 +64,7 @@ SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-tar
 0
 
 # a missing table and a missing database fail as before: GetDatabase tells them apart. The binder looks the table up
-# twice; for a missing database both lookups ask for the table first
+# twice; the second lookup is answered by the memoized miss, for a missing database too
 statement ok
 attach '{GLUE_CATALOG_ID}' as sft_two (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
 
@@ -81,7 +81,7 @@ SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
 WHERE request.headers['x-amz-target'] IN ('AWSGlue.GetTable', 'AWSGlue.GetDatabase') GROUP BY 1 ORDER BY 1;
 ----
 AWSGlue.GetDatabase	1
-AWSGlue.GetTable	2
+AWSGlue.GetTable	1
 
 statement ok
 CALL truncate_duckdb_logs();
@@ -96,7 +96,7 @@ SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')
 WHERE request.headers['x-amz-target'] IN ('AWSGlue.GetTable', 'AWSGlue.GetDatabase') GROUP BY 1 ORDER BY 1;
 ----
 AWSGlue.GetDatabase	2
-AWSGlue.GetTable	2
+AWSGlue.GetTable	1
 
 # a database made a schema from its name alone is asked for once a new table needs its LocationUri
 statement ok
