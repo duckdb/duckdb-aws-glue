@@ -1,0 +1,76 @@
+# name: test/sql/hive/hive_scan/scan/test_footer_statistics_dotted_names.test
+# description: Tables whose names join with dots to the same string keep their own footers and samples
+# group: [scan]
+
+require parquet
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env DEFAULT_S3_LOCATION
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as dotted_lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS dotted_lake."default.dtk";
+
+statement ok
+DROP TABLE IF EXISTS dotted_lake."default.dtk".b;
+
+statement ok
+DROP TABLE IF EXISTS dotted_lake.default."dtk.b";
+
+statement ok
+CREATE TABLE dotted_lake."default.dtk".b AS SELECT 1::BIGINT AS i;
+
+statement ok
+CREATE TABLE dotted_lake.default."dtk.b" AS SELECT 100::BIGINT AS i;
+
+# each scan is pruned with the min/max of its own table's footers, whichever table is planned first
+query I
+SELECT count(*) FROM dotted_lake."default.dtk".b WHERE i = 1
+UNION ALL
+SELECT count(*) FROM dotted_lake.default."dtk.b" WHERE i = 100;
+----
+1
+1
+
+query I
+SELECT count(*) FROM dotted_lake.default."dtk.b" WHERE i = 100
+UNION ALL
+SELECT count(*) FROM dotted_lake."default.dtk".b WHERE i = 1;
+----
+1
+1
+
+# without footer statistics each scan is estimated from its own table's sample
+statement ok
+SET hive_footer_statistics_max_files = 0;
+
+query I
+SELECT count(*) FROM dotted_lake."default.dtk".b WHERE i = 1
+UNION ALL
+SELECT count(*) FROM dotted_lake.default."dtk.b" WHERE i = 100;
+----
+1
+1
+
+statement ok
+RESET hive_footer_statistics_max_files;
+
+statement ok
+DROP TABLE dotted_lake."default.dtk".b;
+
+statement ok
+DROP TABLE dotted_lake.default."dtk.b";
+
+statement ok
+DROP SCHEMA dotted_lake."default.dtk";

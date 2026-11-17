@@ -270,11 +270,18 @@ static unique_ptr<NodeStatistics> UnsampledCardinality(ClientContext &context, c
 	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
+string HiveScanInfo::CacheKey() const {
+	if (catalog_name.empty()) {
+		return HiveQueryCache::TableKey(string(), string(), root_location);
+	}
+	return HiveQueryCache::TableKey(catalog_name, database_name, table_name);
+}
+
 //! The sample of the table 'hive_list' reads, measured by the first scan of the table in this query to ask
 static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, const MultiFileBindData &bind_data,
                                                      const HiveMultiFileList &hive_list) {
 	auto &info = hive_list.ScanInfo();
-	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
+	auto entry = HiveQueryCache::Get(context)->GetSample(info.CacheKey());
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->sample) {
 		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
@@ -297,6 +304,72 @@ idx_t HiveFooterStatisticsMaxFiles(ClientContext &context) {
 	return HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES;
 }
 
+//! The footers of every file of the table 'bind_data' scans, read by the reader's own maximum_files_for_stats on a
+//! copy of its bind data, which the optimizer only hands out const
+vector<shared_ptr<BaseUnionData>> HiveScanInfo::ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
+                                                            idx_t max_files) const {
+	auto reading = unique_ptr_cast<FunctionData, MultiFileBindData>(bind_data.Copy());
+	// the scan's own list, so the files it lists are the ones the scan reads
+	reading->file_list = bind_data.file_list;
+	reading->file_options.maximum_files_for_stats = max_files;
+	GlueScanEvent event(Describe(), scan_id, "footers");
+	try {
+		reading->interface->ReadFilesForStatistics(context, *reading);
+	} catch (std::exception &ex) {
+		// costing must not fail a query: the scan reports a location it cannot list
+		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
+		DUCKDB_LOG_WARNING(context, "Could not read the footers of Hive table '%s': %s", Describe(),
+		                   error.RawMessage());
+		return {};
+	}
+	event.files = reading->union_readers.size();
+	event.Finish();
+	DUCKDB_LOG(context, GlueScanLogType, event);
+	return std::move(reading->union_readers);
+}
+
+string HiveScanInfo::FootersCacheKey() const {
+	// the footers are read with the scan's binary_as_string, which follows its schema
+	auto key = CacheKey();
+	auto binary_as_string = reader_parameters.find("binary_as_string");
+	if (binary_as_string != reader_parameters.end()) {
+		key += "\x1f" + binary_as_string->second.ToString();
+	}
+	return key;
+}
+
+unique_ptr<MultiFileBindData> HiveScanInfo::FooterStatisticsBindData(ClientContext &context,
+                                                                     const MultiFileBindData &bind_data) const {
+	if (!ReadsFooterStatistics()) {
+		return nullptr;
+	}
+	auto entry = HiveQueryCache::Get(context)->GetFooters(FootersCacheKey());
+	vector<shared_ptr<BaseUnionData>> footers;
+	{
+		annotated_lock_guard<annotated_mutex> guard(entry->lock);
+		if (!entry->read) {
+			entry->read = true;
+			auto max_files = HiveFooterStatisticsMaxFiles(context);
+			if (max_files > 0) {
+				entry->footers = ReadFooters(context, bind_data, max_files);
+			}
+		}
+		footers = entry->footers;
+	}
+	if (footers.empty()) {
+		return nullptr;
+	}
+	// FIXME: the footers stay in this copy, so the scan reads them again when it opens its files. Core can avoid that
+	// by reading the footers only once statistics are asked for, into the scan's own bind data
+	auto result = unique_ptr_cast<FunctionData, MultiFileBindData>(bind_data.Copy());
+	result->file_list = bind_data.file_list;
+	result->union_readers = std::move(footers);
+	return result;
+}
+
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
 //! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
 //! same, and csv and json are estimated at one row.
@@ -309,9 +382,12 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
 	}
-	if (!bind_data.union_readers.empty() && info.format_cardinality) {
-		// the reader opened every file for its footer at bind (maximum_files_for_stats): their row counts
-		return info.format_cardinality(context, bind_data_p);
+	if (info.format_cardinality) {
+		auto footer_data = info.FooterStatisticsBindData(context, bind_data);
+		if (footer_data) {
+			// the row counts of the footers of every file
+			return info.format_cardinality(context, footer_data.get());
+		}
 	}
 	auto sample_ptr = SampleTable(context, bind_data, hive_list);
 	auto &sample = *sample_ptr;
@@ -396,8 +472,16 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 		}
 	}
 	if (key_index == DConstants::INVALID_INDEX) {
-		// a data column, a struct field or a virtual column: the format merges the footers it read at bind
-		return info.format_statistics ? info.format_statistics(context, input) : nullptr;
+		// a data column, a struct field or a virtual column: the format merges the footers of every file
+		if (!info.format_statistics) {
+			return nullptr;
+		}
+		auto footer_data = info.FooterStatisticsBindData(context, bind_data);
+		if (!footer_data) {
+			return info.format_statistics(context, input);
+		}
+		TableFunctionGetStatisticsInput footer_input(footer_data.get(), input.column_index);
+		return info.format_statistics(context, footer_input);
 	}
 	// off by default: key statistics can cost a join on the key its run-time partition pruning
 	Value enabled;

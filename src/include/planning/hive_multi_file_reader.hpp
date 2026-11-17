@@ -48,7 +48,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
-	//! The cardinality function of the bound file format reader, used when it read the footers of every file at bind
+	//! The cardinality function of the bound file format reader, used once the footers of every file are read
 	table_function_cardinality_t format_cardinality = nullptr;
 	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
 	//! columns
@@ -80,11 +80,24 @@ struct HiveScanInfo : public TableFunctionInfo {
 	                           const vector<idx_t> &column_indexes) const;
 	//! A description of the table for error messages
 	string Describe() const;
+	//! The key of the table in the query cache: a Glue table by name, a hive_scan by its location
+	string CacheKey() const;
+	//! Whether the optimizer gets the footers of every file for statistics: a small unpartitioned parquet scan
+	bool ReadsFooterStatistics() const;
+	//! A copy of 'bind_data' with the footers of all its files, or null when the scan has none. They are read when the
+	//! optimizer first asks, once per query for every scan of the table
+	unique_ptr<MultiFileBindData> FooterStatisticsBindData(ClientContext &context,
+	                                                       const MultiFileBindData &bind_data) const;
 	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
 	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+
+private:
+	string FootersCacheKey() const;
+	vector<shared_ptr<BaseUnionData>> ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
+	                                              idx_t max_files) const;
 
 private:
 	mutable annotated_mutex partitions_lock;
@@ -186,8 +199,7 @@ private:
 
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of
 //! 'scan_info' with the HiveMultiFileReader. Returns the bound table function and fills in 'bind_data'; the scan
-//! produces exactly the columns of 'scan_info'. Only an unpartitioned parquet scan lists and opens files here, for
-//! their footers (maximum_files_for_stats).
+//! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
 //! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan
