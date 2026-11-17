@@ -163,12 +163,16 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 - A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
   gets its minimum, maximum and NULLs merged from the footers of all of them. They are read the first time the
   optimizer asks for the scan's statistics, not when it binds: a scan the optimizer removes first (`WHERE false`)
-  and a `DESCRIBE` open no file. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file
-  with rows lacks the column, stores it as another type than the table declares, or, in a table of several files,
-  has statistics for it that DuckDB cannot read; so do the data columns of partitioned, csv, json and avro tables. A
-  table of one file whose statistics DuckDB cannot read fails planning, as `read_parquet` of that file does. An empty
-  file is skipped. The optimizer prunes on these statistics and orders joins by them: the minimum and maximum of a
-  dimension's key let it see how much a join on that key keeps.
+  and a `DESCRIBE` open no file. The scan then reads each footer a second time when it opens the file (one extra
+  ranged GET per file unless the external file cache has it): the optimizer gets the scan's bind data read-only, so
+  the footers it reads can not be handed to the scan. That is better fixed in DuckDB, by reading the footers only
+  once statistics are asked for, into the scan's own bind data. `0` turns them and the count off. A column gets none
+  when a footer cannot be read, or when some file with rows lacks the column, stores it as another type than the
+  table declares, or, in a table of several files, has statistics for it that DuckDB cannot read; so do the data
+  columns of partitioned, csv, json and avro tables. A table of one file whose statistics DuckDB cannot read fails
+  planning, as `read_parquet` of that file does. An empty file is skipped. The optimizer prunes on these statistics
+  and orders joins by them: the minimum and maximum of a dimension's key let it see how much a join on that key
+  keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
