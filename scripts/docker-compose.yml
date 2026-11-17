@@ -27,7 +27,8 @@
 # registers each value with a leading '0'. GetTable on a table named fault_denied_* fails with AccessDeniedException,
 # and GetTables leaves such tables out, as Lake Formation does for a table the caller may not describe. BatchCreatePartition is delayed on a fault_slow_partitions* database (a
 # timeout lands during registration) and, on a fault_recreated_during_write* database, finds the table dropped and
-# created again by another client and then fails.
+# created again by another client and then fails. S3 requests to it (S3_FAULT_ENDPOINT) go to 's3', except a listing
+# below a fault_failed_page* location, a later page of which fails once, or a fault_slow_listing* one, which is slow.
 # 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link
 # link_db whose target is target_db (scripts/resource_link_proxy.py).
 # Ports are published on 127.0.0.1 only, so the servers are not reachable from other machines.
@@ -51,11 +52,12 @@ services:
     container_name: glue-fault-proxy
     depends_on:
       - moto
+      - s3
     ports:
       - "127.0.0.1:5556:5556"
     volumes:
       - ./glue_fault_proxy.py:/glue_fault_proxy.py:ro
-    entrypoint: ["python3", "/glue_fault_proxy.py", "--port", "5556", "--upstream", "http://moto:5000"]
+    entrypoint: ["python3", "/glue_fault_proxy.py", "--port", "5556", "--upstream", "http://moto:5000", "--s3-upstream", "http://s3:8333"]
   link-proxy:
     image: motoserver/moto:5.2.3
     container_name: glue-link-proxy

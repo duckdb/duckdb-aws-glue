@@ -10,6 +10,8 @@ require-env GLUE_CATALOG_ID
 
 require-env GLUE_FAULT_ENDPOINT
 
+require-env S3_FAULT_ENDPOINT
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -28,6 +30,12 @@ DROP TABLE IF EXISTS my_datalake.default.pf_stock;
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.pf_item;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pf_failed_page;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pf_slow_listing;
 
 statement ok
 CREATE TABLE my_datalake.default.pf_sales (item INTEGER, qty INTEGER, dt VARCHAR) PARTITIONED BY (dt);
@@ -188,7 +196,8 @@ SELECT request, n FROM pf_requests() WHERE request LIKE 'AWSGlue.%' ORDER BY ALL
 AWSGlue.GetPartitions	1
 AWSGlue.GetTable	1
 
-# A filter on a partition key (also above a CTE or subquery) may prune the scan, so only its partitions are prefetched
+# A filter on a partition key (also above a CTE, a subquery or a set operation, or in a HAVING) may prune the scan, so
+# only its partitions are prefetched
 foreach setting false true
 
 statement ok
@@ -216,6 +225,26 @@ query I
 SELECT sum(qty) FROM (SELECT qty, dt FROM my_datalake.default.pf_sales) WHERE dt = 'd3';
 ----
 1003
+
+query I
+SELECT sum(qty) FROM (SELECT qty, dt FROM my_datalake.default.pf_sales UNION ALL SELECT qty, dt FROM my_datalake.default.pf_returns) WHERE dt = 'd1';
+----
+1100
+
+query I
+SELECT sum(qty) FROM my_datalake.default.pf_sales GROUP BY dt HAVING dt = 'd1';
+----
+1000
+
+query I
+SELECT count(*) FROM (SELECT item, dt FROM my_datalake.default.pf_sales INTERSECT SELECT item, dt FROM my_datalake.default.pf_returns) WHERE dt = 'd1';
+----
+25
+
+query I
+SELECT count(*) FROM (SELECT item, dt FROM my_datalake.default.pf_sales EXCEPT SELECT item, dt FROM my_datalake.default.pf_returns) WHERE dt = 'd5';
+----
+25
 
 statement ok
 CREATE OR REPLACE TEMP TABLE pf_{setting} AS FROM pf_requests();
@@ -383,6 +412,73 @@ query I
 SELECT count(*) FROM pf_fault.fault_slow_get_partitions_pf.t;
 ----
 10
+
+# S3 below these locations goes through the fault proxy, which answers a listing two files per page
+statement ok
+CREATE TABLE my_datalake.default.pf_failed_page (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/fault_failed_page_pf');
+
+statement ok
+CREATE TABLE my_datalake.default.pf_slow_listing (id INTEGER) WITH (format = 'csv', location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/fault_slow_listing_pf');
+
+loop i 0 3
+
+statement ok
+INSERT INTO my_datalake.default.pf_failed_page VALUES ({i});
+
+statement ok
+INSERT INTO my_datalake.default.pf_slow_listing VALUES ({i});
+
+endloop
+
+statement ok
+CREATE SECRET pf_fault_s3 (TYPE s3, KEY_ID 'minio', SECRET 'minio123', REGION 'us-east-1', ENDPOINT '{S3_FAULT_ENDPOINT}', USE_SSL false, URL_STYLE 'path', SCOPE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/fault_');
+
+# The second listing page fails once (no retries): the footers are not read, and the scan lists the table again and
+# reads each file once
+statement ok
+SET http_retries = 0;
+
+foreach setting false true
+
+statement ok
+SET glue_prefetch_scan_metadata = {setting};
+
+query II
+SELECT count(*), count(DISTINCT id) FROM my_datalake.default.pf_failed_page;
+----
+3	3
+
+endloop
+
+statement ok
+RESET http_retries;
+
+statement ok
+RESET glue_prefetch_scan_metadata;
+
+# The optimizer drops this scan, and the statement ends during the first listing page of its sample (0.5 s a page): the
+# sample stops there instead of fetching the second page
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT sum(id) FROM (SELECT id FROM my_datalake.default.pf_slow_listing WHERE false UNION ALL SELECT range FROM range(5000000));
+----
+12499997500000
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE contains(request.url, 'fault_slow_listing_pf') AND contains(request.url, 'list-type');
+----
+1
+
+statement ok
+DROP SECRET pf_fault_s3;
+
+statement ok
+DROP TABLE my_datalake.default.pf_failed_page;
+
+statement ok
+DROP TABLE my_datalake.default.pf_slow_listing;
 
 statement ok
 DETACH pf_fault;

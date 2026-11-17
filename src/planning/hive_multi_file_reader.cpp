@@ -1,5 +1,6 @@
 #include "planning/hive_multi_file_reader.hpp"
 #include "core/hive_location.hpp"
+#include "planning/hive_metadata_prefetch.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "core/glue_log_types.hpp"
@@ -289,6 +290,24 @@ static void CarryFileSecret(OpenFileInfo &file, const string &file_secret) {
 	file.extended_info->options[ExtendedOpenFileInfo::SECRET_OPTION] = Value(file_secret);
 }
 
+//! The next file of 'listing'. With ALWAYS_FETCH it fetches the next page when it needs one, except for a prefetch
+//! whose statement has ended
+static bool ScanListing(ClientContext &context, const MultiFileList &listing, MultiFileListScanData &scan,
+                        OpenFileInfo &file) {
+	auto scan_type = scan.scan_type;
+	scan.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
+	auto found = listing.Scan(scan, file);
+	scan.scan_type = scan_type;
+	if (found || scan_type == MultiFileListScanType::FETCH_IF_AVAILABLE) {
+		return found;
+	}
+	if (HiveMetadataPrefetch::Stopping(context)) {
+		// a prefetch whose statement ended: nothing waits for the rest of this listing
+		throw InterruptException();
+	}
+	return listing.Scan(scan, file);
+}
+
 //! The data files below 'location', at any depth (like read_parquet on a directory)
 static void ListDataFiles(ClientContext &context, bool cached, const string &location, const string &file_secret,
                           vector<OpenFileInfo> &files) {
@@ -298,13 +317,20 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 		return;
 	}
 	auto prefix = directory + "/";
-	for (auto &file : HiveQueryCache::Get(context)->GetDirectoryListing(context, directory, cached)->GetAllFiles()) {
+	auto listing = HiveQueryCache::Get(context)->GetDirectoryListing(context, directory, cached);
+	MultiFileListScanData scan;
+	listing->InitializeScan(scan);
+	// appended only once every page is fetched: a listing that fails on a later page is tried again from the start
+	vector<OpenFileInfo> listed;
+	OpenFileInfo file;
+	while (ScanListing(context, *listing, scan, file)) {
 		if (!IsDataFile(file, prefix)) {
 			continue;
 		}
 		CarryFileSecret(file, file_secret);
-		files.push_back(std::move(file));
+		listed.push_back(std::move(file));
 	}
+	files.insert(files.end(), std::make_move_iterator(listed.begin()), std::make_move_iterator(listed.end()));
 }
 
 //! Lists the data files of one partition location
@@ -764,7 +790,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	scan.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
 	OpenFileInfo file;
 	while (true) {
-		if (!listing->Scan(scan, file)) {
+		if (!ScanListing(client_context, *listing, scan, file)) {
 			if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH) {
 				listed_all = true;
 				break;

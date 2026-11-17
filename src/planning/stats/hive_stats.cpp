@@ -17,6 +17,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "core/glue_log_types.hpp"
 #include "core/glue_types.hpp"
+#include "planning/hive_metadata_prefetch.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
@@ -248,12 +249,19 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		if (!measured.IsValid()) {
 			return sample;
 		}
+		if (HiveMetadataPrefetch::Stopping(context)) {
+			// a prefetch whose statement ended: nothing waits for this sample
+			throw InterruptException();
+		}
 		auto &file = listed[measured.GetIndex()];
 		sample.file_bytes = ListedFileSize(file);
 		sample.file_rows = RowsInFile(context, bind_data, info, file);
 	} catch (std::exception &ex) {
 		// costing must not fail a query: the scan reports a directory or file it cannot read
 		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
 		DUCKDB_LOG_WARNING(context, "Could not sample Hive table '%s' for its cardinality: %s", info.Describe(),
 		                   error.RawMessage());
 	}

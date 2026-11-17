@@ -7,10 +7,12 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_set_operation.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
@@ -89,8 +91,8 @@ struct PrefetchTable {
 struct PrefetchPlan {
 	unordered_map<string, idx_t> table_by_key;
 	vector<PrefetchTable> tables;
-	//! The partition key columns the scans produce, and the table of each
-	column_binding_map_t<idx_t> partition_columns;
+	//! The partition key columns the scans produce, and the tables of each (a set operation's column has several)
+	column_binding_map_t<vector<idx_t>> partition_columns;
 	//! The columns of each CTE, which its CTE scans produce
 	unordered_map<TableIndex, vector<ColumnBinding>> cte_columns;
 };
@@ -99,8 +101,10 @@ struct PrefetchPlan {
 void PassOnPartitionColumn(PrefetchPlan &plan, const ColumnBinding &from, const ColumnBinding &to) {
 	auto partition_column = plan.partition_columns.find(from);
 	if (partition_column != plan.partition_columns.end()) {
-		auto table = partition_column->second;
-		plan.partition_columns[to] = table;
+		// a copy: adding 'to' may rehash the map
+		auto tables = partition_column->second;
+		auto &to_tables = plan.partition_columns[to];
+		to_tables.insert(to_tables.end(), tables.begin(), tables.end());
 	}
 }
 
@@ -127,7 +131,8 @@ void CollectHiveScans(LogicalOperator &op, PrefetchPlan &plan) {
 				}
 				auto &name = get.names[column_ids[i].GetPrimaryIndex()].GetIdentifierName();
 				if (info->GetPartitionKeyIndex(name) != DConstants::INVALID_INDEX) {
-					plan.partition_columns[ColumnBinding(get.table_index, ProjectionIndex(i))] = entry.first->second;
+					plan.partition_columns[ColumnBinding(get.table_index, ProjectionIndex(i))].push_back(
+					    entry.first->second);
 				}
 			}
 		}
@@ -135,7 +140,8 @@ void CollectHiveScans(LogicalOperator &op, PrefetchPlan &plan) {
 	for (auto &child : op.children) {
 		CollectHiveScans(*child, plan);
 	}
-	// a filter above a subquery or view reads the partition key through a projection, above a CTE through a CTE scan
+	// a filter above a subquery or view reads the partition key through a projection, above a CTE through a CTE scan,
+	// above a UNION through the set operation and in a HAVING through the aggregate's group
 	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &projection = op.Cast<LogicalProjection>();
 		for (idx_t i = 0; i < projection.expressions.size(); i++) {
@@ -151,6 +157,26 @@ void CollectHiveScans(LogicalOperator &op, PrefetchPlan &plan) {
 		for (idx_t i = 0; cte != plan.cte_columns.end() && i < cte->second.size(); i++) {
 			PassOnPartitionColumn(plan, cte->second[i], ColumnBinding(cte_scan.table_index, ProjectionIndex(i)));
 		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_UNION || op.type == LogicalOperatorType::LOGICAL_EXCEPT ||
+	           op.type == LogicalOperatorType::LOGICAL_INTERSECT) {
+		auto &set_operation = op.Cast<LogicalSetOperation>();
+		for (auto &child : op.children) {
+			auto child_columns = child->GetColumnBindings();
+			for (idx_t i = 0; i < set_operation.column_count && i < child_columns.size(); i++) {
+				PassOnPartitionColumn(plan, child_columns[i],
+				                      ColumnBinding(set_operation.table_index, ProjectionIndex(i)));
+			}
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &aggregate = op.Cast<LogicalAggregate>();
+		// with grouping sets a group is NULL in the sets without it, so a filter on it is not pushed into the scan
+		for (idx_t i = 0; aggregate.grouping_sets.size() <= 1 && i < aggregate.groups.size(); i++) {
+			auto &group = *aggregate.groups[i];
+			if (group.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				PassOnPartitionColumn(plan, group.Cast<BoundColumnRefExpression>().Binding(),
+				                      ColumnBinding(aggregate.group_index, ProjectionIndex(i)));
+			}
+		}
 	}
 }
 
@@ -165,18 +191,18 @@ void MarkPartitionFilter(const Expression &expression, PrefetchPlan &plan) {
 	vector<ColumnBinding> columns;
 	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
 	    expression, [&](const BoundColumnRefExpression &column) { columns.push_back(column.Binding()); });
-	optional_idx table;
+	vector<idx_t> tables;
 	for (auto &column : columns) {
 		if (column.table_index != columns[0].table_index) {
 			return;
 		}
 		auto partition_column = plan.partition_columns.find(column);
 		if (partition_column != plan.partition_columns.end()) {
-			table = partition_column->second;
+			tables.insert(tables.end(), partition_column->second.begin(), partition_column->second.end());
 		}
 	}
-	if (table.IsValid()) {
-		plan.tables[table.GetIndex()].filtered = true;
+	for (auto table : tables) {
+		plan.tables[table].filtered = true;
 	}
 }
 
