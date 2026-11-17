@@ -87,7 +87,18 @@ ErrorData GlueCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	return ErrorData();
 }
 
+//! Glue databases do not nest: a nested path would otherwise create or drop the database of its last name
+static string NestedSchemaError(const Catalog &catalog, vector<Identifier> schema_path) {
+	return StringUtil::Format("Catalog %s does not support nested schemas: %s", catalog.GetName(),
+	                          QualifiedName::FromPath(std::move(schema_path)).ToString());
+}
+
 ErrorData GlueCatalog::SupportsCreateSchema(CreateSchemaInfo &info) {
+	if (info.IsNested()) {
+		auto schema_path = info.ParentSchemas();
+		schema_path.push_back(info.SchemaName());
+		return ErrorData(ExceptionType::BINDER, NestedSchemaError(*this, std::move(schema_path)));
+	}
 	return ErrorData();
 }
 
@@ -155,6 +166,17 @@ void GlueCatalog::OnDetach(ClientContext &context) {
 }
 
 void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
+	// the path is [catalog, parent schemas..., schema]
+	auto &path = info.GetQualifiedName().Path();
+	vector<Identifier> schema_path;
+	for (idx_t i = path.size() > 1 ? 1 : 0; i < path.size(); i++) {
+		if (!path[i].empty()) {
+			schema_path.push_back(path[i]);
+		}
+	}
+	if (schema_path.size() > 1) {
+		throw BinderException(NestedSchemaError(*this, std::move(schema_path)));
+	}
 	ThrowIfInExplicitTransaction(context);
 	auto schema_name = info.GetQualifiedName().Name().GetIdentifierName();
 	auto existing = schemas.GetEntry(context, schema_name);

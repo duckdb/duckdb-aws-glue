@@ -111,10 +111,9 @@ void CollectHiveScans(LogicalOperator &op, PrefetchPlan &plan) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op.Cast<LogicalGet>();
 		auto info = HiveScanInfo::TryGet(get);
-		// Glue tables only: a hive_scan of a location has its partitions already, and a table counted from its footers
-		// is unpartitioned and not sampled
-		if (info && !info->catalog_name.empty() &&
-		    !HiveScanCountedFromFooters(get.bind_data->Cast<MultiFileBindData>())) {
+		// Glue tables only: a hive_scan of a location has its partitions already, and a table the optimizer counts from
+		// its footers is unpartitioned and not sampled
+		if (info && !info->catalog_name.empty() && !info->ReadsFooterStatistics()) {
 			auto key = HiveQueryCache::TableKey(info->catalog_name, info->database_name, info->table_name);
 			auto entry = plan.table_by_key.emplace(key, plan.tables.size());
 			if (entry.second) {
