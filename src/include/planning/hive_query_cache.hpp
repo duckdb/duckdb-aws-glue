@@ -12,6 +12,13 @@ namespace duckdb {
 struct HiveScanInfo;
 struct HiveTableSample;
 
+//! What Glue said about a table the running query scans
+struct GlueTableEntry {
+	annotated_mutex lock;
+	//! Null until a scan of a partitioned table first needs them (HivePartitionCache)
+	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
+};
+
 //! The sample of a table, measured once per query for every scan of the table
 struct HiveTableSampleEntry {
 	annotated_mutex lock;
@@ -32,6 +39,9 @@ struct HiveDirectoryListingEntry {
 //! every scan listing the same directory) and the table samples
 class HiveQueryCache : public ClientContextState {
 public:
+	HiveQueryCache() : partitions(*this) {
+	}
+
 	static shared_ptr<HiveQueryCache> Get(ClientContext &context);
 	//! The key of a Glue table in the query's caches
 	static string TableKey(const string &catalog, const string &database, const string &table);
@@ -41,6 +51,8 @@ public:
 	HivePartitionCache &Partitions() {
 		return partitions;
 	}
+	//! 'key' identifies the table (TableKey)
+	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
 	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
@@ -53,6 +65,7 @@ public:
 private:
 	HivePartitionCache partitions;
 	annotated_mutex lock;
+	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
 	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;

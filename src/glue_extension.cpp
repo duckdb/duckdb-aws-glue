@@ -5,7 +5,6 @@
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/planner/planner_extension.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "catalog/glue_attach.hpp"
@@ -14,7 +13,6 @@
 #include "functions/glue_repair_table.hpp"
 #include "execution/glue_written_files.hpp"
 #include "grammar/glue_grammar.hpp"
-#include "planning/hive_partition_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
@@ -84,8 +82,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("glue_partition_load_parallelism",
 	                          "The number of partitioned Glue tables a statement scans whose partitions are loaded "
-	                          "concurrently, once the statement is bound. 1 loads each table's partitions on its own, "
-	                          "when its scan first needs them. Default 8.",
+	                          "concurrently, when the first of its scans needs partitions. 1 loads each table's "
+	                          "partitions on its own, when its scan first needs them. Default 8.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(8));
 	config.AddExtensionOption("glue_partition_load_cooldown",
 	                          "After Glue throttles a concurrent partition load (glue_partition_load_parallelism), the "
@@ -202,9 +200,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	}
 	// ATTACH '<catalog id>' (TYPE GLUE)
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
-	PlannerExtension partition_prefetch;
-	partition_prefetch.post_bind_function = RegisterHiveScansForPrefetch;
-	PlannerExtension::Register(config, std::move(partition_prefetch));
 
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());
 	loader.RegisterFunction(GetGlueGetDatabaseResponseFunction());

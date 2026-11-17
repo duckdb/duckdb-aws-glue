@@ -42,11 +42,7 @@ struct GluePartitionLoad {
 	string table_name;
 	//! Null unless every request for the table's partitions succeeded
 	shared_ptr<const vector<GluePartitionInfo>> partitions;
-};
-
-//! How GlueAPI::GetPartitionsOfTables ended
-struct GluePartitionLoadResult {
-	//! The first failed request's error: the requests not sent by then are not sent
+	//! The error of the table's first failed request. Unset with no partitions when another table failed first
 	ErrorData error;
 	//! Whether Glue refused that request for the request rate
 	bool throttled = false;
@@ -161,10 +157,9 @@ public:
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
-	//! GetPartitions of several tables, their requests run as tasks on DuckDB's threads. Fills in the tables whose
-	//! requests all succeeded; the first failure stops the requests not yet sent and is returned, not thrown
-	static GluePartitionLoadResult GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog,
-	                                                     vector<GluePartitionLoad> &tables);
+	//! GetPartitions of several tables, their requests run as tasks on DuckDB's threads. The first failed request
+	//! stops the requests not yet sent and is kept on its table; only an interrupt is thrown
+	static void GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog, vector<GluePartitionLoad> &tables);
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
 	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
 	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.

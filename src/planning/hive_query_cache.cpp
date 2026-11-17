@@ -87,6 +87,7 @@ string HiveQueryCache::TableKey(const string &catalog, const string &database, c
 void HiveQueryCache::QueryEnd(ClientContext &context) {
 	partitions.Clear();
 	annotated_lock_guard<annotated_mutex> guard(lock);
+	glue_tables.clear();
 	samples.clear();
 	directory_listings.clear();
 	scan_count = 0;
@@ -95,6 +96,15 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 idx_t HiveQueryCache::NextScanId() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	return ++scan_count;
+}
+
+shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	auto &entry = glue_tables[key];
+	if (!entry) {
+		entry = make_shared_ptr<GlueTableEntry>();
+	}
+	return entry;
 }
 
 shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) {

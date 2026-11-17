@@ -111,9 +111,6 @@ public:
 	const HiveScanInfo &ScanInfo() const {
 		return *scan_info;
 	}
-	const shared_ptr<HiveScanInfo> &SharedScanInfo() const {
-		return scan_info;
-	}
 	ClientContext &Context() const {
 		return client_context;
 	}
