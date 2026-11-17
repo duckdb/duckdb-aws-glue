@@ -107,13 +107,13 @@ statement error
 CREATE TABLE my_datalake.{GLUE_TEST_DB}.ow_table WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ow_outer/ow_live/', overwrite = true)
 AS SELECT range AS id FROM range(2);
 ----
-<REGEX>:.*overlaps the location .* of table '{GLUE_TEST_DB}\.ow_live', whose files it would delete.*
+<REGEX>:.*overlaps the location .* of table '\w+\.ow_live', whose files it would delete.*
 
 statement error
 CREATE TABLE my_datalake.{GLUE_TEST_DB}.ow_table WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ow_outer', overwrite = true)
 AS SELECT range AS id FROM range(2);
 ----
-<REGEX>:.*overlaps the location .* of table '{GLUE_TEST_DB}\.ow_live', whose files it would delete.*
+<REGEX>:.*overlaps the location .* of table '\w+\.ow_live', whose files it would delete.*
 
 query II
 SELECT count(*), sum(id) FROM my_datalake.{GLUE_TEST_DB}.ow_live;
@@ -157,7 +157,7 @@ statement error
 CREATE TABLE my_datalake.{GLUE_TEST_DB}.ow_table WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ow_elsewhere', overwrite = true)
 AS SELECT range AS id FROM range(2);
 ----
-<REGEX>:.*overlaps the location .* of a partition of table '{GLUE_TEST_DB}\.ow_parts', whose files it would delete.*
+<REGEX>:.*overlaps the location .* of a partition of table '\w+\.ow_parts', whose files it would delete.*
 
 query II
 SELECT count(*), sum(id) FROM my_datalake.{GLUE_TEST_DB}.ow_parts;

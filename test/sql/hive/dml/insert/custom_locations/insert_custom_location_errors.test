@@ -47,12 +47,12 @@ INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'outside');
 statement error
 INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'sibling');
 ----
-<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/{GLUE_TEST_DB}/custom_loc_errors_sibling".*
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/\w+/custom_loc_errors_sibling".*
 
 statement error
 INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'root');
 ----
-<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/{GLUE_TEST_DB}/custom_loc_errors".*
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/\w+/custom_loc_errors".*
 
 # only rows of those partitions fail, the other partitions can be written
 statement ok

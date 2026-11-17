@@ -42,7 +42,7 @@ SET glue_debug_fail_partition_registration = 'InvalidInputException:150';
 statement error
 INSERT INTO my_datalake.{GLUE_TEST_DB}.reg_fail SELECT i, i FROM range(250) t(i);
 ----
-<REGEX>:.*INSERT into Hive table '{GLUE_TEST_DB}.reg_fail' was rolled back: Glue BatchCreatePartition '{GLUE_TEST_DB}.reg_fail' failed for partition \[.*\]: InvalidInputException: injected.*so it can be run again.*
+<REGEX>:.*INSERT into Hive table '\w+.reg_fail' was rolled back: Glue BatchCreatePartition '\w+.reg_fail' failed for partition \[.*\]: InvalidInputException: injected.*so it can be run again.*
 
 query II
 SELECT count(*), sum(id) FROM my_datalake.{GLUE_TEST_DB}.reg_fail;

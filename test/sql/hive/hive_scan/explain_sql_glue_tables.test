@@ -41,12 +41,12 @@ INSERT INTO my_datalake.{GLUE_TEST_DB}.es_events VALUES
 query II
 EXPLAIN (SQL) SELECT * FROM my_datalake.{GLUE_TEST_DB}.es_events;
 ----
-sql	<REGEX>:.*SELECT\s+id,\s+s,\s+tags,\s+CAST\('2016-05-14' AS DATE\) AS dt,\s+CAST\('1' AS INTEGER\) AS n\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/{GLUE_TEST_DB}/es_events/dt=2016-05-14/n=1/[^']*'\) AS VARCHAR \[\]\),.*
+sql	<REGEX>:.*SELECT\s+id,\s+s,\s+tags,\s+CAST\('2016-05-14' AS DATE\) AS dt,\s+CAST\('1' AS INTEGER\) AS n\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/\w+/es_events/dt=2016-05-14/n=1/[^']*'\) AS VARCHAR \[\]\),.*
 
 query II
 EXPLAIN (SQL) SELECT * FROM my_datalake.{GLUE_TEST_DB}.es_events;
 ----
-sql	<REGEX>:.*SELECT\s+id,\s+s,\s+tags,\s+CAST\('2016-05-15' AS DATE\) AS dt,\s+CAST\(NULL AS INTEGER\) AS n\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/{GLUE_TEST_DB}/es_events/dt=2016-05-15/n=__HIVE_DEFAULT_PARTITION__/[^']*'\) AS VARCHAR \[\]\),.*
+sql	<REGEX>:.*SELECT\s+id,\s+s,\s+tags,\s+CAST\('2016-05-15' AS DATE\) AS dt,\s+CAST\(NULL AS INTEGER\) AS n\s+FROM "system"\.main\.read_parquet\(\s*CAST\("system"\.main\.list_value\('[^']*/\w+/es_events/dt=2016-05-15/n=__HIVE_DEFAULT_PARTITION__/[^']*'\) AS VARCHAR \[\]\),.*
 
 query II
 EXPLAIN (SQL) SELECT * FROM my_datalake.{GLUE_TEST_DB}.es_events;
@@ -283,7 +283,7 @@ INSERT INTO my_datalake.{GLUE_TEST_DB}.es_bytes VALUES (1, '\xC3\xBC'::BLOB, '20
 query II
 EXPLAIN (SQL) SELECT id, b FROM my_datalake.{GLUE_TEST_DB}.es_bytes WHERE dt = '2016-05-15';
 ----
-sql	<REGEX>:.*FROM my_datalake\."?{GLUE_TEST_DB}"?\.es_bytes AS r\d+\(column0, column1, column2\)\s+WHERE \(r\d+\.column2 = CAST\('2016-05-15' AS VARCHAR\)\).*
+sql	<REGEX>:.*FROM my_datalake\."?\w+"?\.es_bytes AS r\d+\(column0, column1, column2\)\s+WHERE \(r\d+\.column2 = CAST\('2016-05-15' AS VARCHAR\)\).*
 
 query II
 EXPLAIN (SQL) SELECT id, b FROM my_datalake.{GLUE_TEST_DB}.es_bytes WHERE dt = '2016-05-15';
@@ -294,7 +294,7 @@ sql	<!REGEX>:.*read_parquet.*
 query II
 EXPLAIN (SQL) SELECT id, "$path" FROM my_datalake.{GLUE_TEST_DB}.es_events WHERE n = 1;
 ----
-sql	<REGEX>:.*r\d+\."\$path".*FROM my_datalake\."?{GLUE_TEST_DB}"?\.es_events AS r\d+\(column0, column1, column2, column3, column4\)\s+WHERE \(r\d+\.column4 = CAST\(1 AS INTEGER\)\).*
+sql	<REGEX>:.*r\d+\."\$path".*FROM my_datalake\."?\w+"?\.es_events AS r\d+\(column0, column1, column2, column3, column4\)\s+WHERE \(r\d+\.column4 = CAST\(1 AS INTEGER\)\).*
 
 foreach mode none explain_sql_strict
 

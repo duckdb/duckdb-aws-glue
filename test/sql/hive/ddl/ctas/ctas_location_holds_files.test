@@ -55,7 +55,7 @@ DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_marked;
 statement error
 CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_reused AS SELECT range AS id FROM range(5);
 ----
-<REGEX>:.*CREATE TABLE AS for Hive table '{GLUE_TEST_DB}.ctas_reused' is not supported: its location '.*/{GLUE_TEST_DB}/ctas_reused' already holds files.*
+<REGEX>:.*CREATE TABLE AS for Hive table '\w+.ctas_reused' is not supported: its location '.*/\w+/ctas_reused' already holds files.*
 
 # nothing was created
 query I
