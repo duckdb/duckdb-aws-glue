@@ -156,6 +156,17 @@ bool GlueTableInfo::TryGetProperty(const string &key, string &result) const {
 	return false;
 }
 
+void GlueTableInfo::ThrowIfAvroSchemaDefined(const string &action) const {
+	for (auto key : {"avro.schema.literal", "avro.schema.url"}) {
+		string value;
+		if (TryGetProperty(key, value) && !value.empty()) {
+			throw NotImplementedException("Can not %s Glue table '%s.%s': its '%s' defines the columns Hive and Athena "
+			                              "read, and DuckDB does not update it. Change the columns in Athena or Hive",
+			                              action, schema_name, name, key);
+		}
+	}
+}
+
 string GlueTableInfo::GetOpenCSVCharacter(const string &key, const string &fallback) const {
 	string value;
 	if (!TryGetProperty(key, value) || value.empty()) {
