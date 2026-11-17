@@ -50,9 +50,6 @@ struct HiveScanInfo : public TableFunctionInfo {
 	table_statistics_extended_t format_statistics = nullptr;
 	//! The cardinality function of the bound file format reader, used once the footers of every file are read
 	table_function_cardinality_t format_cardinality = nullptr;
-	//! The init_global of the bound file format reader, which BindHiveScan wraps to reuse the footers read for
-	//! statistics
-	table_function_init_global_t format_init_global = nullptr;
 	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
 	//! columns
 	table_function_get_virtual_columns_t format_virtual_columns = nullptr;
@@ -83,11 +80,24 @@ struct HiveScanInfo : public TableFunctionInfo {
 	                           const vector<idx_t> &column_indexes) const;
 	//! A description of the table for error messages
 	string Describe() const;
+	//! The key of the table in the query cache: a Glue table by name, a hive_scan by its location
+	string CacheKey() const;
+	//! Whether the optimizer gets the footers of every file for statistics: a small unpartitioned parquet scan
+	bool ReadsFooterStatistics() const;
+	//! A copy of 'bind_data' with the footers of all its files, or null when the scan has none. They are read when the
+	//! optimizer first asks, once per query for every scan of the table
+	unique_ptr<MultiFileBindData> FooterStatisticsBindData(ClientContext &context,
+	                                                       const MultiFileBindData &bind_data) const;
 	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
 	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+
+private:
+	string FootersCacheKey() const;
+	vector<shared_ptr<BaseUnionData>> ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
+	                                              idx_t max_files) const;
 
 private:
 	mutable annotated_mutex partitions_lock;
