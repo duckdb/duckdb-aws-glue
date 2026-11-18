@@ -1,0 +1,253 @@
+# Compares the timings of the 99 TPC-DS queries at SF100 between a commit and current main, on the partitioned parquet
+# tables in the live AWS Glue catalog (us-east-1) that scripts/benchmarks/create_tpcds_glue.sh created. The tables are
+# only read; the catalog is attached READ_ONLY. Two suites, chosen with the `benchmarks` input (default both):
+#   execution  benchmark/tpcds/cloud_sf100/partitioned/   runs the queries, checking the SF100 answers (8 jobs)
+#   planning   benchmark/tpcds/planning/cloud_sf100/      EXPLAINs them: Glue calls, listings, binding, optimizer (2 jobs)
+# Started by a maintainer only:
+#   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123             PR #123's head commit against main
+#   gh workflow run CloudTPCDSBenchmark.yml --ref my-branch              the head of the selected branch against main
+#   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123 -f benchmarks=planning
+#
+# The 'glue-benchmark' environment provides:
+#   variables  AWS_ROLE_ARN          optional: an IAM role to assume through GitHub's OIDC provider
+#   secrets    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, when no AWS_ROLE_ARN is given
+# The credentials need glue:GetDatabase(s), GetTable(s) and GetPartitions on the catalog 176760123605 in us-east-1,
+# and s3:ListBucket and s3:GetObject on s3://duckdb-aws-glue-benchmark-data/tpcds/. Every byte the queries read leaves
+# AWS (S3 egress to GitHub's runners): each execution query runs 5 times per binary.
+
+name: Cloud TPC-DS benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Number of the pull request whose head commit is benchmarked; empty benchmarks the selected branch
+        required: false
+        type: string
+      benchmarks:
+        description: "Benchmark suites to run, space separated: execution, planning"
+        required: false
+        default: execution planning
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-tpcds-benchmark
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve:
+    name: Resolve commits
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.commits.outputs.sha }}
+      base_sha: ${{ steps.commits.outputs.base_sha }}
+      matrix: ${{ steps.suites.outputs.matrix }}
+    env:
+      PR_NUMBER: ${{ inputs.pr_number }}
+      BENCHMARKS: ${{ inputs.benchmarks }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # the run executes the tested commit's code with the AWS credentials of the 'glue-benchmark' environment
+      - name: Check that a maintainer started the run
+        run: |
+          role=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.triggering_actor }}/permission" --jq .role_name)
+          echo "${{ github.triggering_actor }} has role '$role'"
+          if [ "$role" != "admin" ] && [ "$role" != "maintain" ]; then
+            echo "::error::Only maintainers can run the cloud TPC-DS benchmark"
+            exit 1
+          fi
+
+      # resolved once: a push to the PR, the branch or main during the run does not change what is compared
+      - name: Resolve the commits
+        id: commits
+        run: |
+          if [ -z "$PR_NUMBER" ]; then
+            sha="$GITHUB_SHA"
+            echo "Benchmarking $GITHUB_REF_NAME at $sha"
+          elif [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            sha=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" --jq .head.sha)
+            gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" \
+              --jq '"Benchmarking PR #\(.number) (\(.state)) \(.title) at \(.head.sha)"'
+          else
+            echo "::error::pr_number must be a pull request number, got '$PR_NUMBER'"
+            exit 1
+          fi
+          base_sha=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          echo "Against main at $base_sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+      # one matrix entry per shard of each chosen suite
+      - name: Select the benchmark suites
+        id: suites
+        run: |
+          entries=()
+          for suite in ${BENCHMARKS:-execution planning}; do
+            case "$suite" in
+            execution) directory=benchmark/tpcds/cloud_sf100/partitioned shards=8 ;;
+            planning) directory=benchmark/tpcds/planning/cloud_sf100 shards=2 ;;
+            *)
+              echo "::error::Unknown benchmark suite '$suite': expected execution and/or planning"
+              exit 1
+              ;;
+            esac
+            for shard in $(seq 1 "$shards"); do
+              entries+=("{\"suite\":\"$suite\",\"directory\":\"$directory\",\"shard\":$shard,\"shards\":$shards}")
+            done
+          done
+          if [ ${#entries[@]} -eq 0 ]; then
+            echo "::error::No benchmark suite selected"
+            exit 1
+          fi
+          matrix=$(IFS=,; echo "{\"include\":[${entries[*]}]}")
+          echo "$matrix" | jq .
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build-benchmark-runners:
+    name: Build Benchmark Runners
+    needs: resolve
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
+    env:
+      GEN: ninja
+      CC: clang-20
+      CXX: clang++-20
+      # lets the base build in base/ hit the ccache entries of the tested build
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      SHA: ${{ needs.resolve.outputs.sha }}
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve.outputs.sha }}
+          submodules: 'true'
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install tools
+        run: python3 duckdb/scripts/ci/retry.py -- make -C duckdb toolsci
+
+      # restores the cache Regression.yml saves on main
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@main
+        with:
+          key: build-benchmark-runners
+          save: false
+
+      - name: Build Benchmark (release)
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        env:
+          STATIC_LIBCPP: 1
+          ENABLE_EXTENSION_AUTOLOADING: 1
+          ENABLE_EXTENSION_AUTOINSTALL: 1
+          BUILD_BENCHMARK: 1
+        with:
+          build-type: release
+          build: python3 duckdb/scripts/ci/retry.py -- make release
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
+
+      - name: Checkout main
+        run: |
+          rm -rf base
+          git clone . base
+          cd base
+          git checkout "${BASE_SHA}"
+          git submodule update --init --recursive
+
+      - name: Build Base Benchmark (release)
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        env:
+          STATIC_LIBCPP: 1
+          ENABLE_EXTENSION_AUTOLOADING: 1
+          ENABLE_EXTENSION_AUTOINSTALL: 1
+          BUILD_BENCHMARK: 1
+        with:
+          build-type: release
+          build: python3 duckdb/scripts/ci/retry.py -- make -C base release
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
+
+      # the runners load the extensions (httpfs, aws, glue, ...) from the repository directory next to their build
+      - name: Upload benchmark runners
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-tpcds-benchmark-runners
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            build/release/benchmark/benchmark_runner
+            build/release/repository
+            base/build/release/benchmark/benchmark_runner
+            base/build/release/repository
+
+  benchmark:
+    name: TPC-DS SF100 ${{ matrix.suite }} (shard ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: [resolve, build-benchmark-runners]
+    runs-on: ubuntu-24.04
+    environment: glue-benchmark
+    permissions:
+      contents: read
+      # AWS_ROLE_ARN: OIDC token for configure-aws-credentials
+      id-token: write
+    strategy:
+      fail-fast: false
+      # queries are dealt round-robin (q01, q09, q17, ... to shard 1 of 8), so the heavy ones spread over the shards
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    env:
+      # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: us-east-1
+      DIRECTORY: ${{ matrix.directory }}
+      SHARD: ${{ matrix.shard }}
+      SHARDS: ${{ matrix.shards }}
+
+    steps:
+      # the benchmark files of the tested commit are run by both runners
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          submodules: 'true'
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Download benchmark runners
+        uses: actions/download-artifact@v4
+        with:
+          name: cloud-tpcds-benchmark-runners
+
+      - name: Restore permissions
+        run: chmod +x build/release/benchmark/benchmark_runner base/build/release/benchmark/benchmark_runner
+
+      - name: AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          aws-region: us-east-1
+
+      # --disable-timeout: a batch of 5 runs of a heavy query at SF100 takes longer than the default 10 minutes
+      - name: Regression Test benchmarks
+        run: |
+          mkdir -p .github/regression
+          find "$DIRECTORY" -name '*.benchmark' | sort \
+            | awk -v shard="$SHARD" -v shards="$SHARDS" '(NR - 1) % shards == shard - 1' > .github/regression/benchmarks.csv
+          cat .github/regression/benchmarks.csv
+          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner \
+            --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/benchmarks.csv \
+            --verbose --threads 4 --samples 5 --disable-timeout

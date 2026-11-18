@@ -1,0 +1,23 @@
+# name: benchmark/tpcds/cloud_sf100/tpcds_cloud_glue.benchmark.in
+# description: Setup included by the TPC-DS SF100 benchmarks on the live AWS Glue catalog
+# group: [cloud_sf100]
+
+# Reads the TPC-DS SF100 parquet Hive tables that scripts/benchmarks/create_tpcds_glue.sh registered in the Glue catalog
+# 176760123605 (us-east-1), at s3://duckdb-aws-glue-benchmark-data/tpcds/partitioned/sf100/: the fact tables have one
+# partition per day of their date key (ss_sold_date_sk, ...). Credentials come from the AWS credential chain; the
+# catalog is attached read-only. Included by the execution benchmarks in partitioned/ and the planning benchmarks in
+# benchmark/tpcds/planning/cloud_sf100/; run by .github/workflows/CloudTPCDSBenchmark.yml.
+
+require parquet
+
+require httpfs
+
+require aws
+
+require glue
+
+load
+CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'us-east-1');
+ATTACH '176760123605' AS glue_benchmark (TYPE glue, REGION 'us-east-1', READ_ONLY);
+USE glue_benchmark.tpcds_sf100_partitioned;
+SET enable_external_file_cache = false;
