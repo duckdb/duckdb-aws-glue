@@ -138,6 +138,9 @@ bool ReadDiscoveredPartition(ClientContext &context, const GlueRepairTableBindDa
 				return false;
 			}
 			auto value = HivePartitioning::Unescape(component.substr(equals + 1));
+			if (value.empty()) {
+				return false;
+			}
 			auto typed = GlueTypes::PartitionValue(context, keys[k].name, value, bind_data.key_types[k]);
 			// stored as glue_add_partition stores it: year=07 -> '7'
 			values.push_back(typed.IsNull() ? value : typed.ToString());
