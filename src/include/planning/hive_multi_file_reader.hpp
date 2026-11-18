@@ -203,8 +203,8 @@ private:
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
-//! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan
-//! binds the same scan again
+//! Give 'function' the Hive scan's plan serialization. A deserialized plan binds the same scan again from it; a
+//! partitioned table's scan also needs the query's partition list, and is refused without it
 void SetHiveScanSerialization(TableFunction &function);
 
 //! MultiFileReader for Hive tables registered in Glue. It reads the files Glue's partitions point to (whatever their

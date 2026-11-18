@@ -98,6 +98,12 @@ shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
 	return entry;
 }
 
+shared_ptr<GlueTableEntry> HiveQueryCache::FindGlueTable(const string &key) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	auto entry = glue_tables.find(key);
+	return entry == glue_tables.end() ? nullptr : entry->second;
+}
+
 shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	auto &entry = samples[table];
@@ -144,8 +150,7 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {
-	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
-	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
+	auto entry = HiveQueryCache::Get(context)->GetGlueTable(info.CacheKey());
 	// per table, so the Glue calls for different tables do not wait on each other
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->partitions) {
@@ -161,8 +166,10 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 }
 
 shared_ptr<const vector<GluePartitionInfo>> FindTablePartitions(ClientContext &context, const HiveScanInfo &info) {
-	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
-	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
+	auto entry = HiveQueryCache::Get(context)->FindGlueTable(info.CacheKey());
+	if (!entry) {
+		return nullptr;
+	}
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	return entry->partitions;
 }

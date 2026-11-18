@@ -29,6 +29,16 @@ static idx_t HeldPartitions(ClientContext &context, LogicalGet &get) {
 	return list.ScanInfo().Partitions(context)->size();
 }
 
+//! The message copying the plan is refused with, as the optimizers that copy plans expect it; empty if it is copied
+static string CopyError(ClientContext &context, LogicalOperator &plan) {
+	try {
+		plan.Copy(context);
+	} catch (NotImplementedException &ex) {
+		return ErrorData(ex).RawMessage();
+	}
+	return string();
+}
+
 TEST_CASE("A copy of a plan reports the Glue table of its hive scans", "[hive_scan][glue_catalog]") {
 	auto endpoint = LocalGlueEndpoint();
 	if (endpoint.empty()) {
@@ -41,7 +51,8 @@ TEST_CASE("A copy of a plan reports the Glue table of its hive scans", "[hive_sc
 	auto location = Env("DEFAULT_S3_LOCATION", "s3://glue-test/warehouse") + "/unittest_glue/" + unique;
 	AttachLocalGlue(con, endpoint, location);
 	GlueTables tables(con, "hsc_" + unique + "_");
-	auto table = "lake.default." + tables.Add("orders");
+	auto orders = tables.Add("orders");
+	auto table = "lake.default." + orders;
 	Run(con, "CREATE TABLE " + table + " (id INTEGER, amount INTEGER, dt VARCHAR) PARTITIONED BY (dt)");
 	Run(con, "INSERT INTO " + table + " VALUES (1, 10, 'd1'), (2, 20, 'd2'), (3, 30, 'd2')");
 
@@ -67,19 +78,44 @@ TEST_CASE("A copy of a plan reports the Glue table of its hive scans", "[hive_sc
 	REQUIRE(pruned[0].get().GetTable().get() == scanned.get());
 	REQUIRE(HeldPartitions(*con.context, pruned[0]) == 2);
 
-	// after another statement the query's partition list is gone: the copy still binds and reports its table
+	// after another statement the query's partition list is gone, and with it how Glue registers each partition: a
+	// copy would read them all like the table, so it is refused
+	auto refused = "The scan of partitioned Hive table 'default." + orders +
+	               "' can only be copied in the query that planned it, where the storage format and columns of its "
+	               "partitions are known";
 	Run(con, "SELECT 1");
-	auto later_copy = pruned_plan->Copy(*con.context);
-	auto later = Scans(*later_copy);
-	REQUIRE(later.size() == 1);
-	REQUIRE(later[0].get().GetTable().get() == scanned.get());
-	REQUIRE(HeldPartitions(*con.context, later[0]) == 1);
+	REQUIRE(CopyError(*con.context, *pruned_plan) == refused);
 	Run(con, "COMMIT");
 
-	// a hive_scan() call reads a location, not a table: its copy has no table either
+	// an unpartitioned table's scan has no partitions to lose track of: it is copied after another statement too, and
+	// reports its table
+	auto plain = "lake.default." + tables.Add("plain");
+	Run(con, "CREATE TABLE " + plain + " (id INTEGER)");
+	Run(con, "INSERT INTO " + plain + " VALUES (1)");
+	Run(con, "BEGIN");
+	auto plain_plan = con.ExtractPlan("SELECT id FROM " + plain);
+	auto plain_scans = Scans(*plain_plan);
+	REQUIRE(plain_scans.size() == 1);
+	auto plain_scanned = plain_scans[0].get().GetTable();
+	REQUIRE(plain_scanned);
+	Run(con, "SELECT 1");
+	auto plain_copy = plain_plan->Copy(*con.context);
+	auto plain_copied = Scans(*plain_copy);
+	REQUIRE(plain_copied.size() == 1);
+	REQUIRE(plain_copied[0].get().GetTable().get() == plain_scanned.get());
+	Run(con, "COMMIT");
+
+	// nor is the partitioned scan copied once its table is gone: the copy would read the location, with no table to
+	// check its partitions against
+	Run(con, "DROP TABLE " + table);
+	Run(con, "BEGIN");
+	REQUIRE(CopyError(*con.context, *pruned_plan) == refused);
+	Run(con, "COMMIT");
+
+	// a hive_scan() call reads a location, not a table: its copy has no table either, and is not refused
 	Run(con, "BEGIN");
 	auto location_plan = con.ExtractPlan("SELECT * FROM hive_scan(" + Quote(location + "/hive_scan_" + unique) +
-	                                     ", schema := {id: 'INTEGER'})");
+	                                     ", schema := {id: 'INTEGER', dt: 'VARCHAR'}, partitions := [{dt: 'd1'}])");
 	auto location_scans = Scans(*location_plan);
 	REQUIRE(location_scans.size() == 1);
 	REQUIRE(!location_scans[0].get().GetTable());
@@ -87,5 +123,6 @@ TEST_CASE("A copy of a plan reports the Glue table of its hive scans", "[hive_sc
 	auto location_copied = Scans(*location_copy);
 	REQUIRE(location_copied.size() == 1);
 	REQUIRE(!location_copied[0].get().GetTable());
+	REQUIRE(HeldPartitions(*con.context, location_copied[0]) == 1);
 	Run(con, "COMMIT");
 }

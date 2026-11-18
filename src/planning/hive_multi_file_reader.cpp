@@ -873,15 +873,15 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 	return *function_set.functions.GetFunctionByArguments(context, {LogicalType::LIST(LogicalType::VARCHAR)});
 }
 
-//! The full description of the scan: CommonSubplanOptimizer compares it to decide whether sub-plans are equal, and a
-//! deserialized plan binds the same scan again from it
+//! The description of the scan: CommonSubplanOptimizer compares it to decide whether sub-plans are equal, and a
+//! deserialized plan binds the same scan again from it and, for a partitioned table, the query's partition list
 static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
                               const BoundTableFunction &function) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = list.ScanInfo();
 	serializer.WriteProperty(103, "location", info.root_location);
-	// by value: an index into Glue's partition list means nothing elsewhere. Partitions are loaded lazily; the
+	// by value: a copy is built from them or checks the positions below with them. Partitions are loaded lazily; the
 	// optimizer only serializes scans of statements that plan one, which load them anyway (GetFileCount, pruning).
 	vector<vector<string>> partitions;
 	vector<string> locations;
@@ -915,7 +915,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 //! The Glue table a deserialized scan was bound to, while the catalog holds it as the scan read it: the same location
 //! and the same columns. A copy of a plan (CTE inlining copies a CTE's definition into each of its references) then
 //! reports its table through get_table_entry as the scan it copies does, and optimizers that match scans by their
-//! table see it. Anything else leaves the copy a scan of its location.
+//! table see it. Anything else leaves it a scan of its location, which HiveScanDeserialize refuses when partitioned.
 static void RestoreScanTable(ClientContext &context, HiveScanInfo &info, const string &catalog_name,
                              const string &database_name, const string &table_name) {
 	if (catalog_name.empty() || database_name.empty() || table_name.empty()) {
@@ -1015,6 +1015,12 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	}
 	RestoreScanTable(context, *info, catalog_name, database_name, table_name);
 	auto table_partitions = FindScanPartitions(context, *info, partition_indexes, partitions, locations);
+	if (!table_partitions && !table_name.empty() && !info->partition_keys.empty()) {
+		// rebuilt partitions would be read like the table; the optimizers that copy plans skip a copy that throws this
+		throw NotImplementedException("The scan of partitioned Hive table '%s.%s' can only be copied in the query that "
+		                              "planned it, where the storage format and columns of its partitions are known",
+		                              database_name, table_name);
+	}
 	if (table_partitions) {
 		info->SetPartitions(table_partitions);
 	} else {
