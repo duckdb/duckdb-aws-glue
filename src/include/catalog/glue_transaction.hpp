@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -68,6 +69,21 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
+		stamp = NextId();
+	}
+	//! Like Id(), but also new after Clear(): a listing made under another stamp may predate a write
+	idx_t Stamp() const {
+		return stamp;
+	}
+	//! The databases the catalog scan now under way visits, for GlueCatalog::PrefetchTables
+	void SetScannedSchemas(vector<string> names);
+	//! Called as a scan of a database's tables starts. From the second scan of a catalog scan on, and once per
+	//! catalog scan, returns true with the databases it visits
+	bool TakeSchemasToPrefetch(vector<string> &names);
+	//! Held while a prefetch lists, so that the other children of a union that scans at the same time wait for it
+	//! and find the listings made
+	mutex &PrefetchLock() {
+		return prefetch_lock;
 	}
 	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
 	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
@@ -113,6 +129,12 @@ private:
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
 	const idx_t id = NextId();
+	atomic<idx_t> stamp {NextId()};
+	mutex prefetch_lock;
+	annotated_mutex scan_lock;
+	vector<string> scanned_schemas DUCKDB_GUARDED_BY(scan_lock);
+	idx_t scanned_table_scans DUCKDB_GUARDED_BY(scan_lock) = 0;
+	bool scanned_prefetched DUCKDB_GUARDED_BY(scan_lock) = false;
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in

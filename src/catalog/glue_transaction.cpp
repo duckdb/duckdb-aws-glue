@@ -26,6 +26,23 @@ GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &
 GlueTransaction::~GlueTransaction() {
 }
 
+void GlueTransactionCache::SetScannedSchemas(vector<string> names) {
+	annotated_lock_guard<annotated_mutex> guard(scan_lock);
+	scanned_schemas = std::move(names);
+	scanned_table_scans = 0;
+	scanned_prefetched = false;
+}
+
+bool GlueTransactionCache::TakeSchemasToPrefetch(vector<string> &names) {
+	annotated_lock_guard<annotated_mutex> guard(scan_lock);
+	if (scanned_prefetched || ++scanned_table_scans < 2) {
+		return false;
+	}
+	scanned_prefetched = true;
+	names = scanned_schemas;
+	return true;
+}
+
 void GlueTransaction::Start() {
 	transaction_state = GlueTransactionState::TRANSACTION_STARTED;
 }

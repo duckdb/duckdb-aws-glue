@@ -80,6 +80,20 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_list_tables_parallelism",
+	                          "Up to how many GetTables requests to run at the same time when a statement lists the "
+	                          "tables of many databases (SHOW ALL TABLES, duckdb_tables(), duckdb_columns()). Once "
+	                          "the statement has visited a second database, the tables of the other databases it "
+	                          "visits are listed together. 0 and 1 list one database after another. Default 8, at "
+	                          "most 32.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(8));
+
+	config.AddExtensionOption("glue_debug_fail_list_tables",
+	                          "For tests: the name of a database whose tables, listed together with those of other "
+	                          "databases, are discarded after Glue returned them, so the scan lists that database "
+	                          "again. Empty, the default, injects nothing.",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::SESSION, true);
+
 	config.AddExtensionOption("glue_max_retries",
 	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
 	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "

@@ -1051,6 +1051,7 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (!CatalogTypeIsSupported(type)) {
 		return;
 	}
+	catalog.Cast<GlueCatalog>().PrefetchTables(context);
 	tables.Scan(context, callback);
 }
 

@@ -29,6 +29,11 @@ public:
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
 	void RemoveEntry(const string &name);
 
+	//! Whether a scan would list the database from Glue: it is not loaded and has no listing made under 'stamp'
+	bool NeedsListing(idx_t stamp);
+	//! The listing a scan uses instead of asking Glue, made under the cache stamp 'stamp'
+	void SetListing(idx_t stamp, vector<GlueTableInfo> tables);
+
 	//! Build the catalog entry for a Glue table definition: a GlueView for a VIRTUAL_VIEW, else a GlueTable
 	unique_ptr<CatalogEntry> CreateEntry(const GlueTableInfo &table);
 	//! The definition a table or view entry was built from
@@ -51,6 +56,9 @@ private:
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
 	bool is_loaded = false;
+	//! The tables listed before the scan reached the database (GlueCatalog::PrefetchTables), and the cache stamp
+	unique_ptr<vector<GlueTableInfo>> prefetched;
+	idx_t prefetched_stamp = 0;
 	//! Direct-lookup round trips since the last bulk fetch: bulk pays off from the second one on
 	idx_t direct_lookups = 0;
 	//! The GlueTransactionCache::Id() the last successful bulk fetch warmed (0 = none yet)

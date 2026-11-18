@@ -81,6 +81,9 @@ public:
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();
+	//! Called as a scan of the tables of a database starts: from the second scan on, lists the tables of the other
+	//! databases the catalog scan visits at the same time (glue_list_tables_parallelism)
+	void PrefetchTables(ClientContext &context);
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
 	//! The S3 location a new table gets when none is given: <default_location>/<database>/<table> when the catalog
@@ -141,6 +144,10 @@ private:
 	//! for reading - the fetched catalog id or account id from ATTACH
 	string KnownCatalogId();
 	friend struct GlueViewNames;
+
+private:
+	//! The databases the catalog scan now under way visits, for PrefetchTables
+	void RememberScannedSchemas(ClientContext &context, vector<string> names);
 
 private:
 	GlueSchemaSet schemas;
