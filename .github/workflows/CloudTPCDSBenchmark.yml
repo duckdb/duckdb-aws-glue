@@ -1,11 +1,13 @@
-# Compares the timings of the 99 TPC-DS queries at SF100 between a commit and current main, on the partitioned parquet
+# Compares the timings of the 99 TPC-DS queries at SF100 between a commit and a base commit, on the partitioned parquet
 # tables in the live AWS Glue catalog (us-east-1) that scripts/benchmarks/create_tpcds_glue.sh created. The tables are
 # only read; the catalog is attached READ_ONLY. Two suites, chosen with the `benchmarks` input (default both):
 #   execution  benchmark/tpcds/cloud_sf100/partitioned/   runs the queries, checking the SF100 answers (8 jobs)
 #   planning   benchmark/tpcds/planning/cloud_sf100/      EXPLAINs them: Glue calls, listings, binding, optimizer (2 jobs)
 # Started by a maintainer only:
-#   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123             PR #123's head commit against main
-#   gh workflow run CloudTPCDSBenchmark.yml --ref my-branch              the head of the selected branch against main
+#   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123   PR #123's head commit against the current head of the
+#                                                              branch the PR targets (main, v2.0-cyanoptera, ...)
+#   gh workflow run CloudTPCDSBenchmark.yml --ref my-branch    the head of the selected branch against the same branch
+#                                                              a day ago: its newest first-parent commit older than 24h
 #   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123 -f benchmarks=planning
 #
 # The 'glue-benchmark' environment provides:
@@ -64,23 +66,40 @@ jobs:
             exit 1
           fi
 
-      # resolved once: a push to the PR, the branch or main during the run does not change what is compared
+      # the history of the selected branch, for its commit of a day ago (commits only, no files)
+      - uses: actions/checkout@v5
+        if: inputs.pr_number == ''
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+          persist-credentials: false
+
+      # resolved once: a push to the PR or a branch during the run does not change what is compared
       - name: Resolve the commits
         id: commits
         run: |
           if [ -z "$PR_NUMBER" ]; then
             sha="$GITHUB_SHA"
             echo "Benchmarking $GITHUB_REF_NAME at $sha"
+            # first-parent: the branch's own history (its merge commits), not the commits of the branches merged into it
+            base_sha=$(git rev-list -1 --first-parent --before="24 hours ago" "$sha")
+            if [ -z "$base_sha" ]; then
+              echo "::error::$GITHUB_REF_NAME has no commit older than a day to compare with; benchmark a PR instead"
+              exit 1
+            fi
+            git log -1 --format="Against $GITHUB_REF_NAME a day ago: %h %s (%cr)" "$base_sha"
           elif [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-            sha=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" --jq .head.sha)
-            gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" \
-              --jq '"Benchmarking PR #\(.number) (\(.state)) \(.title) at \(.head.sha)"'
+            pr=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER")
+            sha=$(jq -r .head.sha <<< "$pr")
+            base_ref=$(jq -r .base.ref <<< "$pr")
+            jq -r '"Benchmarking PR #\(.number) (\(.state)) \(.title) at \(.head.sha)"' <<< "$pr"
+            base_sha=$(gh api "repos/${{ github.repository }}/commits/$base_ref" --jq .sha)
+            echo "Against the head of $base_ref at $base_sha"
           else
             echo "::error::pr_number must be a pull request number, got '$PR_NUMBER'"
             exit 1
           fi
-          base_sha=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
-          echo "Against main at $base_sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
 
@@ -159,7 +178,7 @@ jobs:
           build: python3 duckdb/scripts/ci/retry.py -- make release
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
-      - name: Checkout main
+      - name: Checkout the base commit
         run: |
           rm -rf base
           git clone . base
