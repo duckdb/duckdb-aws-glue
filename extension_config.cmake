@@ -26,7 +26,7 @@ duckdb_extension_load(httpfs
 )
 
 if (NOT MINGW)
-    duckdb_extension_load(avro
+  duckdb_extension_load(avro
         GIT_URL https://github.com/duckdb/duckdb-avro
         GIT_TAG 4d95356ce9433a14165156dbc6f59dcc91bd4889
         SUBMODULES "third_party/avro-c"
@@ -38,9 +38,8 @@ endif()
 # Pinned and patched as the duckdb submodule's .github/config/extensions/iceberg.cmake, until duckdb-iceberg main
 # builds against duckdb main
 if (NOT EMSCRIPTEN AND NOT MINGW)
-    duckdb_extension_load(iceberg
+  duckdb_extension_load(iceberg
         GIT_URL https://github.com/duckdb/duckdb-iceberg
-        GIT_TAG 4c0c0874c48ec82a3e29910554891d04bcc0e988
-        APPLY_PATCHES
+        GIT_TAG f979b5b28a044c49c38a26636ac01bc1f7047fa5
     )
 endif()
