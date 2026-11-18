@@ -518,7 +518,7 @@ WHERE (dt IS NULL) <> (partition_values[1] = '__HIVE_DEFAULT_PARTITION__')
 the partitions Glue does not have yet with `BatchCreatePartition`. A partition is a directory with one `<key>=<value>`
 component per partition key, in partition key order (keys compare case-insensitively); it is registered at that
 directory, with the values unescaped and cast to the key types (`year=07` is `7`). Directories that do not follow this
-scheme, whose values do not cast, that are already the location of a partition, or that hold no file a scan would read
+scheme, whose values are empty or do not cast, that are already the location of a partition, or that hold no file a scan would read
 (only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. A table with another
 engine's InputFormat over a Hive SerDe (one INSERT refuses too) is refused: its files are not laid out the way Hive
 writes them.
