@@ -10,10 +10,12 @@
 #                                                              a day ago: its newest first-parent commit older than 24h
 #   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123 -f benchmarks=planning
 #
-# The 'glue-benchmark' environment provides:
-#   variables  AWS_ROLE_ARN          optional: an IAM role to assume through GitHub's OIDC provider
+# The 'glue-benchmark' environment (or the repository) provides:
+#   variables  GLUE_CATALOG_ID               the AWS account id of the Glue catalog that holds tpcds_sf100_partitioned
+#              GLUE_REGRESSION_TEST_REGION   its region, e.g. us-east-1
+#              AWS_ROLE_ARN                  optional: an IAM role to assume through GitHub's OIDC provider
 #   secrets    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, when no AWS_ROLE_ARN is given
-# The credentials need glue:GetDatabase(s), GetTable(s) and GetPartitions on the catalog 176760123605 in us-east-1,
+# The credentials need glue:GetDatabase(s), GetTable(s) and GetPartitions on that catalog and region,
 # and s3:ListBucket and s3:GetObject on s3://duckdb-aws-glue-benchmark-data/tpcds/. Every byte the queries read leaves
 # AWS (S3 egress to GitHub's runners): each execution query runs 5 times per binary.
 
@@ -227,7 +229,9 @@ jobs:
     env:
       # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
       AWS_EC2_METADATA_DISABLED: "true"
-      AWS_REGION: us-east-1
+      AWS_REGION: ${{ vars.GLUE_REGRESSION_TEST_REGION }}
+      GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+      GLUE_REGRESSION_TEST_REGION: ${{ vars.GLUE_REGRESSION_TEST_REGION }}
       DIRECTORY: ${{ matrix.directory }}
       SHARD: ${{ matrix.shard }}
       SHARDS: ${{ matrix.shards }}
@@ -244,6 +248,17 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Check the configuration
+        run: |
+          missing=0
+          for name in GLUE_CATALOG_ID GLUE_REGRESSION_TEST_REGION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable $name is not set in the 'glue-benchmark' environment or the repository"
+              missing=1
+            fi
+          done
+          exit $missing
+
       - name: Download benchmark runners
         uses: actions/download-artifact@v4
         with:
@@ -258,7 +273,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-access-key-id: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
           aws-secret-access-key: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
-          aws-region: us-east-1
+          aws-region: ${{ vars.GLUE_REGRESSION_TEST_REGION }}
 
       # --disable-timeout: a batch of 5 runs of a heavy query at SF100 takes longer than the default 10 minutes
       - name: Regression Test benchmarks
@@ -269,4 +284,6 @@ jobs:
           cat .github/regression/benchmarks.csv
           python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner \
             --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/benchmarks.csv \
-            --verbose --threads 4 --samples 5 --disable-timeout
+            --verbose --threads 4 --samples 5 --disable-timeout \
+            --benchmark-argument "glue_catalog_id=$GLUE_CATALOG_ID" \
+            --benchmark-argument "glue_region=$GLUE_REGRESSION_TEST_REGION"
