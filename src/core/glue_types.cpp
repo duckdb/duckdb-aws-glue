@@ -252,6 +252,8 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 		return "int";
 	case LogicalTypeId::UINTEGER:
 		return "bigint";
+	case LogicalTypeId::HUGEINT:
+		return "decimal(38,0)";
 	case LogicalTypeId::FLOAT:
 		return "float";
 	case LogicalTypeId::DOUBLE:
