@@ -2,33 +2,5 @@
 # description: Plan (EXPLAIN) query 82 from the TPC-DS benchmark at SF100 on the partitioned parquet tables in the AWS Glue catalog
 # group: [cloud_sf100]
 
-include benchmark/tpcds/cloud_sf100/tpcds_cloud_glue.benchmark.in
-
-name DSQ82_plan_cloud_sf100_partitioned
-group tpcds_glue_cloud_planning
-subgroup sf100_partitioned
-
-run
-EXPLAIN
-SELECT i_item_id ,
-       i_item_desc ,
-       i_current_price
-FROM item,
-     inventory,
-     date_dim,
-     store_sales
-WHERE i_current_price BETWEEN 62 AND 62+30
-  AND inv_item_sk = i_item_sk
-  AND d_date_sk=inv_date_sk
-  AND d_date BETWEEN cast('2000-05-25' AS date) AND cast('2000-07-24' AS date)
-  AND i_manufact_id IN (129,
-                        270,
-                        821,
-                        423)
-  AND inv_quantity_on_hand BETWEEN 100 AND 500
-  AND ss_item_sk = i_item_sk
-GROUP BY i_item_id,
-         i_item_desc,
-         i_current_price
-ORDER BY i_item_id
-LIMIT 100;
+template benchmark/tpcds/planning/cloud_sf100/tpcds_cloud_planning.benchmark.in
+QUERY_NUMBER_PADDED=82

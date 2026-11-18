@@ -745,8 +745,8 @@ catalog (`176760123605`, us-east-1, database `tpcds_sf100_partitioned`), whose f
 of their date key. `scripts/benchmarks/create_tpcds_glue.sh` created them (and `tpcds_sf100_unpartitioned`); the
 benchmarks only read them, with credentials from the AWS credential chain. `benchmark/tpcds/planning/cloud_sf100/`
 only plans the same queries (`EXPLAIN`: the Glue calls, the listings for the row count estimates, binding and the
-optimizer). `.github/workflows/CloudTPCDSBenchmark.yml` compares a PR (`gh workflow run CloudTPCDSBenchmark.yml -f
-pr_number=123`) with the current head of the branch it targets, or the branch it is started on (`--ref`) with that
+optimizer); it reads the text of DuckDB's query files, so both suites follow the pinned `duckdb` submodule. `.github/workflows/CloudTPCDSBenchmark.yml` compares a PR (`gh workflow run CloudTPCDSBenchmark.yml -f
+pr_number=123`), merged into the head of the branch it targets, with that head, or the branch it is started on (`--ref`) with that
 branch a day ago (its newest first-parent commit older than 24 hours), on them; `-f benchmarks=execution` or `-f benchmarks=planning` runs one of
 the two suites (default both, in 8 and 2 parallel jobs). A maintainer starts it.
 

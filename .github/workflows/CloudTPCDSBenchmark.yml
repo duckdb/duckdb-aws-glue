@@ -4,8 +4,9 @@
 #   execution  benchmark/tpcds/cloud_sf100/partitioned/   runs the queries, checking the SF100 answers (8 jobs)
 #   planning   benchmark/tpcds/planning/cloud_sf100/      EXPLAINs them: Glue calls, listings, binding, optimizer (2 jobs)
 # Started by a maintainer only:
-#   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123   PR #123's head commit against the current head of the
-#                                                              branch the PR targets (main, v2.0-cyanoptera, ...)
+#   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123   PR #123's head merged into the head of the branch it
+#                                                              targets (main, v2.0-cyanoptera, ...) against that head;
+#                                                              a PR with conflicts has to merge the branch first
 #   gh workflow run CloudTPCDSBenchmark.yml --ref my-branch    the head of the selected branch against the same branch
 #                                                              a day ago: its newest first-parent commit older than 24h
 #   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123 -f benchmarks=planning
@@ -52,6 +53,7 @@ jobs:
     outputs:
       sha: ${{ steps.commits.outputs.sha }}
       base_sha: ${{ steps.commits.outputs.base_sha }}
+      merge: ${{ steps.commits.outputs.merge }}
       matrix: ${{ steps.suites.outputs.matrix }}
     env:
       PR_NUMBER: ${{ inputs.pr_number }}
@@ -95,9 +97,11 @@ jobs:
             pr=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER")
             sha=$(jq -r .head.sha <<< "$pr")
             base_ref=$(jq -r .base.ref <<< "$pr")
-            jq -r '"Benchmarking PR #\(.number) (\(.state)) \(.title) at \(.head.sha)"' <<< "$pr"
+            jq -r '"Benchmarking PR #\(.number) (\(.state)) \(.title) at \(.head.sha), merged into \(.base.ref)"' <<< "$pr"
             base_sha=$(gh api "repos/${{ github.repository }}/commits/$base_ref" --jq .sha)
-            echo "Against the head of $base_ref at $base_sha"
+            echo "Against the head of $base_ref: $base_sha"
+            # not GitHub's refs/pull/<n>/merge: it can lag behind the target branch, e.g. after the PR's base changed
+            echo "merge=true" >> "$GITHUB_OUTPUT"
           else
             echo "::error::pr_number must be a pull request number, got '$PR_NUMBER'"
             exit 1
@@ -150,9 +154,24 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ needs.resolve.outputs.sha }}
-          submodules: 'true'
+          ref: ${{ needs.resolve.outputs.merge == 'true' && needs.resolve.outputs.base_sha || needs.resolve.outputs.sha }}
           persist-credentials: false
+
+      # PR mode: the tested tree is the PR's head merged into the target branch's head (base_sha)
+      - name: Merge the PR into its target branch
+        if: needs.resolve.outputs.merge == 'true'
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          git fetch --no-tags origin "$SHA"
+          if ! git -c user.name=ci -c user.email=ci@localhost merge --no-ff --no-edit "$SHA"; then
+            echo "::error::The PR conflicts with its target branch: merge the target branch into it, then start the run again"
+            exit 1
+          fi
+          git log -1 --format='Merged %p into %h'
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
 
       - uses: actions/setup-python@v6
         with:
@@ -240,9 +259,25 @@ jobs:
       # the benchmark files of the tested commit are run by both runners
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
-          submodules: 'true'
+          fetch-depth: 0
+          ref: ${{ needs.resolve.outputs.merge == 'true' && needs.resolve.outputs.base_sha || needs.resolve.outputs.sha }}
           persist-credentials: false
+
+      # PR mode: the tested tree is the PR's head merged into the target branch's head (base_sha)
+      - name: Merge the PR into its target branch
+        if: needs.resolve.outputs.merge == 'true'
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          git fetch --no-tags origin "$SHA"
+          if ! git -c user.name=ci -c user.email=ci@localhost merge --no-ff --no-edit "$SHA"; then
+            echo "::error::The PR conflicts with its target branch: merge the target branch into it, then start the run again"
+            exit 1
+          fi
+          git log -1 --format='Merged %p into %h'
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
 
       - uses: actions/setup-python@v6
         with:

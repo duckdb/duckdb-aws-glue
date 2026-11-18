@@ -2,30 +2,5 @@
 # description: Plan (EXPLAIN) query 93 from the TPC-DS benchmark at SF100 on the partitioned parquet tables in the AWS Glue catalog
 # group: [cloud_sf100]
 
-include benchmark/tpcds/cloud_sf100/tpcds_cloud_glue.benchmark.in
-
-name DSQ93_plan_cloud_sf100_partitioned
-group tpcds_glue_cloud_planning
-subgroup sf100_partitioned
-
-run
-EXPLAIN
-SELECT ss_customer_sk,
-       sum(act_sales) sumsales
-FROM
-  (SELECT ss_item_sk,
-          ss_ticket_number,
-          ss_customer_sk,
-          CASE
-              WHEN sr_return_quantity IS NOT NULL THEN (ss_quantity-sr_return_quantity)*ss_sales_price
-              ELSE (ss_quantity*ss_sales_price)
-          END act_sales
-   FROM store_sales
-   LEFT OUTER JOIN store_returns ON (sr_item_sk = ss_item_sk
-                                     AND sr_ticket_number = ss_ticket_number) ,reason
-   WHERE sr_reason_sk = r_reason_sk
-     AND r_reason_desc = 'reason 28') t
-GROUP BY ss_customer_sk
-ORDER BY sumsales NULLS FIRST,
-         ss_customer_sk NULLS FIRST
-LIMIT 100;
+template benchmark/tpcds/planning/cloud_sf100/tpcds_cloud_planning.benchmark.in
+QUERY_NUMBER_PADDED=93

@@ -2,27 +2,5 @@
 # description: Plan (EXPLAIN) query 32 from the TPC-DS benchmark at SF100 on the partitioned parquet tables in the AWS Glue catalog
 # group: [cloud_sf100]
 
-include benchmark/tpcds/cloud_sf100/tpcds_cloud_glue.benchmark.in
-
-name DSQ32_plan_cloud_sf100_partitioned
-group tpcds_glue_cloud_planning
-subgroup sf100_partitioned
-
-run
-EXPLAIN
-SELECT sum(cs_ext_discount_amt) AS "excess discount amount"
-FROM catalog_sales ,
-     item ,
-     date_dim
-WHERE i_manufact_id = 977
-  AND i_item_sk = cs_item_sk
-  AND d_date BETWEEN '2000-01-27' AND cast('2000-04-26' AS date)
-  AND d_date_sk = cs_sold_date_sk
-  AND cs_ext_discount_amt >
-    ( SELECT 1.3 * avg(cs_ext_discount_amt)
-     FROM catalog_sales ,
-          date_dim
-     WHERE cs_item_sk = i_item_sk
-       AND d_date BETWEEN '2000-01-27' AND cast('2000-04-26' AS date)
-       AND d_date_sk = cs_sold_date_sk )
-LIMIT 100;
+template benchmark/tpcds/planning/cloud_sf100/tpcds_cloud_planning.benchmark.in
+QUERY_NUMBER_PADDED=32
