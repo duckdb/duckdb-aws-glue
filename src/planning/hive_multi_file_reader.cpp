@@ -335,12 +335,12 @@ private:
 //===--------------------------------------------------------------------===//
 HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p,
                                      vector<idx_t> partition_indexes_p)
-    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)),
+    : LazyMultiFileList(&context.GetContext()), client_context(context), scan_info(std::move(scan_info_p)),
       partition_indexes(make_shared_ptr<const vector<idx_t>>(std::move(partition_indexes_p))) {
 }
 
 HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p)
-    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)) {
+    : LazyMultiFileList(&context.GetContext()), client_context(context), scan_info(std::move(scan_info_p)) {
 }
 
 shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {
@@ -871,7 +871,7 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 
 //! The full description of the scan: CommonSubplanOptimizer compares it to decide whether sub-plans are equal, and a
 //! deserialized plan binds the same scan again from it
-static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
+static void HiveScanSerialize(Serializer &serializer, const optional_ptr<const FunctionData> bind_data_p,
                               const BoundTableFunction &function) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &list = bind_data.file_list->Cast<HiveMultiFileList>();
@@ -1029,7 +1029,8 @@ static bool HasBinaryColumn(const HiveScanInfo &scan_info) {
 	return false;
 }
 
-static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data,
+static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &get,
+                                          optional_ptr<const FunctionData> bind_data,
                                           vector<unique_ptr<Expression>> &filters) {
 	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
 	auto &scan_info = multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
@@ -1388,21 +1389,21 @@ static void RetainFileFilter(MultiFilePushdownInfo &pushdown_info, unique_ptr<Ex
 		return;
 	}
 	bool representable = true;
-	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
-	    filter, [&](BoundColumnRefExpression &column, unique_ptr<Expression> &) {
+	filter = ExpressionIterator::PreorderReplace<BoundColumnRefExpression>(
+	    std::move(filter), [&](const BoundColumnRefExpression &column) -> unique_ptr<Expression> {
 		    auto binding = column.Binding();
 		    if (column.Depth() != 0 || binding.table_index != pushdown_info.table_index ||
 		        binding.column_index.GetIndex() >= pushdown_info.column_indexes.size()) {
 			    representable = false;
-			    return;
+			    return nullptr;
 		    }
 		    auto &index = pushdown_info.column_indexes[binding.column_index.GetIndex()];
 		    if (index.IsVirtualColumn() || index.IsPushdownExtract() || index.HasType()) {
 			    representable = false;
-			    return;
+			    return nullptr;
 		    }
-		    column.BindingMutable() = ColumnBinding(TableIndex(ExtraOperatorInfo::FILE_FILTER_TABLE_INDEX),
-		                                            ProjectionIndex(index.GetPrimaryIndex()));
+		    return column.WithBinding(ColumnBinding(TableIndex(ExtraOperatorInfo::FILE_FILTER_TABLE_INDEX),
+		                                            ProjectionIndex(index.GetPrimaryIndex())));
 	    });
 	if (!representable) {
 		retained.reset();

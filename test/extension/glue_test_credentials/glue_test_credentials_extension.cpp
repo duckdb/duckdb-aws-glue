@@ -164,7 +164,8 @@ public:
 		if (!FindTable(table, config)) {
 			return string();
 		}
-		auto state = context.registered_state->GetOrCreate<TransactionCredentials>("glue_test_credentials");
+		auto state =
+		    context.GetContext().GetRegisteredState().GetOrCreate<TransactionCredentials>("glue_test_credentials");
 		auto &name = state->by_table[TableKey(table.catalog.GetName().GetIdentifierName(), table.table_info.name)];
 		if (name.empty()) {
 			auto candidate = "glue_test_credentials_" + to_string(++secret_count);

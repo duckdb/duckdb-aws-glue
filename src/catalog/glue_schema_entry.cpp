@@ -684,10 +684,6 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreatePragmaFunction(CatalogTransact
 	throw BinderException("Glue databases do not support creating pragma functions");
 }
 
-optional_ptr<CatalogEntry> GlueSchemaEntry::CreateCollation(CatalogTransaction transaction, CreateCollationInfo &info) {
-	throw BinderException("Glue databases do not support creating collations");
-}
-
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
 	throw BinderException("Glue databases do not support creating types");
 }
