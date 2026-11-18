@@ -176,8 +176,6 @@ private:
 	//! the root when there is none, so a partition key such as '_k' is not read as a hidden directory
 	bool IsRootListedDataFile(const OpenFileInfo &file, const string &root_prefix, idx_t comparable_root_size,
 	                          const vector<GluePartitionInfo> &partitions) const;
-	//! Whether the file passes every filter that depends only on "$path" or filename
-	bool PathMatches(const string &path) const;
 	//! Add a listed file of the partition unless this list already has it. Called with
 	//! HiveScanInfo::file_partitions_lock held. 'partition_index' is invalid for an unpartitioned table.
 	void AddFile(OpenFileInfo file, optional_idx partition_index) const;

@@ -347,14 +347,29 @@ void HiveMultiFileList::SetPathFilters(vector<shared_ptr<ExpressionFilter>> filt
 	path_filters = std::move(filters);
 }
 
-bool HiveMultiFileList::PathMatches(const string &path) const {
-	for (auto &filter : path_filters) {
-		if (!filter->EvaluateWithConstant(client_context, Value(path))) {
-			return false;
+class PathFilterEvaluator {
+public:
+	PathFilterEvaluator(ClientContext &context, const vector<shared_ptr<ExpressionFilter>> &filters_p)
+	    : filters(filters_p) {
+		for (auto &filter : filters) {
+			executors.push_back(make_uniq<ExpressionExecutor>(context, *filter->expr));
 		}
 	}
-	return true;
-}
+
+	bool Matches(const string &path) {
+		Value value(path);
+		for (idx_t i = 0; i < filters.size(); i++) {
+			if (!filters[i]->EvaluateWithConstant(*executors[i], value)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+private:
+	const vector<shared_ptr<ExpressionFilter>> &filters;
+	vector<unique_ptr<ExpressionExecutor>> executors;
+};
 
 shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {
 	annotated_lock_guard<annotated_mutex> guard(indexes_lock);
@@ -565,12 +580,16 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 	}
 	executor.ScheduleTasks(std::move(tasks));
 	executor.WorkOnTasks();
+	PathFilterEvaluator path_evaluator(client_context, path_filters);
 	BuildPartitionLocations();
 	unordered_set<idx_t> reading(partition_indexes.begin(), partition_indexes.end());
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (idx_t i = 0; i < locations.size(); i++) {
 		auto comparable_size = ComparableLocation(locations[i]).size();
 		for (auto &file : listed[i]) {
+			if (!path_evaluator.Matches(file.path)) {
+				continue;
+			}
 			// skip files of another partition registered at a location nested inside this one
 			auto owner = OwningPartition(file.path, comparable_size);
 			if (owner.IsValid() && owner.GetIndex() != partition_indexes[i]) {
@@ -584,9 +603,6 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 }
 
 void HiveMultiFileList::AddFile(OpenFileInfo file, optional_idx partition_index) const {
-	if (!PathMatches(file.path)) {
-		return;
-	}
 	// Deduplicated per list: the scan info is shared with the copies of this list (the late materialization
 	// optimizer copies the bind data) and with the list before partition pruning, which all list the same files
 	if (!listed_files.insert(file.path).second) {
@@ -625,9 +641,10 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	BuildPartitionLocations();
 	auto root_prefix = root + "/";
 	auto comparable_size = ComparableLocation(root).size() + 1;
+	PathFilterEvaluator path_evaluator(client_context, path_filters);
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
-		if (!IsRootListedDataFile(file, root_prefix, comparable_size, *all)) {
+		if (!IsRootListedDataFile(file, root_prefix, comparable_size, *all) || !path_evaluator.Matches(file.path)) {
 			continue;
 		}
 		auto partition_index = OwningPartition(file.path, comparable_size);
@@ -660,7 +677,11 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		vector<OpenFileInfo> listed;
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
 		              scan_info->file_secret, listed);
+		PathFilterEvaluator path_evaluator(client_context, path_filters);
 		for (auto &file : listed) {
+			if (!path_evaluator.Matches(file.path)) {
+				continue;
+			}
 			AddFile(std::move(file), optional_idx());
 		}
 		mode = "table";
@@ -735,8 +756,9 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 		vector<OpenFileInfo> listed;
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
 		              scan_info->file_secret, listed);
+		PathFilterEvaluator path_evaluator(client_context, path_filters);
 		for (auto &file : listed) {
-			if (PathMatches(file.path)) {
+			if (path_evaluator.Matches(file.path)) {
 				files.push_back(std::move(file));
 			}
 		}
@@ -756,9 +778,10 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	// as ListPartitions keeps them: not the files of a partition registered at a location nested inside this one
 	BuildPartitionLocations();
 	auto comparable_size = ComparableLocation(location).size();
+	PathFilterEvaluator path_evaluator(client_context, path_filters);
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : listed) {
-		if (!PathMatches(file.path)) {
+		if (!path_evaluator.Matches(file.path)) {
 			continue;
 		}
 		auto owner = OwningPartition(file.path, comparable_size);
@@ -791,6 +814,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	vector<idx_t> file_partitions;
 	MultiFileListScanData scan;
 	listing->InitializeScan(scan);
+	PathFilterEvaluator path_evaluator(client_context, path_filters);
 	// the pages fetched so far, and more only to find a partition the scan reads or while it may continue
 	scan.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
 	OpenFileInfo file;
@@ -806,7 +830,8 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
 			continue;
 		}
-		if (!IsRootListedDataFile(file, root_prefix, comparable_root_size, *all) || !PathMatches(file.path)) {
+		if (!IsRootListedDataFile(file, root_prefix, comparable_root_size, *all) ||
+		    !path_evaluator.Matches(file.path)) {
 			continue;
 		}
 		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
