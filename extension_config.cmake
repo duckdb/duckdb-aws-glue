@@ -8,10 +8,6 @@ duckdb_extension_load(glue
 # Linked into unittest, which the test extension under test/extension/glue_test_credentials must share with it
 duckdb_extension_statically_link(glue)
 
-# Avro backed Hive tables (AvroSerDe) are read with read_avro from the avro extension, which the glue extension loads
-# when Glue reports such a table. Pinned to the hash the duckdb submodule pins in
-# .github/config/extensions/avro.cmake, so it is known to build against this duckdb commit, and patched as duckdb builds
-# it (.github/patches/extensions/avro, e.g. linking the vcpkg libraries of the wasm_threads triplet).
 # dbgen / dsdgen for the TPC-H and TPC-DS benchmarks under benchmark/tpch and benchmark/tpcds
 duckdb_extension_load(tpch)
 duckdb_extension_load(tpcds)
@@ -25,8 +21,12 @@ duckdb_extension_load(httpfs
     APPLY_PATCHES
 )
 
+# Avro backed Hive tables (AvroSerDe) are read with read_avro from the avro extension, which the glue extension loads
+# when Glue reports such a table. Pinned to the hash the duckdb submodule pins in
+# .github/config/extensions/avro.cmake, so it is known to build against this duckdb commit, and patched as duckdb builds
+# it (.github/patches/extensions/avro, e.g. linking the vcpkg libraries of the wasm_threads triplet).
 if (NOT MINGW)
-  duckdb_extension_load(avro
+    duckdb_extension_load(avro
         GIT_URL https://github.com/duckdb/duckdb-avro
         GIT_TAG 4d95356ce9433a14165156dbc6f59dcc91bd4889
         SUBMODULES "third_party/avro-c"
@@ -38,8 +38,9 @@ endif()
 # Pinned and patched as the duckdb submodule's .github/config/extensions/iceberg.cmake, until duckdb-iceberg main
 # builds against duckdb main
 if (NOT EMSCRIPTEN AND NOT MINGW)
-  duckdb_extension_load(iceberg
+    duckdb_extension_load(iceberg
         GIT_URL https://github.com/duckdb/duckdb-iceberg
-        GIT_TAG f979b5b28a044c49c38a26636ac01bc1f7047fa5
+        GIT_TAG 4c0c0874c48ec82a3e29910554891d04bcc0e988
+        APPLY_PATCHES
     )
 endif()
