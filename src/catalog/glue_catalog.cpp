@@ -317,7 +317,7 @@ void GlueCatalog::DropListings(const vector<GluePrefetchedListing> &listings) {
 	for (auto &listing : listings) {
 		auto entry = schemas.GetCachedEntry(listing.database_name);
 		if (entry) {
-			entry->Cast<GlueSchemaEntry>().tables.DropListing(listing.stamp);
+			entry->Cast<GlueSchemaEntry>().tables.DropListing(listing.generation);
 		}
 	}
 }
@@ -335,9 +335,9 @@ void GlueCatalog::PrefetchTables(ClientContext &context, const string &schema_na
 		return;
 	}
 	parallelism = MinValue<idx_t>(parallelism, GLUE_MAX_LIST_TABLES_PARALLELISM);
-	lock_guard<mutex> prefetch_guard(cache->PrefetchLock());
-	// taken before listing: a write that clears the cache meanwhile makes the listing stale
-	auto stamp = cache->Stamp();
+	lock_guard<mutex> prefetch_guard(prefetch_lock);
+	// taken before listing: a write meanwhile makes the listing stale
+	auto generation = ListingGeneration();
 	vector<string> names;
 	// the first database is listed on its own, so that a statement on one database does not list the others
 	if (!cache->TakeSchemasToPrefetch(schema_name, names)) {
@@ -350,7 +350,7 @@ void GlueCatalog::PrefetchTables(ClientContext &context, const string &schema_na
 			break;
 		}
 		auto entry = schemas.GetCachedEntry(name);
-		bool needs_listing = entry && entry->Cast<GlueSchemaEntry>().tables.NeedsListing(stamp);
+		bool needs_listing = entry && entry->Cast<GlueSchemaEntry>().tables.NeedsListing(generation);
 		if (to_list.empty() && !needs_listing) {
 			return;
 		}
@@ -362,11 +362,11 @@ void GlueCatalog::PrefetchTables(ClientContext &context, const string &schema_na
 		return;
 	}
 	auto listed = GlueAPI::GetTablesOfDatabases(context, *this, to_list, parallelism);
-	GlueTransaction::Get(context, *this).AddPrefetched(to_list, stamp);
+	GlueTransaction::Get(context, *this).AddPrefetched(to_list, generation);
 	for (idx_t i = 0; i < to_list.size(); i++) {
 		auto entry = schemas.GetCachedEntry(to_list[i]);
 		if (listed[i].fetched && entry) {
-			entry->Cast<GlueSchemaEntry>().tables.SetListing(stamp, std::move(listed[i].tables));
+			entry->Cast<GlueSchemaEntry>().tables.SetListing(generation, std::move(listed[i].tables));
 		}
 	}
 }

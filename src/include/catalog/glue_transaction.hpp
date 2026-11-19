@@ -69,22 +69,12 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
-		stamp = NextId();
-	}
-	//! Like Id(), but also new after Clear(): a listing made under another stamp may predate a write
-	idx_t Stamp() const {
-		return stamp;
 	}
 	//! The databases the catalog scan now under way visits, for GlueCatalog::PrefetchTables
 	void SetScannedSchemas(vector<string> names);
 	//! Called as a scan of database 'current' starts: from the second scan of a catalog scan on, returns true with
 	//! 'current' and the databases the scan visits after it
 	bool TakeSchemasToPrefetch(const string &current, vector<string> &names);
-	//! Held while a prefetch lists, so that the other children of a union that scans at the same time wait for it
-	//! and find the listings made
-	mutex &PrefetchLock() {
-		return prefetch_lock;
-	}
 	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
 	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
 	idx_t Id() const {
@@ -129,17 +119,15 @@ private:
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
 	const idx_t id = NextId();
-	atomic<idx_t> stamp {NextId()};
-	mutex prefetch_lock;
 	annotated_mutex scan_lock;
 	vector<string> scanned_schemas DUCKDB_GUARDED_BY(scan_lock);
 	idx_t scanned_table_scans DUCKDB_GUARDED_BY(scan_lock) = 0;
 };
 
-//! A listing GlueCatalog::PrefetchTables made: the database and the cache stamp it was made under
+//! A listing GlueCatalog::PrefetchTables made: the database and the listing generation it was made under
 struct GluePrefetchedListing {
 	string database_name;
-	idx_t stamp;
+	idx_t generation;
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
@@ -211,7 +199,7 @@ public:
 	//! The write's files are written and its partitions registered, nothing to undo
 	void CompleteHiveWrite(const string &write_id);
 	//! The databases a prefetch listed, whose listings no scan used are dropped when the transaction ends
-	void AddPrefetched(const vector<string> &names, idx_t stamp);
+	void AddPrefetched(const vector<string> &names, idx_t generation);
 	vector<GluePrefetchedListing> TakePrefetched();
 
 public:

@@ -2,6 +2,7 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/enums/access_mode.hpp"
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -87,6 +88,13 @@ public:
 	void PrefetchTables(ClientContext &context, const string &schema_name);
 	//! Drop the listings a prefetch made for these databases that no scan used, as the transaction ends
 	void DropListings(const vector<GluePrefetchedListing> &listings);
+	//! Tags the table listings PrefetchTables makes; new after every write through the catalog, from any connection
+	idx_t ListingGeneration() const {
+		return listing_generation;
+	}
+	void InvalidateListings() {
+		listing_generation++;
+	}
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
 	//! The S3 location a new table gets when none is given: <default_location>/<database>/<table> when the catalog
@@ -154,6 +162,10 @@ private:
 
 private:
 	GlueSchemaSet schemas;
+	atomic<idx_t> listing_generation {0};
+	//! Held while a prefetch lists, so that scans of other connections and of the other children of a union wait
+	//! for it and find the listings made
+	mutex prefetch_lock;
 	mutex reported_id_lock;
 	//! empty until Glue reports one: not cached as none, the catalog may get a database of its own later
 	string reported_catalog_id;
