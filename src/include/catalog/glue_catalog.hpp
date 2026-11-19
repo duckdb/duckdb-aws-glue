@@ -2,13 +2,13 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/enums/access_mode.hpp"
-#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
 #include "catalog/glue_options.hpp"
 #include "catalog/glue_schema_set.hpp"
+#include "catalog/glue_table_prefetch.hpp"
 
 #include <memory>
 
@@ -20,7 +20,6 @@ class GlueClient;
 
 namespace duckdb {
 class GlueTable;
-struct GluePrefetchedListing;
 
 //! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
 enum class TableLookup : uint8_t {
@@ -83,17 +82,8 @@ public:
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();
-	//! Called as a scan of database 'schema_name' starts: from the second scan on, lists it together with the next
-	//! databases the catalog scan visits, glue_list_tables_parallelism at a time
-	void PrefetchTables(ClientContext &context, const string &schema_name);
-	//! Drop the listings a prefetch made for these databases that no scan used, as the transaction ends
-	void DropListings(const vector<GluePrefetchedListing> &listings);
-	//! Tags the table listings PrefetchTables makes; new after every write through the catalog, from any connection
-	idx_t ListingGeneration() const {
-		return listing_generation;
-	}
-	void InvalidateListings() {
-		listing_generation++;
+	GlueTablePrefetch &TablePrefetch() {
+		return table_prefetch;
 	}
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
@@ -157,15 +147,8 @@ private:
 	friend struct GlueViewNames;
 
 private:
-	//! The databases the catalog scan now under way visits, for PrefetchTables
-	void RememberScannedSchemas(ClientContext &context, vector<string> names);
-
-private:
 	GlueSchemaSet schemas;
-	atomic<idx_t> listing_generation {0};
-	//! Held while a prefetch lists, so that scans of other connections and of the other children of a union wait
-	//! for it and find the listings made
-	mutex prefetch_lock;
+	GlueTablePrefetch table_prefetch;
 	mutex reported_id_lock;
 	//! empty until Glue reports one: not cached as none, the catalog may get a database of its own later
 	string reported_catalog_id;

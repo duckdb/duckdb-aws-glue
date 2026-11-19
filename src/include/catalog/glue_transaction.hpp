@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalog/glue_table_prefetch.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -70,16 +71,15 @@ public:
 		tables.clear();
 		partitions.clear();
 	}
-	//! The databases the catalog scan now under way visits, for GlueCatalog::PrefetchTables
-	void SetScannedSchemas(vector<string> names);
-	//! Called as a scan of database 'current' starts: from the second scan of a catalog scan on, returns true with
-	//! 'current' and the databases the scan visits after it
-	bool TakeSchemasToPrefetch(const string &current, vector<string> &names);
 	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
 	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
 	idx_t Id() const {
 		return id;
 	}
+
+public:
+	//! What the transaction's catalog scan visits and what was listed for it
+	GlueTablePrefetchState prefetch_state;
 
 private:
 	static idx_t NextId();
@@ -119,15 +119,6 @@ private:
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
 	const idx_t id = NextId();
-	annotated_mutex scan_lock;
-	vector<string> scanned_schemas DUCKDB_GUARDED_BY(scan_lock);
-	idx_t scanned_table_scans DUCKDB_GUARDED_BY(scan_lock) = 0;
-};
-
-//! A listing GlueCatalog::PrefetchTables made: the database and the listing generation it was made under
-struct GluePrefetchedListing {
-	string database_name;
-	idx_t generation;
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
@@ -198,9 +189,6 @@ public:
 	optional_ptr<GlueHiveWrite> FindHiveWrite(const string &write_id);
 	//! The write's files are written and its partitions registered, nothing to undo
 	void CompleteHiveWrite(const string &write_id);
-	//! The databases a prefetch listed, whose listings no scan used are dropped when the transaction ends
-	void AddPrefetched(const vector<string> &names, idx_t generation);
-	vector<GluePrefetchedListing> TakePrefetched();
 
 public:
 	GlueCatalog &glue_catalog;
@@ -219,8 +207,6 @@ private:
 	GlueTransactionState transaction_state;
 	annotated_mutex hive_write_lock;
 	unique_ptr<GlueHiveWrite> hive_write DUCKDB_GUARDED_BY(hive_write_lock);
-	annotated_mutex prefetched_lock;
-	vector<GluePrefetchedListing> prefetched DUCKDB_GUARDED_BY(prefetched_lock);
 };
 
 } // namespace duckdb

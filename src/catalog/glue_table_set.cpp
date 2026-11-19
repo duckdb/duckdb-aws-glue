@@ -68,7 +68,7 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 	}
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	vector<GlueTableInfo> tables;
-	if (prefetched && prefetched_generation == catalog.ListingGeneration()) {
+	if (prefetched && prefetched_generation == catalog.TablePrefetch().Generation()) {
 		tables = std::move(*prefetched);
 	} else {
 		tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName());

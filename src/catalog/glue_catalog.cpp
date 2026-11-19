@@ -22,6 +22,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_file_credentials.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_table_prefetch.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_view.hpp"
@@ -31,7 +32,7 @@
 namespace duckdb {
 
 GlueCatalog::GlueCatalog(AttachedDatabase &db_p, AccessMode access_mode, GlueAttachOptions options_p)
-    : Catalog(db_p), access_mode(access_mode), options(std::move(options_p)), schemas(*this) {
+    : Catalog(db_p), access_mode(access_mode), options(std::move(options_p)), schemas(*this), table_prefetch(*this) {
 }
 
 GlueCatalog::~GlueCatalog() {
@@ -300,75 +301,7 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 		names.push_back(schema.name.GetIdentifierName());
 		callback(schema.Cast<GlueSchemaEntry>());
 	});
-	RememberScannedSchemas(context, std::move(names));
-}
-
-void GlueCatalog::RememberScannedSchemas(ClientContext &context, vector<string> names) {
-	auto cache = GlueTransactionCache::Of(context, *this);
-	if (cache) {
-		// in the order the catalog scans visit them (Catalog::GetAllSchemas)
-		std::sort(names.begin(), names.end(),
-		          [](const string &left, const string &right) { return Identifier(left) < Identifier(right); });
-		cache->SetScannedSchemas(std::move(names));
-	}
-}
-
-void GlueCatalog::DropListings(const vector<GluePrefetchedListing> &listings) {
-	for (auto &listing : listings) {
-		auto entry = schemas.GetCachedEntry(listing.database_name);
-		if (entry) {
-			entry->Cast<GlueSchemaEntry>().tables.DropListing(listing.generation);
-		}
-	}
-}
-
-static constexpr idx_t GLUE_MAX_LIST_TABLES_PARALLELISM = 32;
-
-void GlueCatalog::PrefetchTables(ClientContext &context, const string &schema_name) {
-	Value setting;
-	idx_t parallelism = 1;
-	if (context.TryGetCurrentSetting("glue_list_tables_parallelism", setting) && !setting.IsNull()) {
-		parallelism = setting.GetValue<idx_t>();
-	}
-	auto cache = GlueTransactionCache::Of(context, *this);
-	if (parallelism <= 1 || !cache) {
-		return;
-	}
-	parallelism = MinValue<idx_t>(parallelism, GLUE_MAX_LIST_TABLES_PARALLELISM);
-	lock_guard<mutex> prefetch_guard(prefetch_lock);
-	// taken before listing: a write meanwhile makes the listing stale
-	auto generation = ListingGeneration();
-	vector<string> names;
-	// the first database is listed on its own, so that a statement on one database does not list the others
-	if (!cache->TakeSchemasToPrefetch(schema_name, names)) {
-		return;
-	}
-	// list this database and the next ones that need it, at most glue_list_tables_parallelism
-	vector<string> to_list;
-	for (auto &name : names) {
-		if (to_list.size() >= parallelism) {
-			break;
-		}
-		auto entry = schemas.GetCachedEntry(name);
-		bool needs_listing = entry && entry->Cast<GlueSchemaEntry>().tables.NeedsListing(generation);
-		if (to_list.empty() && !needs_listing) {
-			return;
-		}
-		if (needs_listing) {
-			to_list.push_back(name);
-		}
-	}
-	if (to_list.size() < 2) {
-		return;
-	}
-	auto listed = GlueAPI::GetTablesOfDatabases(context, *this, to_list, parallelism);
-	GlueTransaction::Get(context, *this).AddPrefetched(to_list, generation);
-	for (idx_t i = 0; i < to_list.size(); i++) {
-		auto entry = schemas.GetCachedEntry(to_list[i]);
-		if (listed[i].fetched && entry) {
-			entry->Cast<GlueSchemaEntry>().tables.SetListing(generation, std::move(listed[i].tables));
-		}
-	}
+	table_prefetch.RememberScannedSchemas(context, std::move(names));
 }
 
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
@@ -382,7 +315,7 @@ vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientConte
 		for (auto &schema : scanned) {
 			names.push_back(schema.get().name.GetIdentifierName());
 		}
-		RememberScannedSchemas(context, std::move(names));
+		table_prefetch.RememberScannedSchemas(context, std::move(names));
 		return scanned;
 	}
 	vector<reference<SchemaCatalogEntry>> result;
@@ -390,7 +323,7 @@ vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientConte
 	if (entry) {
 		result.push_back(entry->Cast<SchemaCatalogEntry>());
 	}
-	RememberScannedSchemas(context, entry ? vector<string> {name} : vector<string>());
+	table_prefetch.RememberScannedSchemas(context, entry ? vector<string> {name} : vector<string>());
 	return result;
 }
 

@@ -31,7 +31,7 @@ public:
 
 	//! Whether a scan would list the database from Glue: it is not loaded and has no listing of 'generation'
 	bool NeedsListing(idx_t generation);
-	//! The listing a scan uses instead of asking Glue, made under GlueCatalog::ListingGeneration() 'generation'
+	//! The listing a scan uses instead of asking Glue, made under GlueTablePrefetch::Generation() 'generation'
 	void SetListing(idx_t generation, vector<GlueTableInfo> tables);
 	//! Drop the listing of 'generation' if no scan used it
 	void DropListing(idx_t generation);
@@ -58,7 +58,7 @@ private:
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
 	bool is_loaded = false;
-	//! The tables listed before the scan reached the database (GlueCatalog::PrefetchTables), and their generation
+	//! The tables listed before the scan reached the database (GlueTablePrefetch), and their generation
 	unique_ptr<vector<GlueTableInfo>> prefetched;
 	idx_t prefetched_generation = 0;
 	//! Direct-lookup round trips since the last bulk fetch: bulk pays off from the second one on

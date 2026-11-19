@@ -26,39 +26,6 @@ GlueTransaction::GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &
 GlueTransaction::~GlueTransaction() {
 }
 
-void GlueTransactionCache::SetScannedSchemas(vector<string> names) {
-	annotated_lock_guard<annotated_mutex> guard(scan_lock);
-	scanned_schemas = std::move(names);
-	scanned_table_scans = 0;
-}
-
-bool GlueTransactionCache::TakeSchemasToPrefetch(const string &current, vector<string> &names) {
-	annotated_lock_guard<annotated_mutex> guard(scan_lock);
-	if (++scanned_table_scans < 2) {
-		return false;
-	}
-	auto position = std::find(scanned_schemas.begin(), scanned_schemas.end(), current);
-	if (position == scanned_schemas.end()) {
-		return false;
-	}
-	names.assign(position, scanned_schemas.end());
-	return true;
-}
-
-void GlueTransaction::AddPrefetched(const vector<string> &names, idx_t generation) {
-	annotated_lock_guard<annotated_mutex> guard(prefetched_lock);
-	for (auto &name : names) {
-		prefetched.push_back(GluePrefetchedListing {name, generation});
-	}
-}
-
-vector<GluePrefetchedListing> GlueTransaction::TakePrefetched() {
-	annotated_lock_guard<annotated_mutex> guard(prefetched_lock);
-	vector<GluePrefetchedListing> result;
-	std::swap(result, prefetched);
-	return result;
-}
-
 void GlueTransaction::Start() {
 	transaction_state = GlueTransactionState::TRANSACTION_STARTED;
 }
@@ -80,8 +47,7 @@ void GlueTransaction::Commit() {
 			                   write->database_name, write->table_name);
 		}
 	}
-	cache->SetScannedSchemas(vector<string>());
-	glue_catalog.DropListings(TakePrefetched());
+	glue_catalog.TablePrefetch().EndTransaction(cache->prefetch_state);
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
@@ -89,9 +55,8 @@ void GlueTransaction::Commit() {
 
 void GlueTransaction::Rollback() {
 	UndoHiveWrite();
-	glue_catalog.InvalidateListings();
-	cache->SetScannedSchemas(vector<string>());
-	glue_catalog.DropListings(TakePrefetched());
+	glue_catalog.TablePrefetch().Invalidate();
+	glue_catalog.TablePrefetch().EndTransaction(cache->prefetch_state);
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
@@ -157,7 +122,7 @@ optional_ptr<GlueTransactionCache> GlueTransactionCache::Of(ClientContext &conte
 void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) {
 	// Get() not Of(): a connection-scoped cache outlives transactions and must be cleared even from a bare mutation
 	GlueTransaction::Get(context, catalog).cache->Clear();
-	catalog.Cast<GlueCatalog>().InvalidateListings();
+	catalog.Cast<GlueCatalog>().TablePrefetch().Invalidate();
 	// The scope setting can change between statements, so the active transaction's cache may not be the
 	// connection-level one this write would otherwise leave stale: clear those too (all of them, matching
 	// the rollback hook — a write through any alias of the same Glue catalog must not be hidden by another's cache)
