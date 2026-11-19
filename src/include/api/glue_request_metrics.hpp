@@ -16,14 +16,13 @@ struct GlueRequestMetrics {
 	static constexpr const char *RETRIES = "glue.retries";
 
 	static void Register(ExtensionLoader &loader);
-	//! Never throws: the AWS SDK calls it
 	static void AddCount(ClientContext &context, const char *key) noexcept;
 };
 
-//! Times a Glue API call for `glue.request_time`, retries and backoff included; a timer nested in another does nothing
+//! Times a Glue API call for `glue.request_time`, retries and backoff included
 class GlueRequestTimer {
 public:
-	explicit GlueRequestTimer(ClientContext &context) noexcept;
+	explicit GlueRequestTimer(ClientContext &context);
 	~GlueRequestTimer();
 
 private:

@@ -8,10 +8,8 @@ namespace duckdb {
 
 void GlueRequestMetrics::Register(ExtensionLoader &loader) {
 	loader.RegisterMetric({REQUESTS, "uint64", "Glue requests the AWS SDK attempted, retries included", "requests"});
-	loader.RegisterMetric({REQUEST_TIME, "double",
-	                       "Time the query spent in Glue API calls, retries and backoff included, summed over calls "
-	                       "that run at the same time on different threads",
-	                       "seconds"});
+	loader.RegisterMetric(
+	    {REQUEST_TIME, "double", "Time spent in Glue API calls, including retries and backoff", "seconds"});
 	loader.RegisterMetric(
 	    {RETRIES, "uint64", "Glue requests the AWS SDK attempted again after a failed attempt", "requests"});
 }
@@ -23,19 +21,10 @@ void GlueRequestMetrics::AddCount(ClientContext &context, const char *key) noexc
 	}
 }
 
-static thread_local bool glue_call_timed = false;
-
-GlueRequestTimer::GlueRequestTimer(ClientContext &context_p) noexcept {
-	if (glue_call_timed) {
-		return;
-	}
-	try {
-		if (QueryProfiler::Get(context_p).IsEnabled()) {
-			context = &context_p;
-			glue_call_timed = true;
-			timer.Start();
-		}
-	} catch (...) { // NOLINT: a metric must not fail the call
+GlueRequestTimer::GlueRequestTimer(ClientContext &context_p) {
+	if (QueryProfiler::Get(context_p).IsEnabled()) {
+		context = &context_p;
+		timer.Start();
 	}
 }
 
@@ -43,7 +32,6 @@ GlueRequestTimer::~GlueRequestTimer() {
 	if (!context) {
 		return;
 	}
-	glue_call_timed = false;
 	try {
 		timer.End();
 		QueryProfiler::Get(*context).AddToMetricTiming(GlueRequestMetrics::REQUEST_TIME, timer.ElapsedNanos());

@@ -117,11 +117,10 @@ SELECT 42;
 statement ok
 SET enable_profiling = 'no_output';
 
-query III
-SELECT (j::VARIANT).glue.requests IS NULL, (j::VARIANT).glue.request_time IS NULL, (j::VARIANT).glue IS NULL
-FROM read_json_objects('{TEST_DIR}/glue_request_metrics_none.json') t(j);
+query I
+SELECT (j::VARIANT).glue IS NULL FROM read_json_objects('{TEST_DIR}/glue_request_metrics_none.json') t(j);
 ----
-true	true	true
+true
 
 statement ok
 DROP TABLE my_datalake.default.grm_orders;
