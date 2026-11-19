@@ -1,0 +1,85 @@
+# name: test/sql/hive/attach/nested_path_not_found.test
+# description: a path through a child catalog Glue does not have is not found, and does not reach the database and table of the same names in the attached catalog
+# group: [attach]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# only against the local servers: what a live Glue answers for a catalog it does not have has not been checked
+require-env GLUE_TEST_CONFIG local
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.npnf_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.npnf_orders (id INTEGER, npnf_own_column VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.npnf_orders VALUES (1, 'own catalog');
+
+# The path names the table 'npnf_orders' of the database 'default' in a child catalog 'zz'. A server that ignores
+# the catalog id of a request (moto) answers with the attached catalog's table, which says it is in the account's
+# own catalog: that answer is not taken.
+statement error
+SELECT * FROM my_datalake.zz."default".npnf_orders;
+----
+does not exist
+
+statement error
+DESCRIBE my_datalake.zz."default".npnf_orders;
+----
+does not exist
+
+statement error
+INSERT INTO my_datalake.zz."default".npnf_orders VALUES (2, 'wrong table');
+----
+does not exist
+
+# the schema on its own: the database of the child catalog first, then the child catalog 'zz.default'
+statement error
+CREATE TABLE my_datalake.zz."default".npnf_created (i INTEGER);
+----
+does not exist
+
+statement error
+DROP TABLE my_datalake.zz."default".npnf_orders;
+----
+does not exist
+
+# nothing of it was taken for a schema below the top, with or without the columns of the table
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND parent_schema IS NOT NULL;
+----
+0
+
+query III
+SELECT schema_name, table_name, column_name FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND column_name = 'npnf_own_column';
+----
+default	npnf_orders	npnf_own_column
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'npnf_created';
+----
+0
+
+# the table of the attached catalog is as it was
+query II
+SELECT * FROM my_datalake.default.npnf_orders;
+----
+1	own catalog
+
+statement ok
+DROP TABLE my_datalake.default.npnf_orders;

@@ -2,6 +2,7 @@ add_library_unity(
   glue_api
   OBJECT
   glue_api_util.cpp
+  glue_catalog_api.cpp
   glue_client.cpp
   glue_database_api.cpp
   glue_http_client.cpp

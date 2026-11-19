@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/nested_schema.test
-# description: Glue databases do not nest: CREATE SCHEMA and DROP SCHEMA with a nested path are refused and leave the database of the last name alone; a quoted name with a dot is one database
+# description: a nested path names a database of a child catalog: CREATE SCHEMA and DROP SCHEMA refuse it and leave the database of the last name alone; a quoted name with a dot is one database
 # group: [ddl]
 
 require httpfs
@@ -24,18 +24,18 @@ DROP SCHEMA IF EXISTS my_datalake."ddl_nested_parent.ddl_nested_child" CASCADE;
 statement error
 CREATE SCHEMA my_datalake.ddl_nested_parent.ddl_nested_child;
 ----
-does not support nested schemas
+can not read or change them yet
 
 # under a database that exists too
 statement error
 CREATE SCHEMA my_datalake.default.ddl_nested_child;
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CREATE SCHEMA IF NOT EXISTS my_datalake.ddl_nested_parent.ddl_nested_child;
 ----
-does not support nested schemas
+can not read or change them yet
 
 query I
 SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name LIKE 'ddl_nested%';
@@ -47,17 +47,17 @@ CREATE SCHEMA my_datalake.ddl_nested_child;
 statement error
 DROP SCHEMA my_datalake.zz.ddl_nested_child;
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 DROP SCHEMA IF EXISTS my_datalake.zz.ddl_nested_child CASCADE;
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 DROP SCHEMA my_datalake.default.ddl_nested_child;
 ----
-does not support nested schemas
+can not read or change them yet
 
 query I
 SELECT database_name FROM glue_get_database_response('my_datalake.ddl_nested_child');

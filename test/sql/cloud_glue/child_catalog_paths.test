@@ -1,0 +1,104 @@
+# name: test/sql/cloud_glue/child_catalog_paths.test
+# description: a table of a nested Glue catalog (an S3 Tables bucket) is reached through a path from the account's catalog, however the catalog is attached and the path is spelled, is listed with LIST_CHILD_CATALOGS and is not changed
+# group: [cloud_glue]
+
+require httpfs
+
+require glue
+
+require-env GLUE_TEST_CONFIG cloud
+
+require-env GLUE_CATALOG_ID
+
+# an account-implicit nested catalog path ("s3tablescatalog/<bucket>") and a database and a table in it; set only for
+# a live Glue Data Catalog that has them. Nothing here changes them.
+require-env GLUE_NESTED_CATALOG
+
+require-env GLUE_NESTED_DATABASE
+
+require-env GLUE_NESTED_TABLE
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as lake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+# the catalog itself, attached by its id, to compare with
+statement ok
+attach '{GLUE_CATALOG_ID}:{GLUE_NESTED_CATALOG}' as nested_catalog (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+# The path from the account's catalog has one level per level of GLUE_NESTED_CATALOG, so it is put together here
+# and the table is named through query_table. The table is described with the columns Glue reports for it.
+query I
+SELECT count(*) > 0 FROM (DESCRIBE SELECT * FROM query_table(
+    'lake."' || replace('{GLUE_NESTED_CATALOG}', '/', '"."') || '"."{GLUE_NESTED_DATABASE}"."{GLUE_NESTED_TABLE}"'));
+----
+true
+
+query I
+SELECT count(*) FROM (
+    SELECT column_name FROM duckdb_columns() WHERE database_name = 'nested_catalog'
+    AND schema_name = '{GLUE_NESTED_DATABASE}' AND table_name = '{GLUE_NESTED_TABLE}'
+    EXCEPT
+    SELECT column_name FROM (DESCRIBE SELECT * FROM query_table(
+        'lake."' || replace('{GLUE_NESTED_CATALOG}', '/', '"."') || '"."{GLUE_NESTED_DATABASE}"."{GLUE_NESTED_TABLE}"')));
+----
+0
+
+# the schemas the path named are known to this attached catalog now
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = '{GLUE_NESTED_DATABASE}'
+AND parent_schema = split_part('{GLUE_NESTED_CATALOG}', '/', -1);
+----
+1
+
+# Glue keeps catalog and database names in lower case: another spelling of the levels reaches the same table
+statement ok
+attach '{GLUE_CATALOG_ID}' as spelled (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT count(*) > 0 FROM (DESCRIBE SELECT * FROM query_table(
+    'spelled."' || upper(replace('{GLUE_NESTED_CATALOG}', '/', '"."')) || '"."' || upper('{GLUE_NESTED_DATABASE}') ||
+    '"."{GLUE_NESTED_TABLE}"'));
+----
+true
+
+# attached as ':', the id of the child catalog leads with the account Glue reports for the databases of the
+# account's own catalog, so it needs one
+statement ok
+attach ':' as own_account (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+query I
+SELECT count(*) > 0 FROM (DESCRIBE SELECT * FROM query_table(
+    'own_account."' || replace('{GLUE_NESTED_CATALOG}', '/', '"."') ||
+    '"."{GLUE_NESTED_DATABASE}"."{GLUE_NESTED_TABLE}"'));
+----
+true
+
+# a listing with LIST_CHILD_CATALOGS finds the database and the table without a path naming them
+statement ok
+attach '{GLUE_CATALOG_ID}' as listed (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', LIST_CHILD_CATALOGS true);
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'listed' AND schema_name = '{GLUE_NESTED_DATABASE}'
+AND parent_schema = split_part('{GLUE_NESTED_CATALOG}', '/', -1);
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_tables() t JOIN duckdb_schemas() s ON t.schema_oid = s.oid
+WHERE t.database_name = 'listed' AND t.schema_name = '{GLUE_NESTED_DATABASE}'
+AND t.table_name = '{GLUE_NESTED_TABLE}' AND s.parent_schema = split_part('{GLUE_NESTED_CATALOG}', '/', -1);
+----
+1
+
+# reading and changing it are refused before Glue is asked for anything more
+statement error
+SELECT * FROM query_table(
+    'lake."' || replace('{GLUE_NESTED_CATALOG}', '/', '"."') || '"."{GLUE_NESTED_DATABASE}"."{GLUE_NESTED_TABLE}"');
+----
+can not read yet
+
+statement error
+SELECT * FROM glue_partitions(
+    'lake."' || replace('{GLUE_NESTED_CATALOG}', '/', '"."') || '"."{GLUE_NESTED_DATABASE}"."{GLUE_NESTED_TABLE}"');
+----
+can not read or change them yet

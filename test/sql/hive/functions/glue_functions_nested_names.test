@@ -1,5 +1,5 @@
 # name: test/sql/hive/functions/glue_functions_nested_names.test
-# description: the glue functions and the Hive partition DDL refuse a table name with a nested schema path, as a query does; a quoted name with a dot is one database
+# description: the glue functions and the Hive partition DDL refuse a table name with a nested schema path, which names a table of a child catalog; a quoted name with a dot is one database
 # group: [functions]
 
 require httpfs
@@ -34,57 +34,57 @@ CALL glue_add_partition('my_datalake.nested_names_db.pt', {dt: 'keep'});
 statement error
 SELECT * FROM glue_partitions('my_datalake.zz.nested_names_db.pt');
 ----
-does not support nested schemas: zz.nested_names_db
+glue_partitions does not work on "zz.nested_names_db.pt"
 
 statement error
 SELECT * FROM glue_partitions('my_datalake.default.nested_names_db.pt');
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 SELECT * FROM glue_get_table_response('my_datalake.zz.nested_names_db.pt');
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 SELECT * FROM glue_get_partition_response('my_datalake.zz.nested_names_db.pt', {dt: 'keep'});
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CALL glue_add_partition('my_datalake.zz.nested_names_db.pt', {dt: 'added'});
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CALL glue_drop_partition('my_datalake.zz.nested_names_db.pt', {dt: 'keep'});
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CALL glue_rename_partition('my_datalake.zz.nested_names_db.pt', {dt: 'keep'}, {dt: 'renamed'});
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CALL glue_set_partition_location('my_datalake.zz.nested_names_db.pt', {dt: 'keep'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/nested_names_moved');
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CALL glue_set_table_location('my_datalake.zz.nested_names_db.pt', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/nested_names_moved');
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CALL glue_replace_columns('my_datalake.zz.nested_names_db.pt', {id: 'BIGINT', extra: 'VARCHAR'});
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CALL glue_repair_table('my_datalake.zz.nested_names_db.pt');
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 CALL glue_alter_table('my_datalake.zz.nested_names_db.pt',
@@ -92,7 +92,7 @@ CALL glue_alter_table('my_datalake.zz.nested_names_db.pt',
       partition: [{key: 'dt', value: 'added'}],
       new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: NULL::VARCHAR}]);
 ----
-does not support nested schemas
+can not read or change them yet
 
 # the SQL form passes the table name as written
 statement ok
@@ -101,17 +101,17 @@ SET active_grammar_extensions = ['glue_hive_ddl'];
 statement error
 ALTER TABLE my_datalake.zz.nested_names_db.pt ADD PARTITION (dt = 'added');
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 ALTER TABLE my_datalake.zz.nested_names_db.pt DROP PARTITION (dt = 'keep');
 ----
-does not support nested schemas
+can not read or change them yet
 
 statement error
 ALTER TABLE my_datalake.zz.nested_names_db.pt SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/nested_names_moved';
 ----
-does not support nested schemas
+can not read or change them yet
 
 # the table is as it was
 query II

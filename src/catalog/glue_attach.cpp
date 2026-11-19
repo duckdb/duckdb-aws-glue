@@ -73,6 +73,8 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 			attach_options.verify_connection = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else if (lower_name == "iceberg_catalog") {
 			attach_options.iceberg_catalog = Identifier(entry.second.ToString());
+		} else if (lower_name == "list_child_catalogs") {
+			attach_options.list_child_catalogs = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else {
 			throw InvalidConfigurationException("Unrecognized option for Glue attach: '%s'", entry.first);
 		}
@@ -105,7 +107,8 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 	}
 	if (!catalog->options.default_schema.empty()) {
 		GlueDatabaseInfo database;
-		if (!GlueAPI::GetDatabase(context, *catalog, catalog->options.default_schema.GetIdentifierName(), database)) {
+		if (!GlueAPI::GetDatabase(context, *catalog, GlueAPI::OwnCatalog(),
+		                          catalog->options.default_schema.GetIdentifierName(), database)) {
 			throw InvalidConfigurationException("default_schema '%s' does not exist in Glue catalog '%s'",
 			                                    catalog->options.default_schema.GetIdentifierName(),
 			                                    catalog->options.path);

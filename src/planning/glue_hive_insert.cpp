@@ -866,7 +866,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		optional_ptr<const GlueTableInfo> registered = &table_info;
 		GlueTableInfo created;
 		if (!table_info.fetched) {
-			if (!GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, created)) {
+			if (!GlueAPI::GetTable(context, catalog, table_info.catalog_id, table_info.schema_name, table_info.name,
+			                       created)) {
 				throw CatalogException("Table \"%s.%s\" was created but could not be fetched afterwards",
 				                       table_info.schema_name, table_info.name);
 			}

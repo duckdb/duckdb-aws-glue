@@ -36,12 +36,69 @@
 namespace duckdb {
 
 GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p,
-                                 bool schema_info_loaded)
-    : SchemaCatalogEntry(catalog, info), tables(*this), database_info(std::move(database_info_p)),
-      schema_info_loaded(schema_info_loaded) {
+                                 bool schema_info_loaded, string catalog_id_p, optional_ptr<SchemaCatalogEntry> parent)
+    : SchemaCatalogEntry(catalog, info, parent), tables(*this), database_info(std::move(database_info_p)),
+      schema_info_loaded(schema_info_loaded), catalog_id(std::move(catalog_id_p)) {
+}
+
+GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, string catalog_id_p,
+                                 optional_ptr<SchemaCatalogEntry> parent)
+    : SchemaCatalogEntry(catalog, info, parent), tables(*this), schema_info_loaded(true),
+      catalog_id(std::move(catalog_id_p)), is_database(false) {
+	database_info.name = name.GetIdentifierName();
 }
 
 GlueSchemaEntry::~GlueSchemaEntry() {
+}
+
+vector<string> GlueSchemaEntry::GetPath() const {
+	vector<string> path;
+	for (auto &level : GetSchemaPath()) {
+		path.push_back(level.GetIdentifierName());
+	}
+	return path;
+}
+
+void GlueSchemaEntry::SetCatalogInfo(const GlueCatalogInfo &info) {
+	lock_guard<mutex> guard(schema_info_lock);
+	catalog_info = make_uniq<GlueCatalogInfo>(info);
+}
+
+void GlueSchemaEntry::CheckNotInChildCatalog(const string &operation) const {
+	if (!InChildCatalog()) {
+		return;
+	}
+	if (!is_database) {
+		string kind;
+		{
+			lock_guard<mutex> guard(schema_info_lock);
+			if (catalog_info) {
+				kind = ", " + catalog_info->Describe();
+			}
+		}
+		throw NotImplementedException("%s is not supported in \"%s\": it is a child catalog of Glue catalog "
+		                              "\"%s\"%s, which holds schemas, not tables",
+		                              operation, QualifiedName::FromPath(GetSchemaPath()).ToString(),
+		                              catalog.GetName().GetIdentifierName(), kind);
+	}
+	throw NotImplementedException("%s is not supported in \"%s\": Glue catalog \"%s\" lists the schemas and tables "
+	                              "of its child catalogs, but can not read or change them yet",
+	                              operation, QualifiedName::FromPath(GetSchemaPath()).ToString(),
+	                              catalog.GetName().GetIdentifierName());
+}
+
+string GlueSchemaEntry::TableNotReadableError(const GlueTableInfo &table) const {
+	auto table_name = QualifiedName(GetSchemaPath(), Identifier(table.name)).ToString();
+	if (table.GetFormat().format == GlueFormat::ICEBERG) {
+		return StringUtil::Format(
+		    "Glue table \"%s\" is an Iceberg table of the child catalog '%s', which Glue catalog \"%s\" lists but can "
+		    "not read yet. Attach the child catalog with the Iceberg extension to read it: ATTACH '%s' AS <name> "
+		    "(TYPE ICEBERG, ENDPOINT_TYPE GLUE)",
+		    table_name, catalog_id, catalog.GetName().GetIdentifierName(), catalog_id);
+	}
+	return StringUtil::Format("Glue table \"%s\" is in the child catalog '%s', whose tables Glue catalog \"%s\" lists "
+	                          "but can not read yet",
+	                          table_name, catalog_id, catalog.GetName().GetIdentifierName());
 }
 
 bool GlueSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
@@ -395,6 +452,7 @@ static bool ReplacesExistingView(const CreateViewInfo &info, const GlueView &exi
 }
 
 GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const CreateTableInfo &base) {
+	CheckNotInChildCatalog("CREATE TABLE");
 	if (!base.constraints.empty()) {
 		throw NotImplementedException("Constraints are not supported when creating tables in a Glue catalog");
 	}
@@ -519,6 +577,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableFromInfo(CatalogTransacti
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransaction transaction,
                                                                 BoundCreateTableInfo &info,
                                                                 const GlueTableInfo *resolved_table_info) {
+	CheckNotInChildCatalog("CREATE TABLE");
 	auto &context = transaction.GetContext();
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -552,7 +611,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 
 	// re-fetch so the entry reflects what Glue stored
 	GlueTableInfo created;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, created)) {
+	if (!GlueAPI::GetTable(context, glue_catalog, catalog_id, database_info.name, table_name, created)) {
 		throw CatalogException("Glue table \"%s.%s\" was created but could not be fetched afterwards",
 		                       database_info.name, table_name);
 	}
@@ -569,6 +628,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateIndex(CatalogTransaction trans
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
+	CheckNotInChildCatalog("CREATE VIEW");
 	auto &context = transaction.GetContext();
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -640,7 +700,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	auto fetch_stored = [&]() {
 		tables.RemoveEntry(view_name);
 		GlueTableInfo stored;
-		if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, view_name, stored)) {
+		if (!GlueAPI::GetTable(context, glue_catalog, catalog_id, database_info.name, view_name, stored)) {
 			throw CatalogException("Glue view \"%s.%s\" was created but could not be fetched afterwards",
 			                       database_info.name, view_name);
 		}
@@ -814,6 +874,7 @@ void GlueSchemaEntry::SetTableComment(ClientContext &context, const GlueTableInf
 }
 
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
+	CheckNotInChildCatalog("ALTER");
 	auto &context = transaction.GetContext();
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -993,8 +1054,9 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 }
 
 GlueTable &GlueSchemaEntry::RefreshTable(ClientContext &context, const string &table_name) {
+	CheckNotInChildCatalog("ALTER");
 	GlueTableInfo updated;
-	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), database_info.name, table_name, updated)) {
+	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), catalog_id, database_info.name, table_name, updated)) {
 		throw CatalogException("Table \"%s.%s\" was altered but could not be fetched afterwards", database_info.name,
 		                       table_name);
 	}
@@ -1002,12 +1064,13 @@ GlueTable &GlueSchemaEntry::RefreshTable(ClientContext &context, const string &t
 }
 
 const GlueTableInfo &GlueSchemaEntry::DefinitionForWrite(ClientContext &context, const CatalogEntry &entry) {
+	CheckNotInChildCatalog("Writing");
 	auto &bound = GlueTableSet::GetTableInfo(entry);
 	if (!GlueTransactionCache::ConnectionScoped(context)) {
 		return bound;
 	}
 	GlueTableInfo current;
-	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), database_info.name, bound.name, current)) {
+	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), catalog_id, database_info.name, bound.name, current)) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", bound.name,
 		                       database_info.name);
 	}
@@ -1018,6 +1081,7 @@ const GlueTableInfo &GlueSchemaEntry::DefinitionForWrite(ClientContext &context,
 }
 
 void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
+	CheckNotInChildCatalog("DROP");
 	if (!CatalogTypeIsSupported(info.type)) {
 		throw NotImplementedException("Glue databases only support dropping tables");
 	}
@@ -1048,7 +1112,11 @@ void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 //===--------------------------------------------------------------------===//
 void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
                            const std::function<void(CatalogEntry &)> &callback) {
-	if (!CatalogTypeIsSupported(type)) {
+	if (type == CatalogType::SCHEMA_ENTRY) {
+		catalog.Cast<GlueCatalog>().GetSchemas().ScanChildren(context, GetPath(), callback);
+		return;
+	}
+	if (!CatalogTypeIsSupported(type) || !is_database) {
 		return;
 	}
 	tables.Scan(context, callback);
@@ -1060,6 +1128,9 @@ void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEnt
 
 void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
 	string name;
+	if (!is_database && info.type != CatalogType::SCHEMA_ENTRY) {
+		return;
+	}
 	if (!CatalogTypeIsSupported(info.type) || !info.filter || info.filter->GetOid() ||
 	    !TryGetNameEquality(info.filter->GetName(), "GlueSchemaEntry::Scan", name)) {
 		SchemaCatalogEntry::Scan(context, info);
@@ -1089,7 +1160,7 @@ const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
 	lock_guard<mutex> guard(schema_info_lock);
 	if (!schema_info_loaded) {
 		GlueDatabaseInfo database;
-		if (!GlueAPI::GetDatabase(context, catalog.Cast<GlueCatalog>(), database_info.name, database)) {
+		if (!GlueAPI::GetDatabase(context, catalog.Cast<GlueCatalog>(), catalog_id, database_info.name, database)) {
 			throw CatalogException("Glue database \"%s\" no longer exists", database_info.name);
 		}
 		database_info.description = std::move(database.description);
@@ -1113,10 +1184,15 @@ void GlueSchemaEntry::SetSchemaInfo(const GlueDatabaseInfo &database) {
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,
                                                         const EntryLookupInfo &lookup_info) {
-	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
+	auto &context = transaction.GetContext();
+	if (lookup_info.GetCatalogType() == CatalogType::SCHEMA_ENTRY) {
+		auto path = GetPath();
+		path.push_back(lookup_info.GetEntryName());
+		return catalog.Cast<GlueCatalog>().LookupSchemaPath(context, path);
+	}
+	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType()) || !is_database) {
 		return nullptr;
 	}
-	auto &context = transaction.GetContext();
 	return tables.GetEntry(context, lookup_info);
 }
 

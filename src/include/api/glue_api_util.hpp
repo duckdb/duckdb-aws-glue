@@ -2,6 +2,7 @@
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "core/helpers.hpp"
 #include "duckdb/common/exception.hpp"
 
 #include <aws/glue/GlueClient.h>
@@ -32,11 +33,21 @@ const Aws::Glue::Model::Partition &FetchedPartition(const GluePartitionDetails &
                                                     const string &table_name);
 
 string ToStdString(const Aws::String &input);
+//! Whether an object Glue returned for a request with the child catalog id 'catalog_id' says it is in that catalog:
+//! an answer that names another catalog, or none, is not taken. A server that ignores the CatalogId of a request
+//! answers with the attached catalog's object of the same name. Requests for the attached catalog itself
+//! ('catalog_id' empty) take any answer, as they always did.
+template <class OBJECT>
+bool IsInChildCatalog(const OBJECT &object, const string &catalog_id) {
+	return catalog_id.empty() ||
+	       (object.CatalogIdHasBeenSet() && IsSameGlueCatalogId(catalog_id, ToStdString(object.GetCatalogId())));
+}
 unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> &input);
 vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input);
 GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database);
 //! Project a fetched Table; the result keeps the Table in 'fetched'
-GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &schema_name);
+GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &schema_name,
+                          const string &catalog_id = string());
 Aws::Map<Aws::String, Aws::String> ToAwsMap(const unordered_map<string, string> &input);
 Aws::Vector<Aws::Glue::Model::Column> ToAwsColumns(const vector<GlueColumn> &input);
 Aws::Vector<Aws::String> ToAwsValues(const vector<string> &values);
@@ -48,7 +59,9 @@ template <class OUTCOME>
 	auto &error = outcome.GetError();
 	auto message = Exception::ConstructMessage("Glue %s failed: %s (%s)", operation, ToStdString(error.GetMessage()),
 	                                           ToStdString(error.GetExceptionName()));
-	throw GlueException(message, error.GetErrorType() == Aws::Glue::GlueErrors::ACCESS_DENIED);
+	bool unknown_call =
+	    error.GetExceptionName().empty() && error.GetResponseCode() != Aws::Http::HttpResponseCode::REQUEST_NOT_MADE;
+	throw GlueException(message, error.GetErrorType() == Aws::Glue::GlueErrors::ACCESS_DENIED, unknown_call);
 }
 
 template <class OUTCOME>
@@ -70,6 +83,16 @@ template <class REQUEST>
 void SetCatalogId(REQUEST &request, const GlueCatalog &catalog) {
 	if (!catalog.options.catalog_id.empty()) {
 		request.SetCatalogId(catalog.options.catalog_id);
+	}
+}
+
+//! 'catalog_id' names a child catalog of the attached one; empty means the attached catalog itself
+template <class REQUEST>
+void SetCatalogId(REQUEST &request, const GlueCatalog &catalog, const string &catalog_id) {
+	if (catalog_id.empty()) {
+		SetCatalogId(request, catalog);
+	} else {
+		request.SetCatalogId(catalog_id);
 	}
 }
 

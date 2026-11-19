@@ -13,14 +13,19 @@
 
 namespace duckdb {
 
-vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatalog &catalog) {
+const string &GlueAPI::OwnCatalog() {
+	static const string own_catalog;
+	return own_catalog;
+}
+
+vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatalog &catalog, const string &catalog_id) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	vector<GlueDatabaseInfo> result;
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetDatabasesRequest request;
-		SetCatalogId(request, catalog);
+		SetCatalogId(request, catalog, catalog_id);
 		if (!next_token.empty()) {
 			request.SetNextToken(next_token);
 		}
@@ -30,19 +35,21 @@ vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatal
 		}
 		auto &databases = outcome.GetResult();
 		for (auto &database : databases.GetDatabaseList()) {
-			result.push_back(ToDatabaseInfo(database));
+			if (IsInChildCatalog(database, catalog_id)) {
+				result.push_back(ToDatabaseInfo(database));
+			}
 		}
 		next_token = databases.GetNextToken();
 	} while (!next_token.empty());
 	return result;
 }
 
-bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                          GlueDatabaseInfo &result, string *raw_json) {
+bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+                          const string &database_name, GlueDatabaseInfo &result, string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetDatabaseRequest request;
-	SetCatalogId(request, catalog);
+	SetCatalogId(request, catalog, catalog_id);
 	request.SetName(database_name);
 	auto outcome = client->GetDatabase(request);
 	if (!outcome.IsSuccess()) {
@@ -52,6 +59,9 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 		ThrowGlueError(outcome, StringUtil::Format("GetDatabase '%s'", database_name));
 	}
 	auto &database = outcome.GetResult().GetDatabase();
+	if (!IsInChildCatalog(database, catalog_id)) {
+		return false;
+	}
 	result = ToDatabaseInfo(database);
 	if (raw_json) {
 		*raw_json = ToStdString(database.Jsonize().View().WriteReadable());

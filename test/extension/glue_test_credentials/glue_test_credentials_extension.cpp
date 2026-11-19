@@ -254,7 +254,7 @@ void CreateTable(ClientContext &context, const FunctionParameters &parameters) {
 	auto table = ToTableInfo(glue_table, string(glue_table.GetDatabaseName().c_str()));
 	// also builds the catalog's Glue client
 	GlueTableInfo existing;
-	if (GlueAPI::GetTable(context, catalog, table.schema_name, table.name, existing)) {
+	if (GlueAPI::GetTable(context, catalog, table.catalog_id, table.schema_name, table.name, existing)) {
 		GlueAPI::DeleteTable(context, catalog, table.schema_name, table.name);
 	}
 	// the JSON as it is, rather than what GlueAPI::CreateHiveTable writes for a table DuckDB creates

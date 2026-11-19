@@ -16,7 +16,10 @@ forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
-amz-sdk-request header) and forwarded when the SDK retries it."""
+amz-sdk-request header) and forwarded when the SDK retries it. A GetDatabases on a child catalog named
+fault_federation_down* fails with FederationSourceException, as for a federated source that does not answer, and a
+GetCatalogs below a catalog named fault_catalogs_denied* with AccessDeniedException; moto has no child catalogs, so
+these two are for a proxy in front of Floci (--upstream)."""
 
 import argparse
 import http.client
@@ -28,6 +31,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # GetTables on a database with this prefix fails with this error, nothing is forwarded
 LISTING_FAULTS = {"fault_access_denied": "AccessDeniedException", "fault_invalid_input": "InvalidInputException"}
+# GetDatabases on a child catalog whose own name has this prefix fails with this error, nothing is forwarded
+CATALOG_LISTING_FAULTS = {"fault_federation_down": "FederationSourceException"}
+# GetCatalogs below a catalog whose own name has this prefix fails with this error
+CHILD_CATALOG_LISTING_FAULTS = {"fault_catalogs_denied": "AccessDeniedException"}
 # a table with this prefix is one Lake Formation does not let the caller describe: GetTable on it fails with
 # AccessDeniedException, and GetTables leaves it out
 DENIED_TABLE_PREFIX = "fault_denied_"
@@ -70,6 +77,18 @@ def listing_error(target, database):
     if target != "AWSGlue.GetTables":
         return None
     return next((error for prefix, error in LISTING_FAULTS.items() if database.startswith(prefix)), None)
+
+
+def catalog_listing_error(target, request):
+    if target == "AWSGlue.GetDatabases":
+        catalog_id, faults = request.get("CatalogId", ""), CATALOG_LISTING_FAULTS
+    elif target == "AWSGlue.GetCatalogs":
+        catalog_id, faults = request.get("ParentCatalogId", ""), CHILD_CATALOG_LISTING_FAULTS
+    else:
+        return None
+    # '<account>:<catalog>[/<child>]': the name of the catalog itself is its last level
+    catalog = catalog_id.rsplit(":", 1)[-1].rsplit("/", 1)[-1]
+    return next((error for prefix, error in faults.items() if catalog.startswith(prefix)), None)
 
 
 def is_denied_table(target, request):
@@ -154,7 +173,7 @@ class Handler(BaseHTTPRequestHandler):
         target = self.headers.get("X-Amz-Target")
         request = parse_request(body)
         database = request_database(target, request)
-        error = listing_error(target, database)
+        error = listing_error(target, database) or catalog_listing_error(target, request)
         if not error and is_denied_table(target, request):
             error = "AccessDeniedException"
         if not error and is_throttled(database, self.headers.get("amz-sdk-request")):
@@ -256,10 +275,12 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser()
+    # the compose file runs it in a container, which publishes the port on 127.0.0.1 only
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5556)
     parser.add_argument("--upstream", default="http://localhost:5555")
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.upstream = urllib.parse.urlsplit(args.upstream)
     server.serve_forever()
 

@@ -43,6 +43,9 @@ SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CAT
   `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything through DuckDB's
   `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially in batches of 10 tests per process, retrying a
   failing batch twice: against the local servers a read right after a write occasionally comes back empty.
+- `test/configs/floci_glue.json`: a local [Floci](https://floci.io) (Glue, S3 Tables and S3 on port 4566), for
+  `test/sql/child_catalogs/` only: moto has no catalogs below an account's Data Catalog. `scripts/floci_seed.sh`
+  seeds it, `make test-floci` seeds and runs. Not in the compose file or CI.
 - `test/configs/cloud_glue.json`: live AWS (credential chain, eu-west-1). `test/sql/cloud_glue/` only runs here
   (`require-env GLUE_TEST_CONFIG cloud`) and attaches the Glue catalog both as `TYPE glue` and `TYPE iceberg`;
   `skip_error_messages` is empty, so HTTP errors fail instead of skip.

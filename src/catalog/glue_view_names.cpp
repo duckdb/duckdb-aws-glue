@@ -264,6 +264,16 @@ string GlueViewNames::ExternalType(const Identifier &id) {
 	return rest.substr(0, rest.find(':'));
 }
 
+//! A stored view names a Glue table as db.t, which can not tell a table below a child catalog (or in a nested
+//! namespace of the Iceberg catalog) from the one of that name at the top
+static void RefuseNestedSchema(const CatalogEntry &entry, const QualifiedName &name) {
+	if (entry.ParentSchema().GetParentSchema()) {
+		throw BinderException("Glue view references \"%s\", a table in a nested schema: Glue views can not reference "
+		                      "those yet",
+		                      name.ToString());
+	}
+}
+
 void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_catalog, const Identifier &view_schema,
                                       QueryNode &query) {
 	auto view_catalog_name = view_catalog.GetName();
@@ -289,6 +299,7 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 			}
 			auto &catalog = entry->ParentCatalog();
 			if (view_catalog.IsIcebergCatalog(catalog)) {
+				RefuseNestedSchema(*entry, name);
 				auto &schema_name = entry->ParentSchema().name;
 				if (!view_catalog.IsIcebergTable(context, schema_name, entry->name)) {
 					throw BinderException("Glue view references \"%s\", but Glue catalog \"%s\" has no Iceberg table "
@@ -319,6 +330,7 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 				    Identifier(ExternalIdentity(catalog)), entry->ParentSchema().GetSchemaPath(), entry->name));
 				return;
 			}
+			RefuseNestedSchema(*entry, name);
 			auto &glue_catalog = catalog.Cast<GlueCatalog>();
 			if (!SameGlueService(glue_catalog, view_catalog)) {
 				throw BinderException(
@@ -368,6 +380,7 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 			                      "catalog \"%s\" (through the search path)",
 			                      name.ToString(), entry->ParentCatalog().GetName().GetIdentifierName());
 		}
+		RefuseNestedSchema(*entry, name);
 		ref.SetQualifiedName(Identifier(), entry->ParentSchema().name, entry->name);
 	});
 	walker.Walk(query);

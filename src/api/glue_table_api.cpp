@@ -19,8 +19,9 @@
 
 namespace duckdb {
 
-vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                         bool single_page, optional_ptr<bool> has_more, bool throw_if_denied) {
+vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+                                         const string &database_name, bool single_page, optional_ptr<bool> has_more,
+                                         bool throw_if_denied) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	vector<GlueTableInfo> result;
@@ -30,7 +31,7 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetTablesRequest request;
-		SetCatalogId(request, catalog);
+		SetCatalogId(request, catalog, catalog_id);
 		request.SetDatabaseName(database_name);
 		if (!next_token.empty()) {
 			request.SetNextToken(next_token);
@@ -51,7 +52,9 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 		}
 		auto &tables = outcome.GetResult();
 		for (auto &table : tables.GetTableList()) {
-			result.push_back(ToTableInfo(table, database_name));
+			if (IsInChildCatalog(table, catalog_id)) {
+				result.push_back(ToTableInfo(table, database_name, catalog_id));
+			}
 		}
 		next_token = tables.GetNextToken();
 		if (single_page) {
@@ -64,14 +67,14 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 	return result;
 }
 
-bool GlueAPI::GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                              string &table_name) {
+bool GlueAPI::GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+                              const string &database_name, string &table_name) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::String next_token;
 	do {
 		Aws::Glue::Model::GetTablesRequest request;
-		SetCatalogId(request, catalog);
+		SetCatalogId(request, catalog, catalog_id);
 		request.SetDatabaseName(database_name);
 		request.SetMaxResults(1);
 		if (!next_token.empty()) {
@@ -91,12 +94,12 @@ bool GlueAPI::GetAnyTableName(ClientContext &context, GlueCatalog &catalog, cons
 	return false;
 }
 
-bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                       const string &table_name, GlueTableInfo &result, string *raw_json) {
+bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const string &catalog_id,
+                       const string &database_name, const string &table_name, GlueTableInfo &result, string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetTableRequest request;
-	SetCatalogId(request, catalog);
+	SetCatalogId(request, catalog, catalog_id);
 	request.SetDatabaseName(database_name);
 	request.SetName(table_name);
 	auto outcome = client->GetTable(request);
@@ -107,7 +110,10 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 		ThrowGlueError(outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
 	}
 	auto &table = outcome.GetResult().GetTable();
-	result = ToTableInfo(table, database_name);
+	if (!IsInChildCatalog(table, catalog_id)) {
+		return false;
+	}
+	result = ToTableInfo(table, database_name, catalog_id);
 	if (raw_json) {
 		*raw_json = ToStdString(table.Jsonize().View().WriteReadable());
 	}

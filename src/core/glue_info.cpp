@@ -70,6 +70,32 @@ bool GlueTableInfo::IsPartitionProjected() const {
 	return StringUtil::CIEquals(enabled, "true");
 }
 
+GlueCatalogKind GlueCatalogInfo::Kind() const {
+	if (StringUtil::CIEquals(connection_name, "aws:s3tables")) {
+		return GlueCatalogKind::S3_TABLES;
+	}
+	if (targets_redshift || StringUtil::Contains(StringUtil::Lower(catalog_type), "redshift")) {
+		return GlueCatalogKind::REDSHIFT;
+	}
+	if (!connection_name.empty()) {
+		return GlueCatalogKind::FEDERATED;
+	}
+	return GlueCatalogKind::GLUE;
+}
+
+string GlueCatalogInfo::Describe() const {
+	switch (Kind()) {
+	case GlueCatalogKind::S3_TABLES:
+		return "an S3 Tables catalog";
+	case GlueCatalogKind::REDSHIFT:
+		return "a Redshift catalog";
+	case GlueCatalogKind::FEDERATED:
+		return StringUtil::Format("a catalog federated through '%s'", connection_name);
+	default:
+		return "a Glue catalog";
+	}
+}
+
 string GlueColumn::DescribeSortOrder() const {
 	switch (sort_order) {
 	case GlueSortOrder::ASCENDING:

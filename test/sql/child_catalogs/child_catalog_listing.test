@@ -1,0 +1,105 @@
+# name: test/sql/child_catalogs/child_catalog_listing.test
+# description: without LIST_CHILD_CATALOGS a listing costs what it did and shows the databases of the attached catalog, plus the schemas below a child catalog that a query has named
+# group: [child_catalogs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_FLOCI_ENDPOINT
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FLOCI_ENDPOINT}',
+    DEFAULT_LOCATION '{GLUE_FLOCI_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS lake.listing_own CASCADE;
+
+# a database with the name of the child catalog would be listed as one of the attached catalog's own
+statement ok
+DROP SCHEMA IF EXISTS lake.s3tablescatalog CASCADE;
+
+statement ok
+CREATE SCHEMA lake.listing_own;
+
+# the first listing of an attached catalog loads its databases: done here, so that the counts below are those of
+# the fresh attachment alone
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = 'listing_own';
+----
+listing_own
+
+# a fresh attachment: the listing asks for the databases of the attached catalog and nothing else
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as fresh (TYPE glue, ENDPOINT '{GLUE_FLOCI_ENDPOINT}');
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'fresh'
+AND (schema_name IN ('listing_own', 's3tablescatalog') OR parent_schema IS NOT NULL) ORDER BY ALL;
+----
+listing_own
+
+query III
+SELECT glue_calls('GetDatabases'), glue_calls('GetCatalogs'), glue_calls('GetCatalog');
+----
+1	0	0
+
+# naming a table below a child catalog makes its schemas known to this attached catalog
+statement ok
+DESCRIBE fresh.s3tablescatalog.salesdemo.retail.widget_sales;
+
+query II
+SELECT schema_name, parent_schema FROM duckdb_schemas() WHERE database_name = 'fresh'
+AND (schema_name IN ('listing_own', 's3tablescatalog') OR parent_schema IS NOT NULL) ORDER BY ALL;
+----
+listing_own	NULL
+retail	salesdemo
+s3tablescatalog	NULL
+salesdemo	s3tablescatalog
+
+query II
+SELECT s.parent_schema, t.table_name FROM duckdb_tables() t JOIN duckdb_schemas() s ON t.schema_oid = s.oid
+WHERE t.database_name = 'fresh' AND s.parent_schema IS NOT NULL ORDER BY ALL;
+----
+salesdemo	pending
+salesdemo	widget_sales
+
+# a listing with a name does not discover either: the other table bucket has not been named
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'fresh' AND schema_name = 'archive';
+----
+0
+
+query II
+SELECT schema_name, parent_schema FROM duckdb_schemas() WHERE database_name = 'fresh' AND schema_name = 'archive';
+----
+
+statement ok
+CALL disable_logging();
+
+# the other attachment has not named them
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'lake'
+AND (schema_name IN ('listing_own', 's3tablescatalog') OR parent_schema IS NOT NULL) ORDER BY ALL;
+----
+listing_own
+
+statement ok
+DROP SCHEMA lake.listing_own;

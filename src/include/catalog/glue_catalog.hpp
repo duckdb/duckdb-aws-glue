@@ -63,6 +63,10 @@ public:
 	bool CheckAmbiguousCatalogOrSchema(ClientContext &context, const Identifier &schema) override {
 		return false;
 	}
+	//! A schema below the top is a child catalog of the attached one, or a database of one
+	bool SupportsNestedSchemas() const override {
+		return true;
+	}
 	optional<Identifier> GetDefaultSchema() const override;
 	//! Allow CREATE TABLE ... PARTITIONED BY (...) WITH (location = '...', <property> = '...'); the options are
 	//! validated in GlueSchemaEntry::CreateTable
@@ -81,6 +85,14 @@ public:
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();
+	//! The schema 'path' names (its levels below this catalog): the database of its last level in the catalog the
+	//! other levels name, else the child catalog all of them name; nullptr if Glue has neither
+	optional_ptr<CatalogEntry> LookupSchemaPath(ClientContext &context, const vector<string> &path);
+	//! The Glue CatalogId of the child catalog 'path' names: this catalog's own id, extended by the path. False when
+	//! this catalog was attached as ':' and Glue does not report its account
+	bool TryGetChildCatalogId(ClientContext &context, const vector<string> &path, string &result);
+	//! The reverse: the path of the child catalog with that Glue CatalogId. False if it is not below this catalog
+	bool TryGetChildCatalogPath(ClientContext &context, const string &catalog_id, vector<string> &result);
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
 	//! The S3 location a new table gets when none is given: <default_location>/<database>/<table> when the catalog
@@ -131,9 +143,11 @@ private:
 	//! Looks a table up before its database: finding the table proves the database exists, saving GetDatabase
 	CatalogEntryLookup TryLookupEntryInternal(CatalogTransaction transaction,
 	                                          const EntryLookupInfo &lookup_info) override;
-	//! Looks the table up before its schema; with SKIPPED the regular lookup runs instead
+	//! Looks the table up before its schema, the database 'path' names; with SKIPPED the regular lookup runs instead
 	TableLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
-	                                       const string &database_name, CatalogEntryLookup &result);
+	                                       const vector<string> &path, CatalogEntryLookup &result);
+	//! The levels of a schema path below this catalog: without the name of the catalog it may lead with
+	vector<string> SchemaLevels(const vector<Identifier> &path) const;
 	//! A Glue view found by a table lookup is read with its Iceberg tables mapped (GlueView::ForReading)
 	CatalogEntryLookup ViewForReading(CatalogTransaction transaction, CatalogEntryLookup result);
 

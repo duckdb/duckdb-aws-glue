@@ -28,7 +28,7 @@ static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema
 	auto overlaps = [&](const string &other) {
 		return !other.empty() && LocationsOverlap(target, ComparableLocation(other));
 	};
-	auto tables = GlueAPI::GetTables(context, catalog, database_name, false, nullptr, true);
+	auto tables = GlueAPI::GetTables(context, catalog, schema.GetCatalogId(), database_name, false, nullptr, true);
 	for (auto &table : tables) {
 		if (overlaps(table.location)) {
 			throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' WITH (overwrite = true) is not "

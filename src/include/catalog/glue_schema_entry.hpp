@@ -38,9 +38,15 @@ struct GlueCreateTableOptions {
 //! A Glue database, exposed as a DuckDB schema
 class GlueSchemaEntry : public SchemaCatalogEntry {
 public:
-	//! 'schema_info_loaded' false: only the name of 'database_info' is known, GetSchemaInfo asks Glue for the rest
+	//! 'schema_info_loaded' false: only the name of 'database_info' is known, GetSchemaInfo asks Glue for the rest.
+	//! 'catalog_id' and 'parent' place the database in a child catalog of the attached one
 	GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info,
-	                bool schema_info_loaded = true);
+	                bool schema_info_loaded = true, string catalog_id = string(),
+	                optional_ptr<SchemaCatalogEntry> parent = nullptr);
+	//! A child catalog of the attached one, with the Glue CatalogId 'catalog_id': a schema that holds schemas, the
+	//! databases of the child catalog and its own child catalogs, and no tables
+	GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, string catalog_id,
+	                optional_ptr<SchemaCatalogEntry> parent);
 	~GlueSchemaEntry() override;
 
 public:
@@ -90,6 +96,32 @@ public:
 	const string &GetDatabaseName() const {
 		return database_info.name;
 	}
+	//! The Glue CatalogId the requests for this database carry, empty for the attached catalog's own; for a child
+	//! catalog its own id, which the requests for its databases carry
+	const string &GetCatalogId() const {
+		return catalog_id;
+	}
+	//! false for a child catalog
+	bool IsDatabase() const {
+		return is_database;
+	}
+	//! Whether the schema is a child catalog of the attached one or a database of one. Those are listed, but not read
+	//! or changed: every other Glue request carries the id of the attached catalog
+	bool InChildCatalog() const {
+		return !is_database || GetParentSchema() != nullptr;
+	}
+	//! The names of the schema's levels, from the attached catalog down to its own
+	vector<string> GetPath() const;
+	//! What Glue says a child catalog is
+	void SetCatalogInfo(const GlueCatalogInfo &info);
+	//! Throws if InChildCatalog(): 'operation' would act on the attached catalog's database of the same name
+	void CheckNotInChildCatalog(const string &operation) const;
+	//! Why a table of this schema, which is InChildCatalog(), can not be scanned
+	string TableNotReadableError(const GlueTableInfo &table) const;
+	//! The database's key in the metadata cache: two catalogs can hold a database of the same name
+	string GetCacheKey() const {
+		return catalog_id.empty() ? database_info.name : catalog_id + "\n" + database_info.name;
+	}
 	//! The database definition, asked from Glue first if the entry was created from the name alone
 	const GlueDatabaseInfo &GetSchemaInfo(ClientContext &context);
 	//! Take the definition of a database known by name alone from a listing; no-op once it is loaded
@@ -113,8 +145,13 @@ private:
 	//! Only the name is known until GetSchemaInfo loads the rest for an entry created from a table lookup
 	GlueDatabaseInfo database_info;
 	//! Guards the fields of 'database_info' other than the name, which never changes
-	mutex schema_info_lock;
+	mutable mutex schema_info_lock;
 	bool schema_info_loaded;
+	string catalog_id;
+	bool is_database = true;
+	//! Of a child catalog, once Glue described it; guarded by schema_info_lock. Where a delegate for the catalog's
+	//! tables would be chosen
+	unique_ptr<GlueCatalogInfo> catalog_info;
 };
 
 } // namespace duckdb

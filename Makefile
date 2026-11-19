@@ -37,6 +37,15 @@ test-local:
 CLOUD_TEST_CONFIG ?= test/configs/cloud_glue.json
 test-cloud:
 	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-config $(CLOUD_TEST_CONFIG) 'test/sql/*'
+# test/sql/child_catalogs needs catalogs below the Data Catalog of an account, which moto does not have: it runs
+# against a local Floci (docs/README.md, Testing), which scripts/floci_seed.sh seeds first. The tests of a fixture
+# skip themselves under the configuration of the other.
+# scripts/glue_fault_proxy.py runs in front of it for the length of the tests (GLUE_FLOCI_FAULT_ENDPOINT, port 4567).
+test-floci:
+	scripts/floci_seed.sh
+	$(PYTHON) scripts/glue_fault_proxy.py --host 127.0.0.1 --port 4567 --upstream http://localhost:4566 & proxy=$$!; \
+	trap "kill $$proxy" EXIT; sleep 1; \
+	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-config test/configs/floci_glue.json 'test/sql/child_catalogs/*'
 # The C++ tests of test/unittest, whose binary a normal build skips. Its Glue table tests only run against a local
 # GLUE_ENDPOINT, so they need `make glue-fixture` first
 test-cpp:

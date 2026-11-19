@@ -1,0 +1,141 @@
+# name: test/sql/child_catalogs/child_catalog_use.test
+# description: USE, the search path and SHOW TABLES FROM take a schema below a child catalog; a name resolved through it is refused where a path is, and does not reach the attached catalog's table of the same name
+# group: [child_catalogs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_FLOCI_ENDPOINT
+
+statement ok
+attach '{GLUE_FLOCI_CATALOG_ID}' as lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FLOCI_ENDPOINT}',
+    DEFAULT_LOCATION '{GLUE_FLOCI_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the attached catalog's own database and table with the names of the ones in the table bucket
+statement ok
+DROP SCHEMA IF EXISTS lake.retail CASCADE;
+
+statement ok
+CREATE SCHEMA lake.retail;
+
+statement ok
+CREATE TABLE lake.retail.widget_sales (origin VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO lake.retail.widget_sales VALUES ('own catalog', 'keep');
+
+statement ok
+USE lake.s3tablescatalog.salesdemo.retail;
+
+query I
+SELECT current_schema();
+----
+s3tablescatalog.salesdemo.retail
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE widget_sales);
+----
+i	INTEGER
+s	VARCHAR
+
+query I
+SELECT name FROM (SHOW TABLES) ORDER BY ALL;
+----
+pending
+widget_sales
+
+statement error
+SELECT * FROM widget_sales;
+----
+<REGEX>:.*Iceberg table of the child catalog '000000000000:s3tablescatalog/salesdemo'.*
+
+# a bare name that resolves below the child catalog is refused like the path
+statement error
+SELECT * FROM glue_partitions('widget_sales');
+----
+glue_partitions does not work on "s3tablescatalog.salesdemo.retail.widget_sales"
+
+statement error
+CALL glue_add_partition('widget_sales', {dt: 'added'});
+----
+can not read or change them yet
+
+statement error
+INSERT INTO widget_sales VALUES (1, 'wrong table');
+----
+INSERT is not supported in "s3tablescatalog.salesdemo.retail"
+
+statement error
+CREATE TABLE created (i INTEGER);
+----
+CREATE TABLE is not supported in "s3tablescatalog.salesdemo.retail"
+
+# a database name is not relative to the current schema: it names the database at the top of the catalog
+query II
+SELECT database_name, location_uri LIKE '{GLUE_FLOCI_S3_LOCATION}/%' FROM glue_get_database_response('retail');
+----
+retail	true
+
+# another schema by its path
+query I
+SELECT name FROM (SHOW TABLES FROM lake.s3tablescatalog.archive.retail);
+----
+widget_sales
+
+# a child catalog is a schema too, one without tables
+statement ok
+USE lake.s3tablescatalog.archive;
+
+query I
+SELECT current_schema();
+----
+s3tablescatalog.archive
+
+query I
+SELECT count(*) FROM (SHOW TABLES);
+----
+0
+
+# a qualified name starts at the top of the catalog, whatever the current schema: this is the attached catalog's
+query II
+SELECT column_name, column_type FROM (DESCRIBE retail.widget_sales);
+----
+origin	VARCHAR
+dt	VARCHAR
+
+statement error
+USE lake.s3tablescatalog.no_such_bucket.retail;
+----
+<REGEX>:.*(does not exist|No catalog \+ schema named).*
+
+statement ok
+USE memory;
+
+statement ok
+SET search_path = 'lake.s3tablescatalog.archive.retail';
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE widget_sales);
+----
+archived_at	VARCHAR
+
+statement ok
+RESET search_path;
+
+# the table of the attached catalog is as it was
+query II
+SELECT * FROM lake.retail.widget_sales;
+----
+own catalog	keep
+
+query I
+SELECT partition_values FROM glue_partitions('lake.retail.widget_sales');
+----
+[keep]
+
+statement ok
+DROP SCHEMA lake.retail CASCADE;

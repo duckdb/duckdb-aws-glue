@@ -29,7 +29,7 @@ static void RegisterRawPartition(Connection &con, const string &table, const vec
 	con.context->RunFunctionInTransaction([&]() {
 		auto &catalog = Catalog::GetCatalog(*con.context, Identifier("lake")).Cast<GlueCatalog>();
 		GlueTableInfo table_info;
-		found = GlueAPI::GetTable(*con.context, catalog, "default", table, table_info);
+		found = GlueAPI::GetTable(*con.context, catalog, GlueAPI::OwnCatalog(), "default", table, table_info);
 		if (!found) {
 			return;
 		}
