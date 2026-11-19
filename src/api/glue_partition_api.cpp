@@ -8,6 +8,7 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/task_executor.hpp"
+#include "planning/hive_metadata_prefetch.hpp"
 
 #include <chrono>
 #include <thread>
@@ -322,11 +323,15 @@ static constexpr idx_t GLUE_MAX_PARTITION_SEGMENTS = 10;
 
 //! One chain of GetPartitions requests: pages through the partitions of segment 'segment_number' (the whole table
 //! when 'total_segments' is 1) and appends them to 'result'
-static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
+static void FetchPartitionSegment(ClientContext &context, Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
                                   const string &database_name, const string &table_name, int segment_number,
                                   int total_segments, vector<GluePartitionInfo> &result) {
 	Aws::String next_token;
 	do {
+		if (HiveMetadataPrefetch::Stopping(context)) {
+			// a prefetch whose statement ended: nothing waits for these partitions
+			throw InterruptException();
+		}
 		Aws::Glue::Model::GetPartitionsRequest request;
 		SetCatalogId(request, catalog);
 		request.SetDatabaseName(database_name);
@@ -376,7 +381,8 @@ public:
 		// thread local: without it a worker's requests use the database level HTTP settings and stay out of this
 		// connection's HTTP log
 		GlueHttpClientContextScope http_scope(context);
-		FetchPartitionSegment(client, catalog, database_name, table_name, segment_number, total_segments, result);
+		FetchPartitionSegment(context, client, catalog, database_name, table_name, segment_number, total_segments,
+		                      result);
 	}
 	string TaskType() const override {
 		return "FetchPartitionSegmentTask";
@@ -419,7 +425,7 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 	vector<vector<GluePartitionInfo>> segment_results(NumericCast<idx_t>(total_segments));
 
 	if (total_segments == 1) {
-		FetchPartitionSegment(*client, catalog, database_name, table_name, 0, 1, segment_results[0]);
+		FetchPartitionSegment(context, *client, catalog, database_name, table_name, 0, 1, segment_results[0]);
 	} else {
 		// the segments do not overlap, so their requests can run at the same time
 		TaskExecutor executor(context, TaskSchedulerType::ASYNC);

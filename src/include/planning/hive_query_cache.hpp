@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -17,6 +18,8 @@ struct GlueTableEntry {
 	annotated_mutex lock;
 	//! Null until the first scan of a partitioned table asks Glue for them
 	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
+	//! Set when asking Glue failed: the query's scans of the table fail with it instead of asking again
+	ErrorData error DUCKDB_GUARDED_BY(lock);
 };
 
 //! The sample of a table, measured once per query for every scan of the table
@@ -25,6 +28,8 @@ struct HiveTableSampleEntry {
 	//! Null until the first scan of the table measures it. Shared and immutable once set: every scan of the table in
 	//! the query (self joins, subqueries, a CTE inlined twice) reads the one sample, after the lock is released
 	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
+	//! Measured ahead over every partition: the sample of a first scan that reads every partition
+	shared_ptr<const HiveTableSample> prefetched DUCKDB_GUARDED_BY(lock);
 };
 
 //! The footers of a small unpartitioned parquet table's files, read once per query for every scan of the table

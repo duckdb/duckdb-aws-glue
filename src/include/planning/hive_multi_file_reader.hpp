@@ -15,6 +15,8 @@
 
 namespace duckdb {
 
+class LogicalGet;
+
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
 struct HiveScanInfo : public TableFunctionInfo {
@@ -60,6 +62,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The named parameters BindHiveScan bound the file format reader with, which read any of the data files
 	named_argument_map_t reader_parameters;
 
+	//! The scan info of a Hive scan this build of the extension bound, or null for any other scan
+	static optional_ptr<const HiveScanInfo> TryGet(const LogicalGet &get);
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
 	//! The partition (index into 'partitions') the file at 'path' belongs to

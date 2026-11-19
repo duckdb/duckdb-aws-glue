@@ -17,6 +17,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "core/glue_log_types.hpp"
 #include "core/glue_types.hpp"
+#include "planning/hive_metadata_prefetch.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
@@ -248,12 +249,19 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		if (!measured.IsValid()) {
 			return sample;
 		}
+		if (HiveMetadataPrefetch::Stopping(context)) {
+			// a prefetch whose statement ended: nothing waits for this sample
+			throw InterruptException();
+		}
 		auto &file = listed[measured.GetIndex()];
 		sample.file_bytes = ListedFileSize(file);
 		sample.file_rows = RowsInFile(context, bind_data, info, file);
 	} catch (std::exception &ex) {
 		// costing must not fail a query: the scan reports a directory or file it cannot read
 		ErrorData error(ex);
+		if (error.Type() == ExceptionType::INTERRUPT) {
+			throw;
+		}
 		DUCKDB_LOG_WARNING(context, "Could not sample Hive table '%s' for its cardinality: %s", info.Describe(),
 		                   error.RawMessage());
 	}
@@ -270,6 +278,20 @@ static unique_ptr<NodeStatistics> UnsampledCardinality(ClientContext &context, c
 	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
+//! MeasureTable, logged as the table's sample event
+static shared_ptr<const HiveTableSample> MeasureAndLog(ClientContext &context, const MultiFileBindData &bind_data,
+                                                       const HiveMultiFileList &files) {
+	auto &info = files.ScanInfo();
+	GlueScanEvent event(info.Describe(), info.scan_id, "sample");
+	auto sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, files));
+	if (sample->listed) {
+		event.files = sample->files;
+	}
+	event.Finish();
+	DUCKDB_LOG(context, GlueScanLogType, event);
+	return sample;
+}
+
 string HiveScanInfo::CacheKey() const {
 	if (catalog_name.empty()) {
 		return HiveQueryCache::TableKey(string(), string(), root_location);
@@ -283,14 +305,13 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 	auto &info = hive_list.ScanInfo();
 	auto entry = HiveQueryCache::Get(context)->GetSample(info.CacheKey());
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->sample && entry->prefetched &&
+	    hive_list.PartitionIndexes()->size() == info.Partitions(context)->size()) {
+		// measured over every partition, which is what this scan reads: the same listing and the same file
+		entry->sample = entry->prefetched;
+	}
 	if (!entry->sample) {
-		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
-		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
-		if (entry->sample->listed) {
-			event.files = entry->sample->files;
-		}
-		event.Finish();
-		DUCKDB_LOG(context, GlueScanLogType, event);
+		entry->sample = MeasureAndLog(context, bind_data, hive_list);
 	}
 	return entry->sample;
 }
@@ -368,6 +389,16 @@ unique_ptr<MultiFileBindData> HiveScanInfo::FooterStatisticsBindData(ClientConte
 	result->file_list = bind_data.file_list;
 	result->union_readers = std::move(footers);
 	return result;
+}
+
+void PrefetchTableSample(ClientContext &context, const MultiFileBindData &bind_data) {
+	auto &files = bind_data.file_list->Cast<HiveMultiFileList>();
+	auto &info = files.ScanInfo();
+	auto entry = HiveQueryCache::Get(context)->GetSample(info.CacheKey());
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->sample && !entry->prefetched && files.PartitionIndexes()->size() == info.Partitions(context)->size()) {
+		entry->prefetched = MeasureAndLog(context, bind_data, files);
+	}
 }
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions

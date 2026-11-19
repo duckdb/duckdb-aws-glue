@@ -161,9 +161,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   scan reads: the group estimate on a key is exact, but the optimizer can then push aggregates below a join on the
   key and lose that join's run-time partition pruning.
 - A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
-  gets its minimum, maximum and NULLs merged from the footers of all of them. They are read the first time the
-  optimizer asks for the scan's statistics, not when it binds: a scan the optimizer removes first (`WHERE false`)
-  and a `DESCRIBE` open no file. The scan then reads each footer a second time when it opens the file (one extra
+  gets its minimum, maximum and NULLs merged from the footers of all of them. They are read before the optimizer runs
+  (with `glue_prefetch_scan_metadata`) or the first time it asks for the scan's statistics, never when it binds: a
+  `DESCRIBE` opens no file, nor, with the prefetch off, does a scan the optimizer removes first (`WHERE false`). The
+  scan then reads each footer a second time when it opens the file (one extra
   ranged GET per file unless the external file cache has it): the optimizer gets the scan's bind data read-only, so
   the footers it reads can not be handed to the scan. That is better fixed in DuckDB, by reading the footers only
   once statistics are asked for, into the scan's own bind data. `0` turns them and the count off. A column gets none
@@ -539,6 +540,10 @@ descriptor with its columns, which the scan checks the partitions it reads again
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
 
+Table metadata (partitions, samples, and the footers of small unpartitioned parquet tables) is fetched eagerly in an
+async manner during planning phase to reduce planning time. The footers of all the tables are read at the same time
+just before the statement is optimized. This feature can be turned off using `SET glue_prefetch_scan_metadata = false`.
+
 ## Inspecting tables
 
 Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,
@@ -600,7 +605,8 @@ The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, on
   nothing was listed: avro tables are not sampled). The scan reuses that listing, so a `listing` of the same
   directory then takes next to no time. Every scan of the table in the query shares the one sample.
 - `footers`: the footers of an unpartitioned parquet table's `files` files were read for statistics in
-  `duration_ms`, when the optimizer first asked. Every scan of the table in the query shares them.
+  `duration_ms`, just before the statement was optimized, or with the prefetch off when the optimizer first asked.
+  Every scan of the table in the query shares them.
 
 ```sql
 CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');

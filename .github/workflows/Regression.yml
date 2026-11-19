@@ -160,7 +160,7 @@ jobs:
       matrix:
         include:
           - name: parquet
-            benchmarks: '^benchmark/([^/]+|pushdown/join_filter_partition_pruning(_two_keys)?|optimizer/(common_subplan|estimate_cardinality_for_join_order_optimizer)|tpcds/sf1/parquet/q64)\.benchmark$'
+            benchmarks: '^benchmark/([^/]+|pushdown/join_filter_partition_pruning(_two_keys)?|optimizer/(common_subplan|estimate_cardinality_for_join_order_optimizer|join_five_glue_tables)|tpcds/sf1/parquet/q64)\.benchmark$'
           - name: csv/json
             benchmarks: '^benchmark/((optimizer/estimate_cardinality_for_join_order_optimizer|pushdown/join_filter_partition_pruning)_(csv|json)|tpch/sf0\.1/csv/q(09|18|21)|tpcds/sf0\.01/csv/q(14|64|72|78))\.benchmark$'
     env:

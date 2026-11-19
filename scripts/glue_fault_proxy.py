@@ -16,11 +16,19 @@ forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
-amz-sdk-request header) and forwarded when the SDK retries it."""
+amz-sdk-request header) and forwarded when the SDK retries it. GetPartitions on a fault_partitions_denied* database
+fails with AccessDeniedException, and on a fault_slow_get_partitions* database answers one partition per page, each
+after SLOW_GET_PARTITIONS_SECONDS, so a statement can end while the partitions are fetched.
+S3 requests (without an X-Amz-Target) are forwarded to S3, except a listing below a fault_failed_page* or
+fault_slow_listing* location, which is answered LISTING_PAGE_SIZE objects per page: on fault_failed_page* the first
+attempt at each page after the first fails with InternalError, as a page can fail after an earlier one succeeded, and
+on fault_slow_listing* each page comes after SLOW_LISTING_SECONDS, so a statement can end while a listing is fetched."""
 
 import argparse
 import http.client
 import json
+import re
+import threading
 import time
 import uuid
 import urllib.parse
@@ -40,12 +48,24 @@ THROTTLED_PREFIX = "fault_throttled"
 # BatchCreatePartition on a database with this prefix is forwarded after a delay
 SLOW_PARTITIONS_PREFIX = "fault_slow_partitions"
 SLOW_PARTITIONS_SECONDS = 4
+# GetPartitions on a database with this prefix fails with AccessDeniedException
+PARTITIONS_DENIED_PREFIX = "fault_partitions_denied"
+# GetPartitions on a database with this prefix answers a page of one partition after a delay
+SLOW_GET_PARTITIONS_PREFIX = "fault_slow_get_partitions"
+SLOW_GET_PARTITIONS_SECONDS = 0.5
 # BatchCreatePartition on a database with this prefix finds its table recreated by another client, and then fails
 RECREATED_PREFIX = "fault_recreated_during_write"
 # BatchCreatePartition on a database with this prefix races another client registering the partitions elsewhere
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
 # CreatePartition on a database with this prefix registers each value with a leading '0'
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
+# S3: a listing below a key with this prefix is answered in pages, the first attempt at a later page fails
+FAILED_PAGE_PREFIX = "fault_failed_page"
+# S3: a listing below a key with this prefix is answered in pages, each after a delay
+SLOW_LISTING_PREFIX = "fault_slow_listing"
+SLOW_LISTING_SECONDS = 0.5
+# objects per page of those listings: a glob reads its first two files before it returns the listing
+LISTING_PAGE_SIZE = 2
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -112,6 +132,24 @@ def is_slow_partitions(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(SLOW_PARTITIONS_PREFIX)
 
 
+def is_partitions_denied(target, database):
+    return target == "AWSGlue.GetPartitions" and database.startswith(PARTITIONS_DENIED_PREFIX)
+
+
+def is_slow_get_partitions(target, database):
+    return target == "AWSGlue.GetPartitions" and database.startswith(SLOW_GET_PARTITIONS_PREFIX)
+
+
+def one_partition_page(data, token):
+    """The partition at offset 'token' of moto's answer, with a NextToken while more follow."""
+    partitions = json.loads(data)["Partitions"]
+    offset = int(token or 0)
+    page = {"Partitions": partitions[offset:offset + 1]}
+    if offset + 1 < len(partitions):
+        page["NextToken"] = str(offset + 1)
+    return json.dumps(page).encode()
+
+
 def is_recreated_during_write(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(RECREATED_PREFIX)
 
@@ -140,6 +178,19 @@ def as_other_clients_partitions(request):
     return json.dumps(other).encode()
 
 
+def listing_page(data, page):
+    """Page 'page' of the S3 listing 'data', with a continuation token while more follow."""
+    objects = re.findall(rb"<Contents>.*?</Contents>", data, re.S)
+    rest = re.sub(rb"<Contents>.*?</Contents>|<IsTruncated>.*?</IsTruncated>|<KeyCount>.*?</KeyCount>|"
+                  rb"<NextContinuationToken>.*?</NextContinuationToken>", b"", data, flags=re.S)
+    more = (page + 1) * LISTING_PAGE_SIZE < len(objects)
+    paged = b"<IsTruncated>%s</IsTruncated>" % (b"true" if more else b"false")
+    if more:
+        paged += b"<NextContinuationToken>%d</NextContinuationToken>" % (page + 1)
+    paged += b"".join(objects[page * LISTING_PAGE_SIZE:(page + 1) * LISTING_PAGE_SIZE])
+    return rest.replace(b"</ListBucketResult>", paged + b"</ListBucketResult>")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -149,9 +200,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.relay()
 
+    def do_PUT(self):
+        self.relay()
+
+    def do_HEAD(self):
+        self.relay()
+
+    def do_DELETE(self):
+        self.relay()
+
     def relay(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         target = self.headers.get("X-Amz-Target")
+        if target is None:
+            self.relay_s3(body)
+            return
         request = parse_request(body)
         database = request_database(target, request)
         error = listing_error(target, database)
@@ -159,11 +222,18 @@ class Handler(BaseHTTPRequestHandler):
             error = "AccessDeniedException"
         if not error and is_throttled(database, self.headers.get("amz-sdk-request")):
             error = "ThrottlingException"
+        if not error and is_partitions_denied(target, database):
+            error = "AccessDeniedException"
         if error:
             self.reply_error(error)
             return
         if is_slow_partitions(target, database):
             time.sleep(SLOW_PARTITIONS_SECONDS)
+        slow_pages = is_slow_get_partitions(target, database)
+        if slow_pages:
+            time.sleep(SLOW_GET_PARTITIONS_SECONDS)
+            token = request.pop("NextToken", None)
+            body = json.dumps(request).encode()
         if is_recreated_during_write(target, database):
             self.recreate_as_other_client(database, request["TableName"])
             self.reply_error("InternalServiceException")
@@ -189,7 +259,54 @@ class Handler(BaseHTTPRequestHandler):
             return
         if target == "AWSGlue.GetTables" and status == 200:
             data = without_denied_tables(data)
+        if slow_pages and status == 200:
+            data = one_partition_page(data, token)
         self.reply(status, headers, data)
+
+    def relay_s3(self, body):
+        query = urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query)
+        options = dict(query)
+        prefix = options.get("prefix", "")
+        if "list-type" not in options or (FAILED_PAGE_PREFIX not in prefix and SLOW_LISTING_PREFIX not in prefix):
+            self.reply(*self.forward_s3(body))
+            return
+        if SLOW_LISTING_PREFIX in prefix:
+            time.sleep(SLOW_LISTING_SECONDS)
+        token = options.get("continuation-token")
+        listing = (self.path.split("?")[0], tuple(option for option in query if option[0] != "continuation-token"))
+        if token is None:
+            # S3's answer is kept for the later pages, which are not forwarded
+            status, headers, data = self.forward_s3(body)
+            if status == 200:
+                with self.server.lock:
+                    self.server.listings[listing] = (headers, data, set())
+                data = listing_page(data, 0)
+            self.reply(status, headers, data)
+            return
+        with self.server.lock:
+            headers, data, attempted = self.server.listings[listing]
+            first_attempt = token not in attempted
+            attempted.add(token)
+        if FAILED_PAGE_PREFIX in prefix and first_attempt:
+            error = b"<Error><Code>InternalError</Code><Message>injected by glue_fault_proxy</Message></Error>"
+            self.reply(500, [("Content-Type", "application/xml")], error)
+            return
+        self.reply(200, headers, listing_page(data, int(token)))
+
+    def forward_s3(self, body):
+        upstream = http.client.HTTPConnection(self.server.s3_upstream.hostname, self.server.s3_upstream.port,
+                                              timeout=60)
+        try:
+            # unchanged, Host included: S3 checks the request's signature
+            upstream.request(self.command, self.path, body=body or None, headers=dict(self.headers.items()))
+            response = upstream.getresponse()
+            data = response.read()
+        finally:
+            upstream.close()
+        headers = [(k, v) for k, v in response.getheaders() if k.lower() not in NOT_FORWARDED]
+        if self.command == "HEAD":
+            headers.append(("Content-Length", response.getheader("Content-Length", "0")))
+        return response.status, headers, data
 
     def forward(self, target, body):
         upstream = http.client.HTTPConnection(self.server.upstream.hostname, self.server.upstream.port, timeout=60)
@@ -246,9 +363,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         for name, value in headers:
             self.send_header(name, value)
-        self.send_header("Content-Length", str(len(body)))
+        if self.command != "HEAD":
+            self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def log_message(self, *args):
         pass
@@ -258,9 +377,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=5556)
     parser.add_argument("--upstream", default="http://localhost:5555")
+    parser.add_argument("--s3-upstream", default="http://localhost:9100")
     args = parser.parse_args()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     server.upstream = urllib.parse.urlsplit(args.upstream)
+    server.s3_upstream = urllib.parse.urlsplit(args.s3_upstream)
+    server.lock = threading.Lock()
+    server.listings = {}
+    server.page_attempts = {}
     server.serve_forever()
 
 
