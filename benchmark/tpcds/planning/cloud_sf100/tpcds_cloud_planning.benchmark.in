@@ -1,0 +1,18 @@
+# name: benchmark/tpcds/planning/cloud_sf100/tpcds_cloud_planning.benchmark.in
+# description: Plan (EXPLAIN) a TPC-DS query at SF100 on the partitioned parquet tables in the AWS Glue catalog
+# group: [cloud_sf100]
+
+# The query text is read from DuckDB's own TPC-DS query file once, before the timed runs, so the benchmarks plan the
+# queries of the pinned duckdb submodule. query() binds the text as the query itself: the plan is the query's.
+
+include benchmark/tpcds/cloud_sf100/tpcds_cloud_glue.benchmark.in
+
+init
+SET VARIABLE tpcds_query = (SELECT content FROM read_text('duckdb/extension/tpcds/dsdgen/queries/${QUERY_NUMBER_PADDED}.sql'));
+
+name DSQ${QUERY_NUMBER_PADDED}_plan_cloud_sf100_partitioned
+group tpcds_glue_cloud_planning
+subgroup sf100_partitioned
+
+run
+EXPLAIN FROM query(getvariable('tpcds_query'))

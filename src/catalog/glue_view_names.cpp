@@ -315,7 +315,9 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 					                      name.ToString(), catalog.GetName().GetIdentifierName());
 				}
 				catalogs.insert(catalog_name);
-				ref.SetQualifiedName(Identifier(ExternalIdentity(catalog)), entry->ParentSchema().name, entry->name);
+				// the whole schema path: the catalog may nest schemas
+				ref.SetQualifiedName(QualifiedName::FromCatalogSchema(
+				    Identifier(ExternalIdentity(catalog)), entry->ParentSchema().GetSchemaPath(), entry->name));
 				return;
 			}
 			auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -438,7 +440,7 @@ void GlueViewNames::ResolveForReading(GlueCatalog &view_catalog, const string &v
 			                      id.GetIdentifierName(), view_catalog.options.region,
 			                      endpoint.empty() ? "" : ", ENDPOINT '" + endpoint + "'");
 		}
-		ref.SetQualifiedName(alias->second, name.Schema(), name.Name());
+		ref.SetQualifiedName(name.WithCatalog(alias->second));
 	});
 	walker.Walk(query);
 }

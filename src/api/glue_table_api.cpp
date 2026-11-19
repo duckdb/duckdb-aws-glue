@@ -239,6 +239,9 @@ static void SetViewDefinition(Aws::Glue::Model::TableInput &table_input, const G
 	if (!view.columns.empty()) {
 		storage_descriptor.SetColumns(ToAwsColumns(view.columns));
 	}
+	// Spark's Glue client and Trino fail without a SerdeInfo; an empty Location makes Spark refuse the view
+	storage_descriptor.SetSerdeInfo(Aws::Glue::Model::SerDeInfo());
+	storage_descriptor.SetLocation("");
 	table_input.SetStorageDescriptor(storage_descriptor);
 }
 
