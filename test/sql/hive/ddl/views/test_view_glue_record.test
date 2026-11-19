@@ -12,77 +12,82 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
+require-env GLUE_TEST_DB_SQL
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.gr_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.gr_view;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.gr_defer;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.gr_defer;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.gr_all;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.gr_all;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.gr_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.gr_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.gr_orders (id INTEGER, amount DOUBLE);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.gr_orders (id INTEGER, amount DOUBLE);
 
 statement ok
-CREATE VIEW my_datalake.default.gr_view AS SELECT id, amount * 2 AS twice FROM gr_orders WHERE id > 1;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.gr_view AS SELECT id, amount * 2 AS twice FROM gr_orders WHERE id > 1;
 
 query IIIIII
 SELECT response.TableType, response.ViewOriginalText, response.ViewExpandedText,
        response.Parameters.duckdb_view, response.Parameters.duckdb_view_version, response.Parameters.duckdb_view_default_database
-FROM glue_get_table_response('my_datalake.default.gr_view');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.gr_view');
 ----
-VIRTUAL_VIEW	SELECT id, (amount * 2) AS twice FROM gr_orders WHERE (id > 1)	SELECT id, (amount * 2) AS twice FROM "default".gr_orders WHERE (id > 1)	true	1	default
+VIRTUAL_VIEW	SELECT id, (amount * 2) AS twice FROM gr_orders WHERE (id > 1)	SELECT id, (amount * 2) AS twice FROM {GLUE_TEST_DB_SQL}.gr_orders WHERE (id > 1)	true	1	{GLUE_TEST_DB}
 
 query I
-SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response('my_datalake.default.gr_view');
+SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.gr_view');
 ----
 [{'Name': id, 'Type': int}, {'Name': twice, 'Type': double}]
 
 # an empty SerdeInfo and Location, as other engines write a view
 query II
 SELECT response.StorageDescriptor.SerdeInfo::VARCHAR, response.StorageDescriptor.Location
-FROM glue_get_table_response('my_datalake.default.gr_view');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.gr_view');
 ----
 {}	(empty)
 
 statement ok
-CREATE OR REPLACE VIEW my_datalake.default.gr_view AS SELECT id FROM gr_orders;
+CREATE OR REPLACE VIEW my_datalake.{GLUE_TEST_DB}.gr_view AS SELECT id FROM gr_orders;
 
 query III
 SELECT response.ViewOriginalText, response.ViewExpandedText, response.StorageDescriptor.Columns::VARCHAR
-FROM glue_get_table_response('my_datalake.default.gr_view');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.gr_view');
 ----
-SELECT id FROM gr_orders	SELECT id FROM "default".gr_orders	[{'Name': id, 'Type': int}]
+SELECT id FROM gr_orders	SELECT id FROM {GLUE_TEST_DB_SQL}.gr_orders	[{'Name': id, 'Type': int}]
 
 # CREATE OR REPLACE rewrites the column types
 statement ok
-CREATE OR REPLACE VIEW my_datalake.default.gr_view AS SELECT sum(id) AS id FROM gr_orders;
+CREATE OR REPLACE VIEW my_datalake.{GLUE_TEST_DB}.gr_view AS SELECT sum(id) AS id FROM gr_orders;
 
 query I
-SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response('my_datalake.default.gr_view');
+SELECT response.StorageDescriptor.Columns::VARCHAR FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.gr_view');
 ----
 [{'Name': id, 'Type': 'decimal(38,0)'}]
 
 query II
 SELECT response.StorageDescriptor.SerdeInfo::VARCHAR, response.StorageDescriptor.Location
-FROM glue_get_table_response('my_datalake.default.gr_view');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.gr_view');
 ----
 {}	(empty)
 
 # a column stores the closest Hive type other engines read, else string
 statement ok
-CREATE VIEW my_datalake.default.gr_all AS
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.gr_all AS
 SELECT true AS b, 1::TINYINT AS ti, 1::SMALLINT AS si, 1::INTEGER AS i, 1::BIGINT AS bi, 1::UTINYINT AS uti,
     1::USMALLINT AS usi, 1::UINTEGER AS ui, 1::UBIGINT AS ubi, sum(id) AS h, 1::UHUGEINT AS uh, 1.5::FLOAT AS f,
     1.5::DOUBLE AS d, 1.5::DECIMAL(18,3) AS dec, 'a' AS v, '\x01'::BLOB AS bl, DATE '2020-01-02' AS dt,
@@ -100,7 +105,7 @@ FROM gr_orders;
 query II
 SELECT c.Name, c.Type
 FROM (SELECT unnest(response.StorageDescriptor.Columns::STRUCT("Name" VARCHAR, "Type" VARCHAR)[]) AS c
-      FROM glue_get_table_response('my_datalake.default.gr_all'));
+      FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.gr_all'));
 ----
 b	boolean
 ti	tinyint
@@ -165,7 +170,7 @@ SELECT true AS b, 1::TINYINT AS ti, 1::SMALLINT AS si, 1::INTEGER AS i, 1::BIGIN
     [1, 2]::INTEGER[2] AS fa, MAP {'k': 1} AS m, MAP {[1]: 'a'} AS mk, {'a': 1, 't': TIME '03:04:05'} AS st,
     {'a b': 1} AS odd, {'1': 1} AS digit, [{'it''s': 1}] AS nested, MAP {'k': {'x y': 1}} AS ms, row(1, 'a') AS r,
     1::VARIANT AS va, struct_pack() AS es, {'a': {'b': 1}} AS ss, [{'a': 1}] AS ls, MAP {'k': {'x': 1}} AS mv
-FROM my_datalake.default.gr_orders;
+FROM my_datalake.{GLUE_TEST_DB}.gr_orders;
 
 # DuckDB binds the view's SQL, so after a fresh attach the view has the types and values of its query
 statement ok
@@ -175,7 +180,8 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query III
@@ -183,25 +189,25 @@ SELECT (SELECT list((column_name, data_type) ORDER BY column_index) FROM duckdb_
         WHERE database_name = 'my_datalake' AND table_name = 'gr_all') =
        (SELECT list((column_name, data_type) ORDER BY column_index) FROM duckdb_columns()
         WHERE database_name = 'memory' AND table_name = 'gr_all_direct'),
-       (SELECT count(*) FROM (FROM my_datalake.default.gr_all EXCEPT ALL FROM memory.main.gr_all_direct)),
-       (SELECT count(*) FROM (FROM memory.main.gr_all_direct EXCEPT ALL FROM my_datalake.default.gr_all));
+       (SELECT count(*) FROM (FROM my_datalake.{GLUE_TEST_DB}.gr_all EXCEPT ALL FROM memory.main.gr_all_direct)),
+       (SELECT count(*) FROM (FROM memory.main.gr_all_direct EXCEPT ALL FROM my_datalake.{GLUE_TEST_DB}.gr_all));
 ----
 true	0	0
 
 statement ok
-DROP VIEW my_datalake.default.gr_all;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.gr_all;
 
 statement ok
 DROP VIEW memory.main.gr_all_direct;
 
 # nothing is written for a refused view
 statement error
-CREATE VIEW my_datalake.default.gr_defer WITH (DEFER_BINDING) AS SELECT id FROM gr_orders;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.gr_defer WITH (DEFER_BINDING) AS SELECT id FROM gr_orders;
 ----
 Glue views can not be created WITH (DEFER_BINDING) yet
 
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.gr_defer');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.gr_defer');
 ----
 gr_defer
 
@@ -217,10 +223,10 @@ SELECT * FROM my_datalake.default.fixture_nocols_view;
 1
 
 statement ok
-DROP VIEW my_datalake.default.gr_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.gr_view;
 
 statement ok
-DROP TABLE my_datalake.default.gr_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.gr_orders;
 
 # CREATE OR REPLACE replaces the definition and our parameters only: the description and parameters set by others stay
 statement ok
@@ -230,7 +236,7 @@ query IIII
 SELECT response.ViewOriginalText, response.Description, response.Parameters.owner_team, response.Parameters.duckdb_view_default_database
 FROM glue_get_table_response('my_datalake.default.fixture_view_keep');
 ----
-SELECT 2 AS two	kept across CREATE OR REPLACE	analytics	default
+SELECT 2 AS two	kept across CREATE OR REPLACE	analytics	{GLUE_TEST_DB}
 
 query I
 SELECT comment FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'fixture_view_keep';

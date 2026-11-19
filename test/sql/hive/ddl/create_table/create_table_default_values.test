@@ -8,52 +8,55 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.defval_t;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.defval_t;
 
 statement error
-CREATE TABLE my_datalake.default.defval_t (a INTEGER DEFAULT 1, b VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.defval_t (a INTEGER DEFAULT 1, b VARCHAR);
 ----
 Not implemented Error: Default value of column "a" is not supported for tables in a Glue catalog
 
 statement error
-CREATE TABLE my_datalake.default.defval_t (a INTEGER, ts TIMESTAMP DEFAULT now());
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.defval_t (a INTEGER, ts TIMESTAMP DEFAULT now());
 ----
 Default value of column "ts" is not supported
 
 statement error
-CREATE TABLE my_datalake.default.defval_t (a INTEGER, dt VARCHAR DEFAULT 'x') PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.defval_t (a INTEGER, dt VARCHAR DEFAULT 'x') PARTITIONED BY (dt);
 ----
 Default value of column "dt" is not supported
 
 # nothing was created in Glue
 statement error
-SELECT * FROM my_datalake.default.defval_t;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.defval_t;
 ----
 does not exist
 
 statement ok
-CREATE TABLE my_datalake.default.defval_t (a INTEGER, b VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.defval_t (a INTEGER, b VARCHAR);
 
 statement ok
-INSERT INTO my_datalake.default.defval_t (a) VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.defval_t (a) VALUES (1);
 
 query II
-SELECT a, b FROM my_datalake.default.defval_t;
+SELECT a, b FROM my_datalake.{GLUE_TEST_DB}.defval_t;
 ----
 1	NULL
 
 statement error
-ALTER TABLE my_datalake.default.defval_t ADD COLUMN c INTEGER DEFAULT 1;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.defval_t ADD COLUMN c INTEGER DEFAULT 1;
 ----
 Default value of column "c" is not supported for tables in a Glue catalog
 
 statement ok
-DROP TABLE my_datalake.default.defval_t;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.defval_t;

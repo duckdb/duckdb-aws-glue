@@ -10,7 +10,8 @@ struct CreateMacroInfo;
 
 //! What a scan of a Glue Hive table spends its time on, one entry per 'event': 'partitions' (loading them),
 //! 'plan' (the listings to do), 'listing' (one of them) and 'sample' (the cardinality sample). 'scan_id' tells the
-//! scans of one query apart. Fields an event does not set are NULL.
+//! scans of one query apart. Fields an event does not set are NULL. 'prefetch' (scan_id 0) is the partitions of
+//! several tables loaded concurrently once a statement is bound: 'table' the tables, 'detail' the outcome.
 //! One step of a Hive scan, logged as GlueScan. Its timer starts when the event is made; Finish() records the time
 //! since.
 struct GlueScanEvent {

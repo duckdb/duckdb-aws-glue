@@ -1,0 +1,187 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_storage_plan_copy.test
+# description: A copy of a scan's plan refuses the partitions the scan refuses for their storage or column types
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the parquet files of the fixtures (scripts/docker-compose.yml), as their own tests write them
+statement ok
+COPY (SELECT 1::INTEGER AS id, 'a' AS name) TO 's3://glue-test/warehouse/fixture/fixture_partition_formats/dt=parquet/data.parquet';
+
+statement ok
+COPY (SELECT 2::INTEGER AS id, 'b' AS name) TO 's3://glue-test/warehouse/fixture/fixture_partition_formats/dt=parquet_alias/data.parquet';
+
+statement ok
+COPY (SELECT 1::INTEGER AS id, 10::SMALLINT AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_types/dt=smallint/data.parquet';
+
+statement ok
+COPY (SELECT 2::INTEGER AS id, 20::BIGINT AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_types/dt=bigint/data.parquet';
+
+statement ok
+COPY (SELECT 3::INTEGER AS id, 30.5::DOUBLE AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_types/dt=double/data.parquet';
+
+statement ok
+COPY (SELECT 4::INTEGER AS id, '40' AS v) TO 's3://glue-test/warehouse/fixture/fixture_partition_types/dt=string/data.parquet';
+
+#---------------------------------------------------------------------------
+# a csv partition delimited by '|' in a table delimited by ',': the file holds the line 2|b
+#---------------------------------------------------------------------------
+statement error
+SELECT * FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'pipe';
+----
+<REGEX>:.*Partition \[dt=pipe\] of Hive table 'default.fixture_partition_dialects' is stored as csv with another dialect.*
+
+# a CTE read twice below a LIMIT is inlined: each reference is a copy of its plan
+statement error
+WITH pipe AS (SELECT * FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'pipe')
+SELECT * FROM pipe UNION ALL SELECT * FROM pipe LIMIT 10;
+----
+<REGEX>:.*Partition \[dt=pipe\] of Hive table 'default.fixture_partition_dialects' is stored as csv with another dialect.*
+
+statement error
+WITH pipe AS NOT MATERIALIZED (SELECT * FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'pipe')
+SELECT * FROM pipe UNION ALL SELECT * FROM pipe;
+----
+<REGEX>:.*Partition \[dt=pipe\] of Hive table 'default.fixture_partition_dialects' is stored as csv with another dialect.*
+
+# a copy of a copy: the inner CTE is inlined into the outer one, which is then inlined into each of its references
+statement error
+WITH twice AS (
+    WITH pipe AS NOT MATERIALIZED (SELECT * FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'pipe')
+    SELECT * FROM pipe UNION ALL SELECT * FROM pipe)
+SELECT * FROM twice UNION ALL SELECT * FROM twice LIMIT 10;
+----
+<REGEX>:.*Partition \[dt=pipe\] of Hive table 'default.fixture_partition_dialects' is stored as csv with another dialect.*
+
+# the partition that reads like the table reads through the copies
+query IIT
+WITH comma AS (SELECT id, name, dt FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'comma')
+SELECT * FROM comma UNION ALL SELECT * FROM comma LIMIT 10;
+----
+1	a	comma
+1	a	comma
+
+query IIT
+WITH twice AS (
+    WITH comma AS NOT MATERIALIZED (SELECT id, name, dt FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'comma')
+    SELECT * FROM comma UNION ALL SELECT * FROM comma)
+SELECT * FROM twice UNION ALL SELECT * FROM twice LIMIT 10;
+----
+1	a	comma
+1	a	comma
+1	a	comma
+1	a	comma
+
+#---------------------------------------------------------------------------
+# a csv partition in a parquet table
+#---------------------------------------------------------------------------
+statement ok
+CALL enable_logging(level := 'WARNING', storage := 'memory');
+
+statement error
+WITH text AS (SELECT * FROM my_datalake.default.fixture_partition_formats WHERE dt = 'text')
+SELECT * FROM text UNION ALL SELECT * FROM text LIMIT 10;
+----
+<REGEX>:.*Partition \[dt=text\] of Hive table 'default.fixture_partition_formats' is stored as csv \(InputFormat 'org.apache.hadoop.mapred.TextInputFormat', SerDe 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'\), but the table as parquet.*
+
+# estimating the cardinality of the copies does not open the csv partition's files with the parquet reader
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%Could not sample%';
+----
+0
+
+statement ok
+CALL disable_logging();
+
+# the partitions that read like the table, one of them under other class names, read through the copies
+query IIT
+WITH parquet AS (SELECT id, name, dt FROM my_datalake.default.fixture_partition_formats WHERE dt <> 'text')
+SELECT * FROM parquet UNION ALL SELECT * FROM parquet ORDER BY id LIMIT 10;
+----
+1	a	parquet
+1	a	parquet
+2	b	parquet_alias
+2	b	parquet_alias
+
+#---------------------------------------------------------------------------
+# a partition declaring a column with a type that can not be read as the table's
+#---------------------------------------------------------------------------
+statement error
+WITH string AS (SELECT v FROM my_datalake.default.fixture_partition_types WHERE dt = 'string')
+SELECT * FROM string UNION ALL SELECT * FROM string LIMIT 10;
+----
+<REGEX>:.*Partition \[dt=string\] of Hive table 'default.fixture_partition_types' declares column 'v' as 'string', which can not be read as the table's column 'v' of type 'int'.*
+
+# csv columns are matched by position
+statement error
+WITH bigint AS (SELECT id, s FROM my_datalake.default.fixture_partition_types_csv WHERE dt = 'bigint')
+SELECT * FROM bigint UNION ALL SELECT * FROM bigint LIMIT 10;
+----
+<REGEX>:.*Partition \[dt=bigint\] of Hive table 'default.fixture_partition_types_csv' declares column 'id' as 'bigint', which can not be read as the table's column 'id' of type 'int'.*
+
+# a widened type reads, and only the columns a query reads are checked
+query TII
+WITH smallint AS (SELECT dt, id, v FROM my_datalake.default.fixture_partition_types WHERE dt = 'smallint')
+SELECT * FROM smallint UNION ALL SELECT * FROM smallint LIMIT 10;
+----
+smallint	1	10
+smallint	1	10
+
+query TI
+WITH ids AS (SELECT dt, id FROM my_datalake.default.fixture_partition_types)
+SELECT * FROM ids UNION ALL SELECT * FROM ids ORDER BY id LIMIT 10;
+----
+smallint	1
+smallint	1
+bigint	2
+bigint	2
+double	3
+double	3
+string	4
+string	4
+
+#---------------------------------------------------------------------------
+# with the verifier on, every plan is serialized, deserialized and run as deserialized
+#---------------------------------------------------------------------------
+statement ok
+SET debug_verify_serializer = true;
+
+statement error
+SELECT * FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'pipe';
+----
+<REGEX>:.*Partition \[dt=pipe\] of Hive table 'default.fixture_partition_dialects' is stored as csv with another dialect.*
+
+statement error
+SELECT count(*) FROM my_datalake.default.fixture_partition_formats;
+----
+<REGEX>:.*Partition \[dt=text\] of Hive table 'default.fixture_partition_formats' is stored as csv .*
+
+statement error
+SELECT v FROM my_datalake.default.fixture_partition_types WHERE dt = 'bigint';
+----
+<REGEX>:.*Partition \[dt=bigint\] of Hive table 'default.fixture_partition_types' declares column 'v' as 'bigint', which can not be read as the table's column 'v' of type 'int'.*
+
+query IIT
+SELECT id, name, dt FROM my_datalake.default.fixture_partition_formats WHERE dt <> 'text' ORDER BY id;
+----
+1	a	parquet
+2	b	parquet_alias
+
+query TI
+SELECT dt, id FROM my_datalake.default.fixture_partition_types ORDER BY id;
+----
+smallint	1
+bigint	2
+double	3
+string	4

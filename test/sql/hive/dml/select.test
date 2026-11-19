@@ -8,25 +8,28 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_impressions;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_impressions;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_pageviews;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_pageviews;
 
 # an impressions table: processid is stored as a string
 statement ok
-CREATE TABLE my_datalake.default.dml_impressions (processid VARCHAR, referrer VARCHAR, clicks INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_impressions (processid VARCHAR, referrer VARCHAR, clicks INTEGER);
 
 statement ok
-INSERT INTO my_datalake.default.dml_impressions VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_impressions VALUES
     ('1400', 'example.com', 3),
     ('1500', 'example.net', 5),
     ('1600', 'news.example.org', 2),
@@ -36,16 +39,16 @@ INSERT INTO my_datalake.default.dml_impressions VALUES
 
 # a partitioned table, for the WHERE year=2019 examples
 statement ok
-CREATE TABLE my_datalake.default.dml_pageviews (page VARCHAR, views BIGINT, year INTEGER) PARTITIONED BY (year);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_pageviews (page VARCHAR, views BIGINT, year INTEGER) PARTITIONED BY (year);
 
 statement ok
-INSERT INTO my_datalake.default.dml_pageviews VALUES ('home', 10, 2018), ('about', 4, 2019), ('home', 12, 2019);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_pageviews VALUES ('home', 10, 2018), ('about', 4, 2019), ('home', 12, 2019);
 
 #---------------------------------------------------------------------------
 # WHERE: BETWEEN, LIKE, IN
 #---------------------------------------------------------------------------
 query I
-SELECT DISTINCT processid FROM my_datalake.default.dml_impressions
+SELECT DISTINCT processid FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
 WHERE cast(processid as int) BETWEEN 1500 and 1800
 ORDER BY processid;
 ----
@@ -54,7 +57,7 @@ ORDER BY processid;
 1800
 
 query I
-SELECT referrer FROM my_datalake.default.dml_impressions
+SELECT referrer FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
 WHERE referrer LIKE '%.org'
 ORDER BY referrer;
 ----
@@ -63,7 +66,7 @@ example.org
 news.example.org
 
 query I
-SELECT count(*) FROM my_datalake.default.dml_impressions
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
 WHERE referrer IN ('example.com','example.net','example.org');
 ----
 4
@@ -73,7 +76,7 @@ WHERE referrer IN ('example.com','example.net','example.org');
 #---------------------------------------------------------------------------
 query I
 WITH org (processid, referrer) AS (
-    SELECT processid, referrer FROM my_datalake.default.dml_impressions WHERE referrer LIKE '%.org'
+    SELECT processid, referrer FROM my_datalake.{GLUE_TEST_DB}.dml_impressions WHERE referrer LIKE '%.org'
 )
 SELECT count(*) FROM org;
 ----
@@ -87,7 +90,7 @@ WITH RECURSIVE ids(n) AS (
     SELECT n + 100 FROM ids WHERE n < 1800
 )
 SELECT ids.n, count(i.referrer)
-FROM ids LEFT JOIN my_datalake.default.dml_impressions i ON cast(i.processid AS INTEGER) = ids.n
+FROM ids LEFT JOIN my_datalake.{GLUE_TEST_DB}.dml_impressions i ON cast(i.processid AS INTEGER) = ids.n
 GROUP BY ids.n
 ORDER BY ids.n;
 ----
@@ -100,7 +103,7 @@ ORDER BY ids.n;
 # select expressions: DISTINCT, relation.*, aliases
 #---------------------------------------------------------------------------
 query I
-SELECT DISTINCT processid FROM my_datalake.default.dml_impressions ORDER BY 1;
+SELECT DISTINCT processid FROM my_datalake.{GLUE_TEST_DB}.dml_impressions ORDER BY 1;
 ----
 1400
 1500
@@ -109,7 +112,7 @@ SELECT DISTINCT processid FROM my_datalake.default.dml_impressions ORDER BY 1;
 1900
 
 query IIII
-SELECT i.*, upper(referrer) AS shout FROM my_datalake.default.dml_impressions AS i WHERE processid = '1900';
+SELECT i.*, upper(referrer) AS shout FROM my_datalake.{GLUE_TEST_DB}.dml_impressions AS i WHERE processid = '1900';
 ----
 1900	blog.example.org	1	BLOG.EXAMPLE.ORG
 
@@ -118,14 +121,14 @@ SELECT i.*, upper(referrer) AS shout FROM my_datalake.default.dml_impressions AS
 #---------------------------------------------------------------------------
 query I
 SELECT count(*)
-FROM my_datalake.default.dml_impressions
+FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
 LEFT JOIN (VALUES ('example.com', 'US'), ('example.net', 'NL')) AS site(referrer, country) USING (referrer)
 WHERE country IS NULL;
 ----
 3
 
 query I
-SELECT count(*) FROM my_datalake.default.dml_impressions CROSS JOIN (VALUES (1), (2)) AS n(x);
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dml_impressions CROSS JOIN (VALUES (1), (2)) AS n(x);
 ----
 12
 
@@ -133,7 +136,7 @@ SELECT count(*) FROM my_datalake.default.dml_impressions CROSS JOIN (VALUES (1),
 # GROUP BY, HAVING, ROLLUP
 #---------------------------------------------------------------------------
 query II
-SELECT referrer, sum(clicks) FROM my_datalake.default.dml_impressions
+SELECT referrer, sum(clicks) FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
 GROUP BY referrer
 HAVING sum(clicks) > 2
 ORDER BY referrer;
@@ -143,7 +146,7 @@ example.net	5
 example.org	7
 
 query II
-SELECT processid, count(*) FROM my_datalake.default.dml_impressions
+SELECT processid, count(*) FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
 GROUP BY ROLLUP (processid)
 ORDER BY processid NULLS LAST;
 ----
@@ -158,16 +161,16 @@ NULL	6
 # UNION / INTERSECT / EXCEPT
 #---------------------------------------------------------------------------
 query I
-SELECT processid FROM my_datalake.default.dml_impressions WHERE referrer LIKE '%.org'
+SELECT processid FROM my_datalake.{GLUE_TEST_DB}.dml_impressions WHERE referrer LIKE '%.org'
 INTERSECT
-SELECT processid FROM my_datalake.default.dml_impressions WHERE clicks > 5;
+SELECT processid FROM my_datalake.{GLUE_TEST_DB}.dml_impressions WHERE clicks > 5;
 ----
 1800
 
 query I
-SELECT processid FROM my_datalake.default.dml_impressions
+SELECT processid FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
 EXCEPT
-SELECT processid FROM my_datalake.default.dml_impressions WHERE referrer LIKE '%.org'
+SELECT processid FROM my_datalake.{GLUE_TEST_DB}.dml_impressions WHERE referrer LIKE '%.org'
 ORDER BY 1;
 ----
 1400
@@ -175,9 +178,9 @@ ORDER BY 1;
 
 query I
 SELECT count(*) FROM (
-    SELECT processid FROM my_datalake.default.dml_impressions
+    SELECT processid FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
     UNION ALL
-    SELECT processid FROM my_datalake.default.dml_impressions
+    SELECT processid FROM my_datalake.{GLUE_TEST_DB}.dml_impressions
 );
 ----
 12
@@ -186,24 +189,24 @@ SELECT count(*) FROM (
 # ORDER BY, OFFSET, LIMIT
 #---------------------------------------------------------------------------
 query II
-SELECT processid, clicks FROM my_datalake.default.dml_impressions ORDER BY clicks DESC NULLS FIRST LIMIT 2;
+SELECT processid, clicks FROM my_datalake.{GLUE_TEST_DB}.dml_impressions ORDER BY clicks DESC NULLS FIRST LIMIT 2;
 ----
 1500	NULL
 1800	7
 
 # the default null ordering is NULLS LAST
 query II
-SELECT processid, clicks FROM my_datalake.default.dml_impressions ORDER BY clicks DESC LIMIT 1;
+SELECT processid, clicks FROM my_datalake.{GLUE_TEST_DB}.dml_impressions ORDER BY clicks DESC LIMIT 1;
 ----
 1800	7
 
 query II
-SELECT processid, referrer FROM my_datalake.default.dml_impressions ORDER BY processid, referrer OFFSET 4 ROWS LIMIT 1;
+SELECT processid, referrer FROM my_datalake.{GLUE_TEST_DB}.dml_impressions ORDER BY processid, referrer OFFSET 4 ROWS LIMIT 1;
 ----
 1800	example.org
 
 query I
-SELECT count(*) FROM (SELECT * FROM my_datalake.default.dml_impressions LIMIT ALL);
+SELECT count(*) FROM (SELECT * FROM my_datalake.{GLUE_TEST_DB}.dml_impressions LIMIT ALL);
 ----
 6
 
@@ -211,18 +214,18 @@ SELECT count(*) FROM (SELECT * FROM my_datalake.default.dml_impressions LIMIT AL
 # TABLESAMPLE
 #---------------------------------------------------------------------------
 query I
-SELECT count(*) FROM my_datalake.default.dml_impressions TABLESAMPLE SYSTEM (100%);
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dml_impressions TABLESAMPLE SYSTEM (100%);
 ----
 6
 
 query I
-SELECT count(*) FROM my_datalake.default.dml_impressions TABLESAMPLE BERNOULLI (100%);
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dml_impressions TABLESAMPLE BERNOULLI (100%);
 ----
 6
 
 # a percentage without a percent sign is read as a row count, which BERNOULLI does not accept
 statement error
-SELECT count(*) FROM my_datalake.default.dml_impressions TABLESAMPLE BERNOULLI (50);
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dml_impressions TABLESAMPLE BERNOULLI (50);
 ----
 
 #---------------------------------------------------------------------------
@@ -230,7 +233,7 @@ SELECT count(*) FROM my_datalake.default.dml_impressions TABLESAMPLE BERNOULLI (
 #---------------------------------------------------------------------------
 query III
 SELECT processid, u.part, u.ord
-FROM my_datalake.default.dml_impressions, UNNEST(string_split(referrer, '.')) WITH ORDINALITY AS u(part, ord)
+FROM my_datalake.{GLUE_TEST_DB}.dml_impressions, UNNEST(string_split(referrer, '.')) WITH ORDINALITY AS u(part, ord)
 WHERE processid = '1600'
 ORDER BY u.ord;
 ----
@@ -242,14 +245,14 @@ ORDER BY u.ord;
 # partitioned table
 #---------------------------------------------------------------------------
 query II
-SELECT page, views FROM my_datalake.default.dml_pageviews WHERE year = 2019 ORDER BY page;
+SELECT page, views FROM my_datalake.{GLUE_TEST_DB}.dml_pageviews WHERE year = 2019 ORDER BY page;
 ----
 about	4
 home	12
 
 # filename: the S3 location of the row's data file (see hive_scan/scan/test_filename_column.test)
 query II
-SELECT page, filename LIKE '%/dml_pageviews/year=2019/%' FROM my_datalake.default.dml_pageviews WHERE year = 2019 ORDER BY page;
+SELECT page, filename LIKE '%/dml_pageviews/year=2019/%' FROM my_datalake.{GLUE_TEST_DB}.dml_pageviews WHERE year = 2019 ORDER BY page;
 ----
 about	true
 home	true
@@ -263,7 +266,7 @@ Select 'O''Reilly';
 O'Reilly
 
 statement ok
-DROP TABLE my_datalake.default.dml_impressions;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_impressions;
 
 statement ok
-DROP TABLE my_datalake.default.dml_pageviews;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_pageviews;

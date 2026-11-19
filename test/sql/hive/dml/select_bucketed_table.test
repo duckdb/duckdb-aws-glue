@@ -14,36 +14,39 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
 SET glue_create_bucketed_tables = true;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucket_plain;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucket_plain;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucket_hashed;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucket_hashed;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucket_sorted;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucket_sorted;
 
 statement ok
-CREATE TABLE my_datalake.default.bucket_plain (id INTEGER, amount DOUBLE, region VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucket_plain (id INTEGER, amount DOUBLE, region VARCHAR)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read');
 
 statement ok
-CREATE TABLE my_datalake.default.bucket_hashed (id INTEGER, amount DOUBLE, region VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucket_hashed (id INTEGER, amount DOUBLE, region VARCHAR)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read', BucketColumns = ['id'], NumberOfBuckets = 4);
 
 # two bucket columns, a bucket count that does not match the file count, and both sort directions
 statement ok
-CREATE TABLE my_datalake.default.bucket_sorted (id INTEGER, amount DOUBLE, region VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucket_sorted (id INTEGER, amount DOUBLE, region VARCHAR)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read', BucketColumns = ['id', 'region'], NumberOfBuckets = 8,
       SortColumns = [{'Column': 'id', 'SortOrder': 1}, {'Column': 'region', 'SortOrder': 0}]);
 
@@ -72,52 +75,52 @@ TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000003_0' (FORMAT parquet);
 # wrong value.
 query I
 SELECT count(*) FROM (
-  (SELECT * FROM my_datalake.default.bucket_hashed)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed)
   EXCEPT ALL
-  (SELECT * FROM my_datalake.default.bucket_plain)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_plain)
 );
 ----
 0
 
 query I
 SELECT count(*) FROM (
-  (SELECT * FROM my_datalake.default.bucket_plain)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_plain)
   EXCEPT ALL
-  (SELECT * FROM my_datalake.default.bucket_hashed)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed)
 );
 ----
 0
 
 query I
 SELECT count(*) FROM (
-  (SELECT * FROM my_datalake.default.bucket_sorted)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_sorted)
   EXCEPT ALL
-  (SELECT * FROM my_datalake.default.bucket_plain)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_plain)
 );
 ----
 0
 
 query I
 SELECT count(*) FROM (
-  (SELECT * FROM my_datalake.default.bucket_plain)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_plain)
   EXCEPT ALL
-  (SELECT * FROM my_datalake.default.bucket_sorted)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_sorted)
 );
 ----
 0
 
 query IIII
-SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.default.bucket_plain;
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.{GLUE_TEST_DB}.bucket_plain;
 ----
 10	45	450.0	2
 
 query IIII
-SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.default.bucket_hashed;
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed;
 ----
 10	45	450.0	2
 
 query IIII
-SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.default.bucket_sorted;
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.{GLUE_TEST_DB}.bucket_sorted;
 ----
 10	45	450.0	2
 
@@ -126,30 +129,30 @@ SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.d
 #---------------------------------------------------------------------------
 # id = 7 lives in 000003_0 only: a bucket-aware engine would read one file, this reads all four
 query II
-SELECT id, amount FROM my_datalake.default.bucket_hashed WHERE id = 7;
+SELECT id, amount FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed WHERE id = 7;
 ----
 7	70.0
 
 query I
-SELECT count(*) FROM my_datalake.default.bucket_hashed WHERE id IN (0, 1, 2, 3);
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed WHERE id IN (0, 1, 2, 3);
 ----
 4
 
 query I
-SELECT count(*) FROM my_datalake.default.bucket_hashed WHERE id = 999;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed WHERE id = 999;
 ----
 0
 
 # the second bucket column of the two-column table
 query I
-SELECT count(*) FROM my_datalake.default.bucket_sorted WHERE region = 'r1';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bucket_sorted WHERE region = 'r1';
 ----
 5
 
 # a join of two bucketed tables is an ordinary hash join, and correct
 query II
-SELECT count(*), sum(h.amount) FROM my_datalake.default.bucket_hashed h
-JOIN my_datalake.default.bucket_sorted s USING (id);
+SELECT count(*), sum(h.amount) FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed h
+JOIN my_datalake.{GLUE_TEST_DB}.bucket_sorted s USING (id);
 ----
 10	450.0
 
@@ -164,34 +167,34 @@ COPY (SELECT 100 AS id, 1000.0 AS amount, 'r0' AS region UNION ALL SELECT 101, 1
 TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/violates_the_claim.parquet' (FORMAT parquet);
 
 query II
-SELECT count(*), sum(id) FROM my_datalake.default.bucket_hashed WHERE id >= 100;
+SELECT count(*), sum(id) FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed WHERE id >= 100;
 ----
 4	406
 
 query I
-SELECT count(*) FROM my_datalake.default.bucket_hashed WHERE id = 102;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed WHERE id = 102;
 ----
 1
 
 query I
 SELECT count(*) FROM (
-  (SELECT * FROM my_datalake.default.bucket_hashed)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed)
   EXCEPT ALL
-  (SELECT * FROM my_datalake.default.bucket_plain)
+  (SELECT * FROM my_datalake.{GLUE_TEST_DB}.bucket_plain)
 );
 ----
 0
 
 query IIII
-SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.default.bucket_hashed;
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.{GLUE_TEST_DB}.bucket_hashed;
 ----
 14	451	4510.0	2
 
 statement ok
-DROP TABLE my_datalake.default.bucket_plain;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bucket_plain;
 
 statement ok
-DROP TABLE my_datalake.default.bucket_hashed;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bucket_hashed;
 
 statement ok
-DROP TABLE my_datalake.default.bucket_sorted;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bucket_sorted;

@@ -14,6 +14,7 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
+class ExpressionFilter;
 
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
@@ -85,7 +86,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! Whether the optimizer gets the footers of every file for statistics: a small unpartitioned parquet scan
 	bool ReadsFooterStatistics() const;
 	//! A copy of 'bind_data' with the footers of all its files, or null when the scan has none. They are read when the
-	//! optimizer first asks, once per query for every scan of the table
+	//! optimizer first asks, once per query and table, or per scan when path-filtered
 	unique_ptr<MultiFileBindData> FooterStatisticsBindData(ClientContext &context,
 	                                                       const MultiFileBindData &bind_data) const;
 	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
@@ -93,9 +94,10 @@ struct HiveScanInfo : public TableFunctionInfo {
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+	void SetPartitions(shared_ptr<const vector<GluePartitionInfo>> partitions_p);
 
 private:
-	string FootersCacheKey() const;
+	string FootersCacheKey(bool path_filtered) const;
 	vector<shared_ptr<BaseUnionData>> ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
 	                                              idx_t max_files) const;
 
@@ -130,6 +132,11 @@ public:
 	FileExpandResult GetExpandResult() const override;
 	//! Prune on the table filters pushed in when the scan starts
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
+	//! Keep files matching filters that depend only on "$path" or filename
+	void SetPathFilters(vector<shared_ptr<ExpressionFilter>> filters);
+	bool HasPathFilters() const {
+		return !path_filters.empty();
+	}
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
 	//! The data files listed to measure the table: the first partition's, or the location of an unpartitioned table.
@@ -171,14 +178,16 @@ private:
 	bool IsRootListedDataFile(const OpenFileInfo &file, const string &root_prefix, idx_t comparable_root_size,
 	                          const vector<GluePartitionInfo> &partitions) const;
 	//! Add a listed file of the partition unless this list already has it. Called with
-	//! HiveScanInfo::file_partitions_lock held.
-	void AddFile(OpenFileInfo file, idx_t partition_index) const;
+	//! HiveScanInfo::file_partitions_lock held. 'partition_index' is invalid for an unpartitioned table.
+	void AddFile(OpenFileInfo file, optional_idx partition_index) const;
 
 private:
 	//! The context the list was created in; LazyMultiFileList keeps it as an optional_ptr that is const in const
 	//! members
 	ClientContext &client_context;
 	shared_ptr<HiveScanInfo> scan_info;
+	//! Filters whose only column is "$path" or filename, applied to listed files before any is opened
+	vector<shared_ptr<ExpressionFilter>> path_filters;
 	mutable annotated_mutex indexes_lock;
 	//! Null for every partition of the table until PartitionIndexes() resolves it
 	mutable shared_ptr<const vector<idx_t>> partition_indexes DUCKDB_GUARDED_BY(indexes_lock);
@@ -202,8 +211,8 @@ private:
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
-//! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan
-//! binds the same scan again
+//! Give 'function' the Hive scan's plan serialization. A deserialized plan binds the same scan again from it; a
+//! partitioned table's scan also needs the query's partition list, and is refused without it
 void SetHiveScanSerialization(TableFunction &function);
 
 //! MultiFileReader for Hive tables registered in Glue. It reads the files Glue's partitions point to (whatever their

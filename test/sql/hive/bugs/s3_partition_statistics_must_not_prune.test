@@ -17,22 +17,25 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.noprune;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.noprune;
 
 statement ok
-CREATE TABLE my_datalake.default.noprune (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.noprune (id INTEGER, k VARCHAR) PARTITIONED BY (k);
 
 # a value needing escaping in the path, a plain one, and a NULL
 statement ok
-INSERT INTO my_datalake.default.noprune VALUES (1, 'a b'), (2, 'plain'), (3, NULL);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.noprune VALUES (1, 'a b'), (2, 'plain'), (3, NULL);
 
 # every answer below with partition-key statistics off (default) and on
 foreach stats false true
@@ -41,7 +44,7 @@ statement ok
 SET glue_enable_partition_key_statistics = {stats};
 
 query IT
-SELECT id, k FROM my_datalake.default.noprune ORDER BY id;
+SELECT id, k FROM my_datalake.{GLUE_TEST_DB}.noprune ORDER BY id;
 ----
 1	a b
 2	plain
@@ -49,62 +52,62 @@ SELECT id, k FROM my_datalake.default.noprune ORDER BY id;
 
 # equality on the escaping-relevant value must find its row, however the catalog spells it
 query I
-SELECT id FROM my_datalake.default.noprune WHERE k = 'a b';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k = 'a b';
 ----
 1
 
 # IS NULL must find the __HIVE_DEFAULT_PARTITION__ row
 query I
-SELECT id FROM my_datalake.default.noprune WHERE k IS NULL;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k IS NULL;
 ----
 3
 
 # IS NOT NULL must not lose the others
 query I
-SELECT count(*) FROM my_datalake.default.noprune WHERE k IS NOT NULL;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k IS NOT NULL;
 ----
 2
 
 # a range that spans the real values must keep them all
 query I
-SELECT count(*) FROM my_datalake.default.noprune WHERE k >= 'a' AND k <= 'z';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k >= 'a' AND k <= 'z';
 ----
 2
 
 # and a filter that genuinely matches nothing is still allowed to return nothing
 query I
-SELECT count(*) FROM my_datalake.default.noprune WHERE k = 'definitely-not-there';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k = 'definitely-not-there';
 ----
 0
 
 # more operator shapes, because min/max reasoning is where each of these is decided differently and a
 # wrong range silently turns any of them into an empty result
 query I
-SELECT count(*) FROM my_datalake.default.noprune WHERE k IN ('a b', 'plain');
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k IN ('a b', 'plain');
 ----
 2
 
 query I
-SELECT count(*) FROM my_datalake.default.noprune WHERE k NOT IN ('plain');
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k NOT IN ('plain');
 ----
 1
 
 query I
-SELECT count(*) FROM my_datalake.default.noprune WHERE k <> 'plain';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k <> 'plain';
 ----
 1
 
 query I
-SELECT count(*) FROM my_datalake.default.noprune WHERE k LIKE 'a%';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k LIKE 'a%';
 ----
 1
 
 query I
-SELECT count(*) FROM my_datalake.default.noprune WHERE k BETWEEN 'a' AND 'b';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.noprune WHERE k BETWEEN 'a' AND 'b';
 ----
 1
 
 endloop
 
 statement ok
-DROP TABLE my_datalake.default.noprune;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.noprune;

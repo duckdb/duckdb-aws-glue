@@ -12,24 +12,27 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
 RESET experimental_glue_view_external_catalog_types;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.rr_nested;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.rr_nested;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.rr_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.rr_view;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.rr_refused;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.rr_refused;
 
 statement ok
 ATTACH '{TEST_DIR}/rr_catalog.duckdb' AS fx_ext;
@@ -42,7 +45,7 @@ statement ok
 SET experimental_glue_view_external_catalog_types = ['iceberg'];
 
 statement error
-CREATE VIEW my_datalake.default.rr_refused AS SELECT id FROM fx_ext.main.fx_items;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_refused AS SELECT id FROM fx_ext.main.fx_items;
 ----
 Glue view references "fx_ext.main.fx_items" in catalog "fx_ext" of type duckdb, which is not in experimental_glue_view_external_catalog_types: add 'duckdb' to it
 
@@ -58,23 +61,23 @@ statement ok
 CREATE TABLE fx_mem.main.fx_items AS SELECT 2 AS id;
 
 statement error
-CREATE VIEW my_datalake.default.rr_refused AS SELECT id FROM fx_mem.main.fx_items;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_refused AS SELECT id FROM fx_mem.main.fx_items;
 ----
 Glue view references "fx_mem.main.fx_items" in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden: no other session can read it
 
 # also in a PIVOT's FOR expression and in NEAREST BY (DuckDB itself refuses a subquery in USING KEY)
 statement error
-CREATE VIEW my_datalake.default.rr_refused AS SELECT * FROM (SELECT 1 AS k, 10 AS v) t PIVOT (max(v) FOR (k + (SELECT max(id) FROM fx_mem.main.fx_items)) IN (3));
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_refused AS SELECT * FROM (SELECT 1 AS k, 10 AS v) t PIVOT (max(v) FOR (k + (SELECT max(id) FROM fx_mem.main.fx_items)) IN (3));
 ----
 in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden
 
 statement error
-CREATE VIEW my_datalake.default.rr_refused AS WITH RECURSIVE r(k, v) USING KEY (k, max((SELECT max(id) FROM fx_mem.main.fx_items)) AS v) AS (SELECT 1, 1 UNION SELECT k, v FROM r WHERE false) SELECT * FROM r;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_refused AS WITH RECURSIVE r(k, v) USING KEY (k, max((SELECT max(id) FROM fx_mem.main.fx_items)) AS v) AS (SELECT 1, 1 UNION SELECT k, v FROM r WHERE false) SELECT * FROM r;
 ----
 Subqueries are not yet supported for aggregates in USING KEY
 
 statement error
-CREATE VIEW my_datalake.default.rr_refused AS SELECT * FROM (SELECT 1 AS a) l JOIN (SELECT 2 AS b) r NEAREST BY DISTANCE abs(a - b + (SELECT max(id) FROM fx_mem.main.fx_items));
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_refused AS SELECT * FROM (SELECT 1 AS a) l JOIN (SELECT 2 AS b) r NEAREST BY DISTANCE abs(a - b + (SELECT max(id) FROM fx_mem.main.fx_items));
 ----
 in catalog "fx_mem", which is in memory, temporary, a system catalog or hidden
 
@@ -82,21 +85,21 @@ statement ok
 CREATE TEMP TABLE fx_items AS SELECT 7 AS id;
 
 statement error
-CREATE VIEW my_datalake.default.rr_refused AS SELECT id FROM temp.main.fx_items;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_refused AS SELECT id FROM temp.main.fx_items;
 ----
 in catalog "temp", which is in memory, temporary, a system catalog or hidden
 
 statement error
-CREATE VIEW my_datalake.default.rr_refused AS SELECT * FROM system.main.duckdb_databases;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_refused AS SELECT * FROM system.main.duckdb_databases;
 ----
 in catalog "system", which is in memory, temporary, a system catalog or hidden
 
 # writing: listed, a DuckDB file
 statement ok
-CREATE VIEW my_datalake.default.rr_view AS SELECT id FROM fx_ext.main.fx_items;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_view AS SELECT id FROM fx_ext.main.fx_items;
 
 query I
-SELECT response.ViewExpandedText FROM glue_get_table_response('my_datalake.default.rr_view');
+SELECT response.ViewExpandedText FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.rr_view');
 ----
 SELECT id FROM "external:duckdb:fx_ext".main.fx_items
 
@@ -108,10 +111,10 @@ id
 
 # reading: listed, the same alias of the same type, also through a Glue view over it
 statement ok
-CREATE VIEW my_datalake.default.rr_nested AS SELECT id FROM my_datalake.default.rr_view;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_nested AS SELECT id FROM my_datalake.{GLUE_TEST_DB}.rr_view;
 
 query I
-SELECT id FROM my_datalake.default.rr_nested;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.rr_nested;
 ----
 1
 
@@ -126,12 +129,12 @@ statement ok
 SET experimental_glue_view_external_catalog_types = ['iceberg'];
 
 statement error
-SELECT id FROM my_datalake.default.rr_nested;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.rr_nested;
 ----
-Glue view "default.rr_view" reads catalog "external:duckdb:fx_ext" of type duckdb, which is not in experimental_glue_view_external_catalog_types: add 'duckdb' to it
+Glue view "{GLUE_TEST_DB}.rr_view" reads catalog "external:duckdb:fx_ext" of type duckdb, which is not in experimental_glue_view_external_catalog_types: add 'duckdb' to it
 
 statement error
-SELECT name FROM pragma_table_info('my_datalake.default.rr_view');
+SELECT name FROM pragma_table_info('my_datalake.{GLUE_TEST_DB}.rr_view');
 ----
 which is not in experimental_glue_view_external_catalog_types
 
@@ -151,12 +154,12 @@ statement ok con2
 SET experimental_glue_view_external_catalog_types = ['duckdb'];
 
 query I
-SELECT id FROM my_datalake.default.rr_view;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.rr_view;
 ----
 1
 
 query I con2
-SELECT id FROM my_datalake.default.rr_view;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.rr_view;
 ----
 1
 
@@ -165,7 +168,7 @@ RESET experimental_glue_view_external_catalog_types;
 
 # nothing listed by default
 statement error con2
-SELECT id FROM my_datalake.default.rr_view;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.rr_view;
 ----
 of type duckdb, which is not in experimental_glue_view_external_catalog_types
 
@@ -208,7 +211,7 @@ SELECT id FROM my_datalake.default.fixture_external_view_recursive;
 Table with name fx_items does not exist
 
 statement error
-CREATE VIEW my_datalake.default.rr_refused AS WITH RECURSIVE fx_items AS (SELECT id FROM fx_items UNION ALL SELECT id FROM fx_items WHERE false) SELECT id FROM fx_items;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.rr_refused AS WITH RECURSIVE fx_items AS (SELECT id FROM fx_items UNION ALL SELECT id FROM fx_items WHERE false) SELECT id FROM fx_items;
 ----
 Glue view references table "fx_items", which is not in the view's Glue catalog but in catalog "temp" (through the search path)
 
@@ -234,15 +237,15 @@ statement ok
 ATTACH '{TEST_DIR}/rr_catalog.duckdb' AS fx_ext (HIDDEN true);
 
 statement error
-SELECT id FROM my_datalake.default.rr_view;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.rr_view;
 ----
-Glue view "default.rr_view" reads "external:duckdb:fx_ext".main.fx_items: no usable catalog of that type is attached under that alias
+Glue view "{GLUE_TEST_DB}.rr_view" reads "external:duckdb:fx_ext".main.fx_items: no usable catalog of that type is attached under that alias
 
 statement ok
-DROP VIEW my_datalake.default.rr_nested;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.rr_nested;
 
 statement ok
-DROP VIEW my_datalake.default.rr_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.rr_view;
 
 statement ok
 RESET experimental_glue_view_external_catalog_types;

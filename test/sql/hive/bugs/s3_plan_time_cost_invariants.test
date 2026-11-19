@@ -11,21 +11,24 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plancost;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plancost;
 
 statement ok
-CREATE TABLE my_datalake.default.plancost (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plancost (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.plancost SELECT i, 'd' || (i % 4) FROM generate_series(1,4000) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.plancost SELECT i, 'd' || (i % 4) FROM generate_series(1,4000) t(i);
 
 # the listed prefix is in the URL's query string, which HTTP logs redact by default
 statement ok
@@ -38,7 +41,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT * FROM my_datalake.default.plancost;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost;
 
 # planning lists exactly one partition -- four partitions, one listing
 query I
@@ -55,22 +58,22 @@ AWSGlue.GetPartitions	1
 AWSGlue.GetTable	1
 
 statement ok
-DROP TABLE my_datalake.default.plancost;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plancost;
 
 # ----------------------------------------------------------------------------------------------------
 # THE GUARD: the sample must not grow with the table.
 # ----------------------------------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plancost_wide;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plancost_wide;
 
 statement ok
-CREATE TABLE my_datalake.default.plancost_wide (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plancost_wide (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.plancost_wide SELECT i, 'd' || (i % 20) FROM generate_series(1,4000) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.plancost_wide SELECT i, 'd' || (i % 20) FROM generate_series(1,4000) t(i);
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.plancost_wide');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.plancost_wide');
 ----
 20
 
@@ -78,7 +81,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT * FROM my_datalake.default.plancost_wide;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide;
 
 # still ONE listing, for five times the partitions: the scan reads at least hive_partition_listing_threshold
 # partitions, so the estimate takes the root listing the scan reuses rather than listing a partition on top
@@ -101,10 +104,10 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd3'
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd3'
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd7'
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide;
 
 # which scan samples (listing its one partition, or the table location) depends on the order the optimizer asks in
 query I
@@ -121,10 +124,10 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM (SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd3'
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide);
+SELECT count(*) FROM (SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd3'
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd7'
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide);
 ----
 8400
 
@@ -140,7 +143,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM (SELECT * FROM my_datalake.default.plancost_wide UNION ALL SELECT * FROM my_datalake.default.plancost_wide);
+SELECT count(*) FROM (SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide);
 ----
 8000
 
@@ -156,42 +159,42 @@ PRAGMA enable_optimizer;
 
 # and each scan scales that one sample by its own partitions: twenty partitions are 4,000 rows
 query II
-EXPLAIN SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd3'
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd3'
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd7'
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide;
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~4,000 rows.*
 
 # and one partition is 200: the equality is always true of the partition left, so it takes no selectivity
 query II
-EXPLAIN SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd3'
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide
-UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd3'
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd7'
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide
+UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide;
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~200 rows.*
 
 statement ok
-DROP TABLE my_datalake.default.plancost_wide;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plancost_wide;
 
 # ----------------------------------------------------------------------------------------------------
 # An unpartitioned table is one directory, its location, listed once per query whatever reads it.
 # ----------------------------------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plancost_flat;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plancost_flat;
 
 statement ok
-CREATE TABLE my_datalake.default.plancost_flat (id INTEGER, v VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plancost_flat (id INTEGER, v VARCHAR);
 
 statement ok
-INSERT INTO my_datalake.default.plancost_flat SELECT i, 'v' || (i % 7) FROM generate_series(1,1000) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.plancost_flat SELECT i, 'v' || (i % 7) FROM generate_series(1,1000) t(i);
 
 statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT * FROM my_datalake.default.plancost_flat UNION ALL SELECT * FROM my_datalake.default.plancost_flat;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_flat UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_flat;
 
 query I
 SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
@@ -203,7 +206,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM (SELECT * FROM my_datalake.default.plancost_flat UNION ALL SELECT * FROM my_datalake.default.plancost_flat);
+SELECT count(*) FROM (SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_flat UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_flat);
 ----
 2000
 
@@ -213,7 +216,7 @@ SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-ty
 1
 
 statement ok
-DROP TABLE my_datalake.default.plancost_flat;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plancost_flat;
 
 # ----------------------------------------------------------------------------------------------------
 # When the sample yields no row count, the fallback must not list either.
@@ -221,19 +224,19 @@ DROP TABLE my_datalake.default.plancost_flat;
 
 # avro has no bounded row count to sample, so planning lists nothing
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plancost_avro;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plancost_avro;
 
 statement ok
-CREATE TABLE my_datalake.default.plancost_avro (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'avro');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plancost_avro (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'avro');
 
 statement ok
-INSERT INTO my_datalake.default.plancost_avro SELECT i, 'd' || (i % 4) FROM generate_series(1,400) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.plancost_avro SELECT i, 'd' || (i % 4) FROM generate_series(1,400) t(i);
 
 statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT * FROM my_datalake.default.plancost_avro;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_avro;
 
 query I
 SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
@@ -242,20 +245,20 @@ SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-ty
 
 # partitions registered without files: the sample stops at the first empty one rather than listing the next
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plancost_empty;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plancost_empty;
 
 statement ok
-CREATE TABLE my_datalake.default.plancost_empty (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plancost_empty (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 loop i 0 4
 
 statement ok
-CALL glue_add_partition('my_datalake.default.plancost_empty', {dt: 'd{i}'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.plancost_empty', {dt: 'd{i}'});
 
 endloop
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.plancost_empty');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.plancost_empty');
 ----
 4
 
@@ -263,7 +266,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT * FROM my_datalake.default.plancost_empty;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_empty;
 
 query I
 SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
@@ -271,7 +274,7 @@ SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-ty
 1
 
 statement ok
-DROP TABLE my_datalake.default.plancost_avro;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plancost_avro;
 
 statement ok
-DROP TABLE my_datalake.default.plancost_empty;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plancost_empty;
