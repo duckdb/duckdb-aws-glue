@@ -1,0 +1,6 @@
+# name: benchmark/tpcds/planning/local_sf1/q77.benchmark
+# description: Plan (EXPLAIN) query 77 from the TPC-DS benchmark at SF1 on daily-partitioned parquet tables in the local Glue (moto) + S3
+# group: [local_sf1]
+
+template benchmark/tpcds/planning/local_sf1/tpcds_local_planning.benchmark.in
+QUERY_NUMBER_PADDED=77
