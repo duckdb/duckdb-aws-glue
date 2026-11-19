@@ -71,6 +71,23 @@ FROM duckdb_logs_parsed('GlueScan');
 ----
 true
 
+# A connection without a cool-down prefetches, and leaves the cool-down of the others in place (below)
+statement ok con2
+SET glue_partition_load_cooldown = 0;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT count(*) FROM throttled.fault_throttled_ppt.a JOIN throttled.fault_throttled_ppt.b USING (id);
+----
+2
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 2 of 2 tables
+
 # With retries the query gets through, its tables loaded one at a time during the cool-down
 statement ok
 RESET glue_max_retries;
@@ -88,6 +105,26 @@ SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan
 ----
 skipped 2 tables: Glue throttled a prefetch against this catalog less than 300 s ago
 
+# ':' is the same Glue catalog as its account: it shares the cool-down
+statement ok
+attach ':' as throttled_implicit (TYPE glue, ENDPOINT '{GLUE_FAULT_ENDPOINT}');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM throttled_implicit.fault_throttled_ppt.a JOIN throttled_implicit.fault_throttled_ppt.b USING (id);
+----
+2
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+skipped 2 tables: Glue throttled a prefetch against this catalog less than 300 s ago
+
+statement ok
+DETACH throttled_implicit;
+
 # The cool-down is per Glue catalog: the same tables through moto directly are prefetched
 statement ok
 CALL truncate_duckdb_logs();
@@ -101,6 +138,45 @@ query I
 SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
 ----
 loaded 2 of 2 tables
+
+# A failed prefetch stops the prefetch of its own catalog only: 'a_throttled' is prefetched before 'my_datalake'. On
+# its own connection, whose cache holds no partitions
+statement ok
+attach '{GLUE_CATALOG_ID}' as a_throttled (TYPE glue, ENDPOINT '{GLUE_FAULT_ENDPOINT}');
+
+statement ok con3
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok con3
+DESCRIBE a_throttled.fault_throttled_ppt.a;
+
+statement ok con3
+DESCRIBE a_throttled.fault_throttled_ppt.b;
+
+statement ok con3
+SET glue_partition_load_cooldown = 0;
+
+statement ok con3
+SET glue_max_retries = 0;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error con3
+SELECT count(*) FROM a_throttled.fault_throttled_ppt.a JOIN a_throttled.fault_throttled_ppt.b USING (id)
+JOIN my_datalake.fault_throttled_ppt.a m USING (id) JOIN my_datalake.fault_throttled_ppt.b n USING (id);
+----
+<REGEX>:.*GetPartitions 'fault_throttled_ppt\.(a|b)' failed:.*ThrottlingException.*
+
+query II
+SELECT count(*) FILTER (detail LIKE 'loaded 0 of 2 tables;%ThrottlingException%'),
+       count(*) FILTER (detail = 'loaded 2 of 2 tables')
+FROM duckdb_logs_parsed('GlueScan') WHERE event = 'prefetch';
+----
+1	1
+
+statement ok
+DETACH a_throttled;
 
 # A retried throttle that then succeeds is not a throttled prefetch
 statement ok

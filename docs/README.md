@@ -544,10 +544,11 @@ partitions of every partitioned table its scans read that no cache holds yet are
 requests), and the scans take them from the query's cache. Subqueries, `UNION ALL` branches and CTEs are included; a
 scan the optimizer removed before then (e.g. `WHERE 1 = 0`) is not. A table alone in its catalog is left to its scan.
 
-When a request fails, the requests not sent yet are not sent, and the tables not fetched are fetched by their scans
-as before, which raise the error if it happens again. When Glue throttled a request (`ThrottlingException`,
-`SlowDown`, HTTP 429), no partitions are prefetched from that Glue catalog (account, region and endpoint), in any
-connection, for `glue_partition_load_cooldown` seconds (default 300). Each prefetch is logged as a `GlueScan` event
+When a request fails, the requests of that catalog not sent yet are not sent (other catalogs still prefetch), and the
+tables not fetched are fetched by their scans as before, which raise the error if it happens again. When Glue throttled
+a request (`ThrottlingException`, `SlowDown`, HTTP 429), no partitions are prefetched from that Glue catalog (account,
+region and endpoint; for `ATTACH ':'` the account Glue reports) for `glue_partition_load_cooldown` seconds (default
+300), in any connection: each connection compares the time of the last throttled prefetch with its own setting. Each prefetch is logged as a `GlueScan` event
 `prefetch`, its `detail` naming how many tables it fetched and why the others were not.
 `SET glue_partition_load_parallelism = 1` turns the prefetch off.
 

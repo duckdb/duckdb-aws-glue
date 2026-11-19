@@ -51,12 +51,9 @@ public:
 		if (entry == since.end()) {
 			return false;
 		}
-		if (std::chrono::steady_clock::now() - entry->second <
-		    std::chrono::seconds(static_cast<int64_t>(cooldown_seconds))) {
-			return true;
-		}
-		since.erase(entry);
-		return false;
+		// kept past this caller's cooldown: another connection may wait longer
+		return std::chrono::steady_clock::now() - entry->second <
+		       std::chrono::seconds(static_cast<int64_t>(cooldown_seconds));
 	}
 
 private:
@@ -166,7 +163,7 @@ bool HivePartitionCache::PrefetchBatch(ClientContext &context, GlueCatalog &cata
 		auto cooldown = GetIdxSetting(context, "glue_partition_load_cooldown", DEFAULT_PARTITION_LOAD_COOLDOWN);
 		event.detail +=
 		    StringUtil::Format("; Glue throttled the requests: no prefetch against this catalog for %llu s", cooldown);
-		GlueThrottledCatalogs::Get().Throttled(catalog.GlueCatalogIdentity());
+		GlueThrottledCatalogs::Get().Throttled(catalog.GlueCatalogIdentity(context));
 	}
 	DUCKDB_LOG(context, GlueScanLogType, event);
 	return loaded == loads.size();
@@ -199,7 +196,22 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_pt
 			continue;
 		}
 		auto &catalog = GetGlueCatalog(context, tables[0].get());
-		if (GlueThrottledCatalogs::Get().CoolingDown(catalog.GlueCatalogIdentity(), cooldown)) {
+		string identity;
+		try {
+			identity = catalog.GlueCatalogIdentity(context);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			GlueScanEvent event(entry.first, 0, "prefetch");
+			event.Finish();
+			event.detail = StringUtil::Format("skipped %llu tables: the Glue catalog id is unknown: %s", tables.size(),
+			                                  error.RawMessage());
+			DUCKDB_LOG(context, GlueScanLogType, event);
+			continue;
+		}
+		if (GlueThrottledCatalogs::Get().CoolingDown(identity, cooldown)) {
 			GlueScanEvent event(entry.first, 0, "prefetch");
 			event.Finish();
 			event.detail = StringUtil::Format("skipped %llu tables: Glue throttled a prefetch against this catalog "
@@ -213,7 +225,7 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_pt
 			vector<reference<const HiveScanInfo>> batch(tables.begin() + static_cast<int64_t>(start),
 			                                            tables.begin() + static_cast<int64_t>(end));
 			if (!PrefetchBatch(context, catalog, batch)) {
-				return;
+				break;
 			}
 		}
 	}

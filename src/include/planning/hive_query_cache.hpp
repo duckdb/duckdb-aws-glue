@@ -43,6 +43,17 @@ struct HiveDirectoryListingEntry {
 	shared_ptr<MultiFileList> listing DUCKDB_GUARDED_BY(lock);
 };
 
+//! Recursive directory listings by directory, each fetched once, page by page as it is read
+class HiveDirectoryListings {
+public:
+	shared_ptr<MultiFileList> Get(ClientContext &context, const string &directory);
+	void Clear();
+
+private:
+	annotated_mutex lock;
+	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> listings DUCKDB_GUARDED_BY(lock);
+};
+
 //! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
 //! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
 //! every scan listing the same directory), the table samples and the footers read for statistics
@@ -75,11 +86,11 @@ public:
 
 private:
 	HivePartitionCache partitions;
+	HiveDirectoryListings directory_listings;
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveFooterEntry>> footers DUCKDB_GUARDED_BY(lock);
-	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
 	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;
 };
 
