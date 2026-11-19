@@ -82,10 +82,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("glue_list_tables_parallelism",
 	                          "Up to how many GetTables requests to run at the same time when a statement lists the "
-	                          "tables of many databases (SHOW ALL TABLES, duckdb_tables(), duckdb_columns()). Once "
-	                          "the statement has visited a second database, the tables of the other databases it "
-	                          "visits are listed together. 0 and 1 list one database after another. Default 8, at "
-	                          "most 32.",
+	                          "tables of many databases (SHOW ALL TABLES, duckdb_tables(), duckdb_columns()). From "
+	                          "the second database the statement visits on, the database it reaches is listed "
+	                          "together with the next ones it will visit. 0 and 1 list one database after another. "
+	                          "Default 8, at most 32.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(8));
 
 	config.AddExtensionOption("glue_debug_fail_list_tables",

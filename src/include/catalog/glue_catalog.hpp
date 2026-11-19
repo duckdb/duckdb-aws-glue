@@ -19,6 +19,7 @@ class GlueClient;
 
 namespace duckdb {
 class GlueTable;
+struct GluePrefetchedListing;
 
 //! The outcome of looking a table up before its schema (GlueCatalog::TryLookupTableBeforeSchema)
 enum class TableLookup : uint8_t {
@@ -85,7 +86,7 @@ public:
 	//! databases the catalog scan visits, glue_list_tables_parallelism at a time
 	void PrefetchTables(ClientContext &context, const string &schema_name);
 	//! Drop the listings a prefetch made for these databases that no scan used, as the transaction ends
-	void DropListings(const vector<string> &names);
+	void DropListings(const vector<GluePrefetchedListing> &listings);
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
 	//! The S3 location a new table gets when none is given: <default_location>/<database>/<table> when the catalog

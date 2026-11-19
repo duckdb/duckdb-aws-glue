@@ -306,15 +306,18 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 void GlueCatalog::RememberScannedSchemas(ClientContext &context, vector<string> names) {
 	auto cache = GlueTransactionCache::Of(context, *this);
 	if (cache) {
+		// in the order the catalog scans visit them (Catalog::GetAllSchemas)
+		std::sort(names.begin(), names.end(),
+		          [](const string &left, const string &right) { return Identifier(left) < Identifier(right); });
 		cache->SetScannedSchemas(std::move(names));
 	}
 }
 
-void GlueCatalog::DropListings(const vector<string> &names) {
-	for (auto &name : names) {
-		auto entry = schemas.GetCachedEntry(name);
+void GlueCatalog::DropListings(const vector<GluePrefetchedListing> &listings) {
+	for (auto &listing : listings) {
+		auto entry = schemas.GetCachedEntry(listing.database_name);
 		if (entry) {
-			entry->Cast<GlueSchemaEntry>().tables.DropListing();
+			entry->Cast<GlueSchemaEntry>().tables.DropListing(listing.stamp);
 		}
 	}
 }
@@ -333,6 +336,8 @@ void GlueCatalog::PrefetchTables(ClientContext &context, const string &schema_na
 	}
 	parallelism = MinValue<idx_t>(parallelism, GLUE_MAX_LIST_TABLES_PARALLELISM);
 	lock_guard<mutex> prefetch_guard(cache->PrefetchLock());
+	// taken before listing: a write that clears the cache meanwhile makes the listing stale
+	auto stamp = cache->Stamp();
 	vector<string> names;
 	// the first database is listed on its own, so that a statement on one database does not list the others
 	if (!cache->TakeSchemasToPrefetch(schema_name, names)) {
@@ -345,7 +350,7 @@ void GlueCatalog::PrefetchTables(ClientContext &context, const string &schema_na
 			break;
 		}
 		auto entry = schemas.GetCachedEntry(name);
-		bool needs_listing = entry && entry->Cast<GlueSchemaEntry>().tables.NeedsListing(cache->Stamp());
+		bool needs_listing = entry && entry->Cast<GlueSchemaEntry>().tables.NeedsListing(stamp);
 		if (to_list.empty() && !needs_listing) {
 			return;
 		}
@@ -357,11 +362,11 @@ void GlueCatalog::PrefetchTables(ClientContext &context, const string &schema_na
 		return;
 	}
 	auto listed = GlueAPI::GetTablesOfDatabases(context, *this, to_list, parallelism);
-	GlueTransaction::Get(context, *this).AddPrefetched(to_list);
+	GlueTransaction::Get(context, *this).AddPrefetched(to_list, stamp);
 	for (idx_t i = 0; i < to_list.size(); i++) {
 		auto entry = schemas.GetCachedEntry(to_list[i]);
 		if (listed[i].fetched && entry) {
-			entry->Cast<GlueSchemaEntry>().tables.SetListing(cache->Stamp(), std::move(listed[i].tables));
+			entry->Cast<GlueSchemaEntry>().tables.SetListing(stamp, std::move(listed[i].tables));
 		}
 	}
 }

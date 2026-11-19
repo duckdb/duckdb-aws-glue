@@ -68,12 +68,13 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 	}
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	vector<GlueTableInfo> tables;
-	if (prefetched && cache && prefetched_stamp == cache->Stamp()) {
-		tables = std::move(*prefetched);
+	auto listing = cache ? prefetched.find(cache->Stamp()) : prefetched.end();
+	if (listing != prefetched.end()) {
+		tables = std::move(listing->second);
 	} else {
 		tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName());
 	}
-	prefetched.reset();
+	prefetched.clear();
 	for (auto &table : tables) {
 		if (cache) {
 			// Without this the per reference GetEntry re-fetches every table this one request
@@ -106,12 +107,12 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 
 bool GlueTableSet::NeedsListing(idx_t stamp) {
 	lock_guard<mutex> guard(entry_lock);
-	return !is_loaded && !(prefetched && prefetched_stamp == stamp);
+	return !is_loaded && prefetched.find(stamp) == prefetched.end();
 }
 
-void GlueTableSet::DropListing() {
+void GlueTableSet::DropListing(idx_t stamp) {
 	lock_guard<mutex> guard(entry_lock);
-	prefetched.reset();
+	prefetched.erase(stamp);
 }
 
 void GlueTableSet::SetListing(idx_t stamp, vector<GlueTableInfo> tables) {
@@ -119,8 +120,7 @@ void GlueTableSet::SetListing(idx_t stamp, vector<GlueTableInfo> tables) {
 	if (is_loaded) {
 		return;
 	}
-	prefetched = make_uniq<vector<GlueTableInfo>>(std::move(tables));
-	prefetched_stamp = stamp;
+	prefetched[stamp] = std::move(tables);
 }
 
 void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache) {

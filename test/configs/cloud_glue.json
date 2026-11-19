@@ -75,6 +75,12 @@
 			]
 		},
 		{
+			"reason": "counts moto's GetTables requests per database listing, and lists every database of the catalog many times: an AWS catalog has other databases and may page differently",
+			"paths": [
+				"test/sql/hive/ddl/show_all_tables_parallel.test"
+			]
+		},
+		{
 			"reason": "AWS Glue stores column names in lower case ('Mixed Case' reads back as 'mixed case'); moto keeps them as given",
 			"paths": [
 				"test/sql/hive/ddl/alter_column/glue_replace_columns.test",

@@ -136,6 +136,12 @@ private:
 	idx_t scanned_table_scans DUCKDB_GUARDED_BY(scan_lock) = 0;
 };
 
+//! A listing GlueCatalog::PrefetchTables made: the database and the cache stamp it was made under
+struct GluePrefetchedListing {
+	string database_name;
+	idx_t stamp;
+};
+
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
 //! the connection's registered state, so two connections never share a cache. A rollback clears the caches held
 //! here: a failed statement must not leave metadata it resolved behind.
@@ -205,8 +211,8 @@ public:
 	//! The write's files are written and its partitions registered, nothing to undo
 	void CompleteHiveWrite(const string &write_id);
 	//! The databases a prefetch listed, whose listings no scan used are dropped when the transaction ends
-	void AddPrefetched(const vector<string> &names);
-	vector<string> TakePrefetched();
+	void AddPrefetched(const vector<string> &names, idx_t stamp);
+	vector<GluePrefetchedListing> TakePrefetched();
 
 public:
 	GlueCatalog &glue_catalog;
@@ -226,7 +232,7 @@ private:
 	annotated_mutex hive_write_lock;
 	unique_ptr<GlueHiveWrite> hive_write DUCKDB_GUARDED_BY(hive_write_lock);
 	annotated_mutex prefetched_lock;
-	vector<string> prefetched DUCKDB_GUARDED_BY(prefetched_lock);
+	vector<GluePrefetchedListing> prefetched DUCKDB_GUARDED_BY(prefetched_lock);
 };
 
 } // namespace duckdb

@@ -45,14 +45,16 @@ bool GlueTransactionCache::TakeSchemasToPrefetch(const string &current, vector<s
 	return true;
 }
 
-void GlueTransaction::AddPrefetched(const vector<string> &names) {
+void GlueTransaction::AddPrefetched(const vector<string> &names, idx_t stamp) {
 	annotated_lock_guard<annotated_mutex> guard(prefetched_lock);
-	prefetched.insert(prefetched.end(), names.begin(), names.end());
+	for (auto &name : names) {
+		prefetched.push_back(GluePrefetchedListing {name, stamp});
+	}
 }
 
-vector<string> GlueTransaction::TakePrefetched() {
+vector<GluePrefetchedListing> GlueTransaction::TakePrefetched() {
 	annotated_lock_guard<annotated_mutex> guard(prefetched_lock);
-	vector<string> result;
+	vector<GluePrefetchedListing> result;
 	std::swap(result, prefetched);
 	return result;
 }
@@ -78,6 +80,7 @@ void GlueTransaction::Commit() {
 			                   write->database_name, write->table_name);
 		}
 	}
+	cache->SetScannedSchemas(vector<string>());
 	glue_catalog.DropListings(TakePrefetched());
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
@@ -86,6 +89,7 @@ void GlueTransaction::Commit() {
 
 void GlueTransaction::Rollback() {
 	UndoHiveWrite();
+	cache->SetScannedSchemas(vector<string>());
 	glue_catalog.DropListings(TakePrefetched());
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
