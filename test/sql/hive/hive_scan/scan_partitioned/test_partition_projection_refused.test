@@ -78,7 +78,7 @@ AS SELECT 1 AS id, 'us' AS region;
 CREATE TABLE ... AS for Glue table 'pp_ctas' is not supported: with 'projection.enabled' on a partitioned table it would use Athena partition projection, which this extension cannot read yet. Set projection.enabled to false; the partitions the statement writes are then registered in Glue and readable
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'pp_ctas';
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'pp_ctas';
 ----
 0
 
@@ -95,7 +95,7 @@ DESCRIBE my_datalake.{GLUE_TEST_DB}.pp_events;
 uses Athena partition projection
 
 query I
-SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'pp_events' ORDER BY column_index;
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'pp_events' ORDER BY column_index;
 ----
 id
 region

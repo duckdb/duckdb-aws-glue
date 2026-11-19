@@ -59,7 +59,7 @@ CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_reused AS SELECT range AS id FROM r
 
 # nothing was created
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ctas_reused';
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ctas_reused';
 ----
 0
 

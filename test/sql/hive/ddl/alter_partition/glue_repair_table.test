@@ -214,24 +214,24 @@ DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_escaped;
 # a directory with an empty partition value is skipped, and does not stop the others from being registered
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.orders_repair_empty;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.orders_repair_empty;
 
 statement ok
-CREATE TABLE my_datalake.default.orders_repair_empty (id INTEGER, country VARCHAR) PARTITIONED BY (country);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_empty (id INTEGER, country VARCHAR) PARTITIONED BY (country);
 
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_empty/country=US/data.parquet';
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_empty/country=US/data.parquet';
 
 statement ok
-COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_empty/country=/data.parquet';
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_empty/country=/data.parquet';
 
 query II
-SELECT country, location FROM glue_repair_table('my_datalake.default.orders_repair_empty');
+SELECT country, location FROM glue_repair_table('my_datalake.{GLUE_TEST_DB}.orders_repair_empty');
 ----
-US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_empty/country=US
+US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_empty/country=US
 
 statement ok
-DROP TABLE my_datalake.default.orders_repair_empty;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_empty;
 
 #---------------------------------------------------------------------------
 # values are cast to the key type; hidden directories and values that do not cast are skipped

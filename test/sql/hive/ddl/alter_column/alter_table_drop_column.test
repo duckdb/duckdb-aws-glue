@@ -28,7 +28,7 @@ statement ok
 ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_column DROP COLUMN name;
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ddl_drop_column' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_drop_column' ORDER BY column_index;
 ----
 id	INTEGER
 score	DOUBLE
@@ -56,7 +56,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake_2 (
 );
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake_2' AND table_name = 'ddl_drop_column' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake_2' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_drop_column' ORDER BY column_index;
 ----
 id	INTEGER
 score	DOUBLE
@@ -89,7 +89,7 @@ statement ok
 ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_drop_bucket_column DROP COLUMN note;
 
 query I
-SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ddl_drop_bucket_column' ORDER BY column_index;
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_drop_bucket_column' ORDER BY column_index;
 ----
 id
 region
@@ -139,7 +139,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake_3 (
 );
 
 query I
-SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake_3' AND table_name = 'ddl_drop_column_csv' ORDER BY column_index;
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake_3' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_drop_column_csv' ORDER BY column_index;
 ----
 id
 name

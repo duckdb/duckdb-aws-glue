@@ -62,7 +62,7 @@ FROM range(4);
 
 query II
 SELECT column_name, data_type FROM duckdb_columns()
-WHERE database_name = 'my_datalake' AND table_name = 'ctas_partition_order'
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ctas_partition_order'
 ORDER BY column_index;
 ----
 id	BIGINT

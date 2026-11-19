@@ -105,7 +105,7 @@ CREATE TABLE my_datalake.{GLUE_TEST_DB}.undo_ctas AS SELECT i, CASE WHEN i = 7 T
 boom
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'undo_ctas';
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'undo_ctas';
 ----
 0
 
@@ -137,7 +137,7 @@ CREATE TABLE my_datalake.{GLUE_TEST_DB}.undo_ctas_marker AS SELECT i, CASE WHEN 
 boom
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'undo_ctas_marker';
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'undo_ctas_marker';
 ----
 0
 
@@ -193,7 +193,7 @@ statement ok
 RESET partitioned_write_max_open_files;
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'undo_ctas_partitioned';
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'undo_ctas_partitioned';
 ----
 0
 

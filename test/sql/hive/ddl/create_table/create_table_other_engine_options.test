@@ -73,7 +73,7 @@ Unknown CREATE TABLE option 'field_delimiter', use option 'delimiter' instead
 
 # none of the refused statements created the table
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'engine_opts';
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'engine_opts';
 ----
 0
 

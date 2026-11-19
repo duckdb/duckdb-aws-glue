@@ -54,7 +54,7 @@ statement ok
 DROP VIEW my_datalake.{GLUE_TEST_DB}.dv_view;
 
 query I
-SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'dv_view';
+SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'dv_view';
 ----
 0
 

@@ -34,7 +34,7 @@ statement ok
 COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.NAME IS 'it''s the name';
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' ORDER BY column_index;
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' ORDER BY column_index;
 ----
 id	the id
 name	it's the name
@@ -54,7 +54,7 @@ statement ok
 CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.comment_col', {id: 'BIGINT', name: 'VARCHAR', extra: 'VARCHAR'}, keep_comments := true);
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' ORDER BY column_index;
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' ORDER BY column_index;
 ----
 id	the id
 name	it's the name
@@ -66,7 +66,7 @@ statement ok
 COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.id IS NULL;
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' AND column_name = 'id';
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' AND column_name = 'id';
 ----
 id	NULL
 
@@ -81,7 +81,7 @@ statement ok
 COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.dt IS 'the partition date';
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' AND column_name = 'dt';
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' AND column_name = 'dt';
 ----
 dt	the partition date
 
@@ -96,7 +96,7 @@ statement ok
 COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.dt IS NULL;
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' AND column_name = 'dt';
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' AND column_name = 'dt';
 ----
 dt	NULL
 

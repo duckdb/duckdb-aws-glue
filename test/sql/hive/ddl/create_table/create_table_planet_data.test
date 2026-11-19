@@ -81,7 +81,7 @@ Venus	2	0.72	0.815	0.91	0.62	-243.0
 Earth	3	1.0	1.0	1.0	1.0	1.0
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'planet_data' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'planet_data' ORDER BY column_index;
 ----
 planet_name	VARCHAR
 order_from_sun	INTEGER

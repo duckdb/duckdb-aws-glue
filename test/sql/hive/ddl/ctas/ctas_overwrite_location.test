@@ -196,6 +196,6 @@ AS SELECT range AS id FROM range(2);
 <REGEX>:.*Could not convert string 'maybe' to BOOL.*
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name IN ('ow_table', 'ow_plain', 'ow_live', 'ow_parts');
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name IN ('ow_table', 'ow_plain', 'ow_live', 'ow_parts');
 ----
 0

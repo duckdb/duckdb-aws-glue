@@ -32,7 +32,7 @@ statement ok
 ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_alter_column ALTER COLUMN price TYPE DOUBLE;
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ddl_alter_column' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_alter_column' ORDER BY column_index;
 ----
 id	BIGINT
 price	DOUBLE
@@ -58,7 +58,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake_2 (
 );
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake_2' AND table_name = 'ddl_alter_column' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake_2' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_alter_column' ORDER BY column_index;
 ----
 id	BIGINT
 price	DOUBLE

@@ -72,13 +72,13 @@ SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_simple ORDER BY id;
 
 query IIII
 SELECT view_name, is_bound, column_count, tags['duckdb_view'] FROM duckdb_views()
-WHERE database_name = 'my_datalake' AND view_name = 'cv_simple';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_simple';
 ----
 cv_simple	true	2	true
 
 # the stored SQL is the query as DuckDB prints it; its unqualified names belong to the view's database
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_simple';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_simple';
 ----
 CREATE VIEW {GLUE_TEST_DB_SQL}.cv_simple AS SELECT id, amount FROM cv_orders WHERE (id > 1);
 
@@ -97,7 +97,7 @@ statement ok
 CREATE VIEW my_datalake.cv_schema.cv_in_schema AS SELECT id FROM my_datalake.{GLUE_TEST_DB}.cv_orders;
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_in_schema';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = 'cv_schema' AND view_name = 'cv_in_schema';
 ----
 CREATE VIEW cv_schema.cv_in_schema AS SELECT id FROM {GLUE_TEST_DB_SQL}.cv_orders;
 
@@ -108,7 +108,7 @@ statement ok
 DROP SCHEMA my_datalake.cv_schema;
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'cv_simple';
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'cv_simple';
 ----
 0
 
@@ -160,7 +160,7 @@ k	INTEGER
 a	DOUBLE
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_aliased';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_aliased';
 ----
 CREATE VIEW {GLUE_TEST_DB_SQL}.cv_aliased (k, a) AS SELECT id, amount FROM cv_orders;
 
@@ -169,7 +169,7 @@ statement ok
 CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_star(x, y) AS SELECT * FROM cv_orders;
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_star';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_star';
 ----
 CREATE VIEW {GLUE_TEST_DB_SQL}.cv_star (x, y, dt) AS SELECT * FROM cv_orders;
 
@@ -189,7 +189,7 @@ statement ok
 CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_union(n) AS SELECT id FROM cv_orders UNION ALL SELECT id + 10 FROM cv_orders;
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_union';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_union';
 ----
 CREATE VIEW {GLUE_TEST_DB_SQL}.cv_union (n) AS (SELECT id FROM cv_orders) UNION ALL (SELECT (id + 10) FROM cv_orders);
 
@@ -219,7 +219,7 @@ statement ok
 CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM t JOIN my_datalake.{GLUE_TEST_DB}.cv_orders o ON t.id = o.id WHERE o.dt = '2024-01-02';
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_mixed';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_mixed';
 ----
 CREATE VIEW {GLUE_TEST_DB_SQL}.cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM (t INNER JOIN {GLUE_TEST_DB_SQL}.cv_orders AS o ON ((t.id = o.id))) WHERE (o.dt = '2024-01-02');
 
@@ -277,7 +277,7 @@ statement ok
 CREATE SECURE VIEW my_datalake.{GLUE_TEST_DB}.cv_secure AS SELECT id FROM cv_orders;
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_secure';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_secure';
 ----
 CREATE SECURE VIEW {GLUE_TEST_DB_SQL}.cv_secure AS SELECT id FROM cv_orders;
 
@@ -295,7 +295,7 @@ SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_recursive;
 1
 
 query I
-SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'cv_%';
+SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name LIKE 'cv_%';
 ----
 9
 

@@ -65,7 +65,7 @@ statement ok
 CREATE TABLE IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.ddl_opts (other INTEGER);
 
 query I
-SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ddl_opts' ORDER BY column_index;
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_opts' ORDER BY column_index;
 ----
 id
 name
@@ -96,7 +96,7 @@ statement ok
 CREATE TABLE my_datalake.{GLUE_TEST_DB}."_mytable" (id INTEGER);
 
 query I
-SELECT table_name FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name IN ('table123', '_mytable') ORDER BY table_name;
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name IN ('table123', '_mytable') ORDER BY table_name;
 ----
 _mytable
 table123
@@ -179,7 +179,7 @@ CREATE TABLE my_datalake.{GLUE_TEST_DB}.ddl_opts_comment (id INTEGER, name VARCH
 WITH (comment = 'customer dim');
 
 query I
-SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'ddl_opts_comment';
+SELECT comment FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_opts_comment';
 ----
 customer dim
 

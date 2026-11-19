@@ -45,7 +45,7 @@ ALTER TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl ALTER COLUMN i TYPE BIGINT U
 
 # nothing changed
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'altusing_tbl' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'altusing_tbl' ORDER BY column_index;
 ----
 i	INTEGER
 j	INTEGER
@@ -64,7 +64,7 @@ statement ok
 ALTER TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl ALTER COLUMN j TYPE BIGINT;
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'altusing_tbl' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'altusing_tbl' ORDER BY column_index;
 ----
 i	BIGINT
 j	BIGINT

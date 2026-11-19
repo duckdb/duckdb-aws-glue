@@ -49,7 +49,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 );
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'structname_quoted' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'structname_quoted' ORDER BY column_index;
 ----
 "quoted col name"	STRUCT("quoted '""field name""" INTEGER)
 profile	STRUCT("Estimated Cardinality" VARCHAR, children STRUCT("Operator Type" VARCHAR, "it's" DECIMAL(2,1))[])

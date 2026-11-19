@@ -262,7 +262,7 @@ COMMIT;
 
 # nothing was changed in Glue
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'txn_alter' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'txn_alter' ORDER BY column_index;
 ----
 id	INTEGER
 name	VARCHAR

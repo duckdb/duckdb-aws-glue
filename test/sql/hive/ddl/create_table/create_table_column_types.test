@@ -80,7 +80,7 @@ attach '{GLUE_CATALOG_ID}' as verify_datalake (
 );
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'verify_datalake' AND table_name = 'ddl_types' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'verify_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_types' ORDER BY column_index;
 ----
 boolean_col	BOOLEAN
 tinyint_col	TINYINT

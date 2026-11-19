@@ -206,7 +206,7 @@ statement ok
 CREATE TABLE my_datalake.{GLUE_TEST_DB}.btl_t5 AS SELECT 5 AS id;
 
 query I con5
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'dl5' AND table_name IN ('btl_t4', 'btl_t5');
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'dl5' AND schema_name = '{GLUE_TEST_DB}' AND table_name IN ('btl_t4', 'btl_t5');
 ----
 2
 
