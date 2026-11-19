@@ -512,6 +512,7 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 	result->target = ResolveGlueTable(context, "glue_replace_columns", input.inputs[0], false);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_replace_columns");
 	auto &table = result->target.table;
+	table.ThrowIfAvroSchemaDefined("replace the columns of");
 	auto &columns = input.inputs[1];
 	if (!IsStringStruct(columns) || StructType::GetChildCount(columns.type()) == 0) {
 		throw BinderException("glue_replace_columns: the columns must be a struct of column name to type, e.g. "

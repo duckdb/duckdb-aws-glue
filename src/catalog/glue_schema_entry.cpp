@@ -875,6 +875,12 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		                   [&](const GlueColumn &column) { return StringUtil::CIEquals(column.name, name); });
 	};
 
+	auto type = alter_table.alter_table_type;
+	if (type == AlterTableType::ADD_COLUMN || type == AlterTableType::REMOVE_COLUMN ||
+	    type == AlterTableType::RENAME_COLUMN || type == AlterTableType::ALTER_COLUMN_TYPE) {
+		current.ThrowIfAvroSchemaDefined("change the columns of");
+	}
+
 	auto columns = current.columns;
 	switch (alter_table.alter_table_type) {
 	case AlterTableType::ADD_COLUMN: {
