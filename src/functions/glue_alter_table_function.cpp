@@ -199,8 +199,8 @@ private:
 		if (drops.empty()) {
 			return;
 		}
-		auto missing =
-		    GlueAPI::BatchDeletePartitions(context, *target.catalog, target.table.schema_name, target.table.name, drops);
+		auto missing = GlueAPI::BatchDeletePartitions(context, *target.catalog, target.table.schema_name,
+		                                              target.table.name, drops);
 		for (auto &values : missing) {
 			if (checked.find(values) != checked.end() && deleted.find(values) == deleted.end()) {
 				throw CatalogException("Partition [%s] does not exist in Glue table '%s': another client dropped it "
@@ -485,8 +485,8 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		case GlueAlterAction::RENAME:
 			batch.Flush();
-			state.results[i] = Value(
-			    GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name, *checked[i], step.new_values));
+			state.results[i] = Value(GlueAPI::RenamePartition(context, catalog, table.schema_name, table.name,
+			                                                  *checked[i], step.new_values));
 			break;
 		case GlueAlterAction::SET_PARTITION_LOCATION:
 			batch.Flush();
