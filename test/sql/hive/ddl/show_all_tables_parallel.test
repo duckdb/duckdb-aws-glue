@@ -304,6 +304,38 @@ WHERE one.parallelism = 1 AND m.calls = one.calls;
 statement ok
 RESET catalog_error_max_schemas;
 
+# Connections that scan the same databases at once use each other's listings, as one at a time they use each other's
+# loaded tables: together they list each database about once, not once per connection
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+concurrentloop i 0 8
+
+statement ok
+SET glue_list_tables_parallelism = 8;
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name LIKE 'plist_%';
+----
+12
+
+endloop
+
+query I
+SELECT get_tables_calls() < 2 * plist_count();
+----
+true
+
 statement error
 SET glue_list_tables_parallelism = -1;
 ----
