@@ -237,7 +237,7 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 
 optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> entry) {
 	lock_guard<mutex> guard(entry_lock);
-	// a listing made before this change must not undo it
+	// a pending listing predates this change
 	prefetched.reset();
 	auto name = entry->name.GetIdentifierName();
 	RetireEntry(name);

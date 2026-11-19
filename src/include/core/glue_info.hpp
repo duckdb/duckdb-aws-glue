@@ -164,7 +164,6 @@ private:
 	string GetOpenCSVCharacter(const string &key, const string &fallback) const;
 };
 
-//! The tables of one database as GlueAPI::GetTablesOfDatabases lists them
 struct GlueDatabaseTables {
 	bool fetched = false;
 	vector<GlueTableInfo> tables;

@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/show_all_tables_parallel.test
-# description: a statement that lists the tables of many databases lists each database once, together once it has visited a second one, whatever glue_list_tables_parallelism is
+# description: listing the tables of many databases at the same time requests each database once
 # group: [ddl]
 
 require httpfs
@@ -33,7 +33,7 @@ CREATE TABLE my_datalake.{schema}.t2 (id INTEGER);
 
 endloop
 
-# The GetTables requests since the last truncate_duckdb_logs(); the Glue operation is in the x-amz-target header
+# GetTables requests since the last truncate_duckdb_logs()
 statement ok
 CREATE MACRO get_tables_calls() AS (
     SELECT count(*) FROM duckdb_logs_parsed('HTTP')
@@ -56,14 +56,13 @@ SET redact_http_logs = false;
 statement ok
 CALL enable_logging('HTTP', storage='memory');
 
-# 0 and 1 list one database after another, a limit above the number of databases (and above the maximum) lists
-# every database once: whatever the setting, a statement requests the tables of each database it visits once
+# Whatever the setting, each database is listed once
 foreach parallelism 0 1 2 8 100
 
 statement ok
 SET glue_list_tables_parallelism = {parallelism};
 
-# a fresh attach before every statement: the tables are listed again
+# a fresh attach lists the tables again
 statement ok
 DETACH my_datalake;
 
@@ -110,7 +109,7 @@ SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND schema
 ----
 12
 
-# SHOW ALL TABLES requests the tables of one database a second time, also one database at a time
+# SHOW ALL TABLES lists one database a second time, also at parallelism 1
 query I
 SELECT get_tables_calls() BETWEEN database_count() AND database_count() + 1;
 ----
@@ -142,8 +141,7 @@ true
 
 endloop
 
-# A statement that visits one database lists only that one, and so does one that visits two: the others are listed
-# together once a second database is visited, and the second is the only one left to list
+# Statements that visit one or two databases list only those
 statement ok
 SET glue_list_tables_parallelism = 8;
 
@@ -183,9 +181,7 @@ SELECT get_tables_calls();
 ----
 2
 
-# A database whose listing failed together with the others is listed again when the scan reaches it. The failure is
-# injected after Glue answered, so the extra request shows that the others were listed together: one request per
-# database, plus one for the database listed again. One at a time there is no such request.
+# A database whose listing failed is listed again when the scan reaches it
 foreach parallelism 2 8
 
 statement ok
@@ -253,8 +249,7 @@ true
 statement ok
 SET glue_debug_fail_list_tables = '';
 
-# A missing table's suggestions search at most catalog_error_max_schemas databases and list only those, whatever
-# glue_list_tables_parallelism is
+# The suggestions for a missing table list only the databases they search
 statement ok
 CREATE TABLE missing_table_calls (parallelism INTEGER, calls INTEGER);
 
@@ -304,8 +299,7 @@ WHERE one.parallelism = 1 AND m.calls = one.calls;
 statement ok
 RESET catalog_error_max_schemas;
 
-# Connections that scan the same databases at once use each other's listings, as one at a time they use each other's
-# loaded tables: together they list each database about once, not once per connection
+# Concurrent connections share listings instead of each listing every database
 statement ok
 DETACH my_datalake;
 

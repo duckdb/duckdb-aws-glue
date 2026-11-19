@@ -96,7 +96,7 @@ public:
 				results[index].tables = std::move(tables);
 				results[index].fetched = true;
 			} catch (const GlueException &) {
-				// left unfetched: listing the database again reports the error where the scan reaches it
+				// the scan lists it again and reports the error there
 			}
 		}
 	}

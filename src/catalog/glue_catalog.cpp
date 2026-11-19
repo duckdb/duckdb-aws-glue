@@ -310,7 +310,7 @@ vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientConte
 	if (filters.GetSchemaOid() ||
 	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
 		auto scanned = Catalog::GetSchemasForScan(context, filters);
-		// what the scan visits is what the filters kept, not every database ScanSchemas listed
+		// the scan visits only what the filters kept
 		vector<string> names;
 		for (auto &schema : scanned) {
 			names.push_back(schema.get().name.GetIdentifierName());

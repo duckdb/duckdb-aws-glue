@@ -56,7 +56,7 @@ void GlueTablePrefetch::RememberScannedSchemas(ClientContext &context, vector<st
 	if (!cache) {
 		return;
 	}
-	// in the order the catalog scans visit them (Catalog::GetAllSchemas)
+	// the order Catalog::GetAllSchemas visits them in
 	std::sort(names.begin(), names.end(),
 	          [](const string &left, const string &right) { return Identifier(left) < Identifier(right); });
 	cache->prefetch_state.SetScannedSchemas(std::move(names));
@@ -74,12 +74,12 @@ void GlueTablePrefetch::PrefetchTables(ClientContext &context, const string &sch
 	}
 	parallelism = MinValue<idx_t>(parallelism, GLUE_MAX_LIST_TABLES_PARALLELISM);
 	vector<string> names;
-	// the first database is listed on its own, so that a statement on one database does not list the others
+	// a statement on one database lists only that one
 	if (!cache->prefetch_state.TakeSchemasToPrefetch(schema_name, names)) {
 		return;
 	}
 	lock_guard<mutex> guard(lock);
-	// taken before listing: a write meanwhile makes the listing stale
+	// before listing: a write meanwhile makes the listing stale
 	auto listing_generation = Generation();
 	auto &schemas = catalog.GetSchemas();
 	vector<string> to_list;

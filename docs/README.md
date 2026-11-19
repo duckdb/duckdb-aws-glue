@@ -340,13 +340,9 @@ With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the co
 per connection — two connections never share one — so another connection's write stays unseen until something clears
 this connection's cache: a write through it, a rollback, or DETACH.
 
-A statement that lists the tables of many databases (`SHOW ALL TABLES`, `duckdb_tables()`, `duckdb_columns()`) would
-make one `GetTables` call per database, one after the other. From the second database it visits on, it lists the
-database it reaches together with the next ones it will visit, `glue_list_tables_parallelism` at a time (8 by
-default, at most 32; 0 and 1 list them one after another). A statement that stops early, such as one that fails, lists
-at most `glue_list_tables_parallelism - 1` databases it never reaches. A database whose listing fails is listed again
-when the scan reaches it, so the error appears there. A statement that visits one database lists only that one, and the
-suggestions for a missing table list only the databases they search.
+`SHOW ALL TABLES`, `duckdb_tables()` and `duckdb_columns()` list the tables of the databases they visit
+`glue_list_tables_parallelism` at a time (8 by default, at most 32; 0 and 1 list them one after another), from the
+second database on. A database whose listing fails is listed again when the scan reaches it, so the error appears there.
 
 ## Views
 

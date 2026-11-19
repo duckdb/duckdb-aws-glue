@@ -77,7 +77,6 @@ public:
 	}
 
 public:
-	//! What the transaction's catalog scan visits and what was listed for it
 	GlueTablePrefetchState prefetch_state;
 
 private:

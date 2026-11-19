@@ -81,17 +81,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	config.AddExtensionOption("glue_list_tables_parallelism",
-	                          "Up to how many GetTables requests to run at the same time when a statement lists the "
-	                          "tables of many databases (SHOW ALL TABLES, duckdb_tables(), duckdb_columns()). From "
-	                          "the second database the statement visits on, the database it reaches is listed "
-	                          "together with the next ones it will visit. 0 and 1 list one database after another. "
-	                          "Default 8, at most 32.",
+	                          "How many databases to list at the same time when a statement lists the tables of many "
+	                          "(SHOW ALL TABLES, duckdb_tables()). 0 and 1 list one after another. At most 32.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(8));
 
 	config.AddExtensionOption("glue_debug_fail_list_tables",
-	                          "For tests: the name of a database whose tables, listed together with those of other "
-	                          "databases, are discarded after Glue returned them, so the scan lists that database "
-	                          "again. Empty, the default, injects nothing.",
+	                          "For tests: a database whose listing is discarded when listed together with others.",
 	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::SESSION, true);
 
 	config.AddExtensionOption("glue_max_retries",

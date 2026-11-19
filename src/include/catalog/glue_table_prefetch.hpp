@@ -9,20 +9,19 @@ namespace duckdb {
 class ClientContext;
 class GlueCatalog;
 
-//! A listing GlueTablePrefetch made: the database and the generation it was made under
 struct GluePrefetchedListing {
 	string database_name;
 	idx_t generation;
 };
 
-//! What a transaction's catalog scan visits and what GlueTablePrefetch listed for it (GlueTransactionCache)
+//! The catalog scan of a transaction, for GlueTablePrefetch
 class GlueTablePrefetchState {
 public:
 	void SetScannedSchemas(vector<string> names);
-	//! From the second database scan on: 'current' and the databases the catalog scan visits after it
+	//! From the second database scan on: 'current' and the databases after it
 	bool TakeSchemasToPrefetch(const string &current, vector<string> &names);
 	void AddPrefetched(const vector<string> &names, idx_t generation);
-	//! Forget the catalog scan, and return the listings made for it
+	//! Clears the state and returns the listings made
 	vector<GluePrefetchedListing> Reset();
 
 private:
@@ -32,18 +31,15 @@ private:
 	vector<GluePrefetchedListing> prefetched DUCKDB_GUARDED_BY(lock);
 };
 
-//! Lists the tables of the databases a catalog scan visits next together, glue_list_tables_parallelism at a time
+//! Lists the next databases a catalog scan visits in parallel
 class GlueTablePrefetch {
 public:
 	explicit GlueTablePrefetch(GlueCatalog &catalog);
 
-	//! The databases the catalog scan now under way visits
 	void RememberScannedSchemas(ClientContext &context, vector<string> names);
-	//! From the second database scan on, lists 'schema_name' together with the next databases the scan visits
 	void PrefetchTables(ClientContext &context, const string &schema_name);
-	//! Drop the listings made for the transaction that no scan used
 	void EndTransaction(GlueTablePrefetchState &state);
-	//! Tags the listings; new after every write through the catalog, from any connection
+	//! Bumped by every write through the catalog
 	idx_t Generation() const {
 		return generation;
 	}
@@ -54,7 +50,7 @@ public:
 private:
 	GlueCatalog &catalog;
 	atomic<idx_t> generation {0};
-	//! Held while listing, so that concurrent scans wait and find the listings made
+	//! Concurrent scans wait for a listing in progress
 	mutex lock;
 };
 
