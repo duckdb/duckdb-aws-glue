@@ -308,11 +308,24 @@ void GlueCatalog::RememberScannedSchemas(ClientContext &context, vector<string> 
 	if (cache) {
 		cache->SetScannedSchemas(std::move(names));
 	}
+	auto transaction = Transaction::TryGet(context, GetAttached());
+	if (transaction) {
+		DropListings(transaction->Cast<GlueTransaction>().TakePrefetched());
+	}
+}
+
+void GlueCatalog::DropListings(const vector<string> &names) {
+	for (auto &name : names) {
+		auto entry = schemas.GetCachedEntry(name);
+		if (entry) {
+			entry->Cast<GlueSchemaEntry>().tables.DropListing();
+		}
+	}
 }
 
 static constexpr idx_t GLUE_MAX_LIST_TABLES_PARALLELISM = 32;
 
-void GlueCatalog::PrefetchTables(ClientContext &context) {
+void GlueCatalog::PrefetchTables(ClientContext &context, const string &schema_name) {
 	Value setting;
 	idx_t parallelism = 1;
 	if (context.TryGetCurrentSetting("glue_list_tables_parallelism", setting) && !setting.IsNull()) {
@@ -326,13 +339,21 @@ void GlueCatalog::PrefetchTables(ClientContext &context) {
 	lock_guard<mutex> prefetch_guard(cache->PrefetchLock());
 	vector<string> names;
 	// the first database is listed on its own, so that a statement on one database does not list the others
-	if (!cache->TakeSchemasToPrefetch(names)) {
+	if (!cache->TakeSchemasToPrefetch(schema_name, names)) {
 		return;
 	}
+	// list this database and the next ones that need it, at most glue_list_tables_parallelism
 	vector<string> to_list;
 	for (auto &name : names) {
+		if (to_list.size() >= parallelism) {
+			break;
+		}
 		auto entry = schemas.GetCachedEntry(name);
-		if (entry && entry->Cast<GlueSchemaEntry>().tables.NeedsListing(cache->Stamp())) {
+		bool needs_listing = entry && entry->Cast<GlueSchemaEntry>().tables.NeedsListing(cache->Stamp());
+		if (to_list.empty() && !needs_listing) {
+			return;
+		}
+		if (needs_listing) {
 			to_list.push_back(name);
 		}
 	}
@@ -340,6 +361,7 @@ void GlueCatalog::PrefetchTables(ClientContext &context) {
 		return;
 	}
 	auto listed = GlueAPI::GetTablesOfDatabases(context, *this, to_list, parallelism);
+	GlueTransaction::Get(context, *this).AddPrefetched(to_list);
 	for (idx_t i = 0; i < to_list.size(); i++) {
 		auto entry = schemas.GetCachedEntry(to_list[i]);
 		if (listed[i].fetched && entry) {

@@ -109,6 +109,11 @@ bool GlueTableSet::NeedsListing(idx_t stamp) {
 	return !is_loaded && !(prefetched && prefetched_stamp == stamp);
 }
 
+void GlueTableSet::DropListing() {
+	lock_guard<mutex> guard(entry_lock);
+	prefetched.reset();
+}
+
 void GlueTableSet::SetListing(idx_t stamp, vector<GlueTableInfo> tables) {
 	lock_guard<mutex> guard(entry_lock);
 	if (is_loaded) {

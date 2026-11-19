@@ -33,6 +33,8 @@ public:
 	bool NeedsListing(idx_t stamp);
 	//! The listing a scan uses instead of asking Glue, made under the cache stamp 'stamp'
 	void SetListing(idx_t stamp, vector<GlueTableInfo> tables);
+	//! Drop a listing no scan used
+	void DropListing();
 
 	//! Build the catalog entry for a Glue table definition: a GlueView for a VIRTUAL_VIEW, else a GlueTable
 	unique_ptr<CatalogEntry> CreateEntry(const GlueTableInfo &table);

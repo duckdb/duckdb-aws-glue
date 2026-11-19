@@ -77,9 +77,9 @@ public:
 	}
 	//! The databases the catalog scan now under way visits, for GlueCatalog::PrefetchTables
 	void SetScannedSchemas(vector<string> names);
-	//! Called as a scan of a database's tables starts. From the second scan of a catalog scan on, and once per
-	//! catalog scan, returns true with the databases it visits
-	bool TakeSchemasToPrefetch(vector<string> &names);
+	//! Called as a scan of database 'current' starts: from the second scan of a catalog scan on, returns true with
+	//! 'current' and the databases the scan visits after it
+	bool TakeSchemasToPrefetch(const string &current, vector<string> &names);
 	//! Held while a prefetch lists, so that the other children of a union that scans at the same time wait for it
 	//! and find the listings made
 	mutex &PrefetchLock() {
@@ -134,7 +134,6 @@ private:
 	annotated_mutex scan_lock;
 	vector<string> scanned_schemas DUCKDB_GUARDED_BY(scan_lock);
 	idx_t scanned_table_scans DUCKDB_GUARDED_BY(scan_lock) = 0;
-	bool scanned_prefetched DUCKDB_GUARDED_BY(scan_lock) = false;
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
@@ -205,6 +204,9 @@ public:
 	optional_ptr<GlueHiveWrite> FindHiveWrite(const string &write_id);
 	//! The write's files are written and its partitions registered, nothing to undo
 	void CompleteHiveWrite(const string &write_id);
+	//! The databases a prefetch listed, whose listings are dropped if no scan uses them (GlueCatalog::DropListings)
+	void AddPrefetched(const vector<string> &names);
+	vector<string> TakePrefetched();
 
 public:
 	GlueCatalog &glue_catalog;
@@ -223,6 +225,8 @@ private:
 	GlueTransactionState transaction_state;
 	annotated_mutex hive_write_lock;
 	unique_ptr<GlueHiveWrite> hive_write DUCKDB_GUARDED_BY(hive_write_lock);
+	annotated_mutex prefetched_lock;
+	vector<string> prefetched DUCKDB_GUARDED_BY(prefetched_lock);
 };
 
 } // namespace duckdb
