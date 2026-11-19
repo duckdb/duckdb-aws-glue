@@ -135,6 +135,11 @@ jobs:
           # the merges since the last passing run on main
           fetch-depth: 0
 
+      # Before the build: a test that hardcodes the default database, lists the whole account or creates a database
+      # whose name the sharding cannot read would fail now and then, and only here
+      - name: Check that the tests can run as shards
+        run: python3 scripts/shard_tests.py --check
+
       # the build and its vcpkg dependencies otherwise fill the runner's disk
       - name: Free disk space
         uses: ./duckdb/.github/actions/cleanup_runner
