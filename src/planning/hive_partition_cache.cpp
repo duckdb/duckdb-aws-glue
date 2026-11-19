@@ -40,14 +40,14 @@ public:
 		static GlueThrottledCatalogs instance;
 		return instance;
 	}
-	void Throttled(const string &catalog) {
+	void Throttled(const string &catalog_identity) {
 		lock_guard<mutex> guard(lock);
-		since[catalog] = std::chrono::steady_clock::now();
+		since[catalog_identity] = std::chrono::steady_clock::now();
 	}
-	//! Whether Glue throttled a prefetch against 'catalog' less than 'cooldown_seconds' ago
-	bool CoolingDown(const string &catalog, idx_t cooldown_seconds) {
+	//! Whether Glue throttled a prefetch against 'catalog_identity' less than 'cooldown_seconds' ago
+	bool CoolingDown(const string &catalog_identity, idx_t cooldown_seconds) {
 		lock_guard<mutex> guard(lock);
-		auto entry = since.find(catalog);
+		auto entry = since.find(catalog_identity);
 		if (entry == since.end()) {
 			return false;
 		}
@@ -69,30 +69,18 @@ static GlueCatalog &GetGlueCatalog(ClientContext &context, const HiveScanInfo &s
 
 shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Resolve(ClientContext &context, GlueCatalog &catalog,
                                                                         const HiveScanInfo &scan, const Loader &load) {
-	auto entry =
-	    query_cache.GetGlueTable(HiveQueryCache::TableKey(scan.catalog_name, scan.database_name, scan.table_name));
-	// per table, so the Glue calls for different tables do not wait on each other
-	annotated_lock_guard<annotated_mutex> guard(entry->lock);
-	if (!entry->partitions) {
+	auto entry = query_cache.GetTable(scan.CacheKey());
+	return entry->partitions.GetOrLoad([&]() {
 		auto transaction_cache = GlueTransactionCache::Of(context, catalog);
-		entry->partitions =
-		    transaction_cache ? transaction_cache->GetPartitions(scan.database_name, scan.table_name, load) : load();
-	}
-	return entry->partitions;
+		return transaction_cache ? transaction_cache->GetPartitions(scan.database_name, scan.table_name, load) : load();
+	});
 }
 
 shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Get(ClientContext &context, const HiveScanInfo &scan) {
 	{
 		annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
-		if (!registered_scans.empty()) {
-			vector<shared_ptr<const HiveScanInfo>> scans;
-			for (auto &registered : registered_scans) {
-				auto alive = registered.lock();
-				if (alive) {
-					scans.push_back(std::move(alive));
-				}
-			}
-			registered_scans.clear();
+		auto scans = query_cache.Scans().TakeSince(scan_cursor);
+		if (!scans.empty()) {
 			Prefetch(context, scans);
 		}
 	}
@@ -103,17 +91,12 @@ shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Get(ClientContex
 	});
 }
 
-void HivePartitionCache::RegisterScan(const shared_ptr<const HiveScanInfo> &scan) {
-	annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
-	registered_scans.push_back(scan);
-}
-
 void HivePartitionCache::Clear() {
 	annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
-	registered_scans.clear();
+	scan_cursor = 0;
 }
 
-bool HivePartitionCache::PrefetchBatch(ClientContext &context, GlueCatalog &catalog, const string &identity,
+bool HivePartitionCache::PrefetchBatch(ClientContext &context, GlueCatalog &catalog, const string &catalog_identity,
                                        const vector<reference<const HiveScanInfo>> &batch) {
 	vector<GluePartitionLoad> loads;
 	vector<string> names;
@@ -163,7 +146,7 @@ bool HivePartitionCache::PrefetchBatch(ClientContext &context, GlueCatalog &cata
 		auto cooldown = GetIdxSetting(context, "glue_partition_load_cooldown");
 		event.detail +=
 		    StringUtil::Format("; Glue throttled the requests: no prefetch against this catalog for %llu s", cooldown);
-		GlueThrottledCatalogs::Get().Throttled(identity);
+		GlueThrottledCatalogs::Get().Throttled(catalog_identity);
 	}
 	DUCKDB_LOG(context, GlueScanLogType, event);
 	return loaded == loads.size();
@@ -179,6 +162,10 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_pt
 	unordered_set<string> seen;
 	for (auto &scan : scans) {
 		auto &info = *scan;
+		if (info.catalog_name.empty() || info.partition_keys.empty()) {
+			// unpartitioned, or a hive_scan of a location: nothing to ask Glue for
+			continue;
+		}
 		if (!seen.insert(HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name)).second) {
 			continue;
 		}
@@ -196,9 +183,9 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_pt
 			continue;
 		}
 		auto &catalog = GetGlueCatalog(context, tables[0].get());
-		string identity;
+		string catalog_identity;
 		try {
-			identity = catalog.GlueCatalogIdentity(context);
+			catalog_identity = catalog.GlueCatalogIdentity(context);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			if (error.Type() == ExceptionType::INTERRUPT) {
@@ -211,7 +198,7 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_pt
 			DUCKDB_LOG(context, GlueScanLogType, event);
 			continue;
 		}
-		if (GlueThrottledCatalogs::Get().CoolingDown(identity, cooldown)) {
+		if (GlueThrottledCatalogs::Get().CoolingDown(catalog_identity, cooldown)) {
 			GlueScanEvent event(entry.first, 0, "prefetch");
 			event.Finish();
 			event.detail = StringUtil::Format("skipped %llu tables: Glue throttled a prefetch against this catalog "
@@ -224,7 +211,7 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_pt
 			auto end = MinValue<idx_t>(start + parallelism, tables.size());
 			vector<reference<const HiveScanInfo>> batch(tables.begin() + static_cast<int64_t>(start),
 			                                            tables.begin() + static_cast<int64_t>(end));
-			if (!PrefetchBatch(context, catalog, identity, batch)) {
+			if (!PrefetchBatch(context, catalog, catalog_identity, batch)) {
 				break;
 			}
 		}

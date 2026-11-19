@@ -53,28 +53,34 @@ private:
 } // namespace
 
 shared_ptr<MultiFileList> HiveDirectoryListings::Get(ClientContext &context, const string &directory) {
-	shared_ptr<HiveDirectoryListingEntry> entry;
-	{
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto &slot = listings[directory];
-		if (!slot) {
-			slot = make_shared_ptr<HiveDirectoryListingEntry>();
-		}
-		entry = slot;
-	}
-	// lock per directory: GlobFileList fetches the first page right away, and listings of other directories must not
-	// wait behind it
-	annotated_lock_guard<annotated_mutex> guard(entry->lock);
-	if (!entry->listing) {
+	// per directory: GlobFileList fetches the first page right away, and listings of other directories must not wait
+	// behind it
+	return listings.Get(directory)->GetOrLoad([&]() {
 		auto &fs = FileSystem::GetFileSystem(context);
-		entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
-	}
-	return entry->listing;
+		return shared_ptr<MultiFileList>(ListLocation(fs, directory));
+	});
 }
 
-void HiveDirectoryListings::Clear() {
+void HiveScanRegistry::Register(const shared_ptr<const HiveScanInfo> &scan) {
 	annotated_lock_guard<annotated_mutex> guard(lock);
-	listings.clear();
+	scans.push_back(scan);
+}
+
+vector<shared_ptr<const HiveScanInfo>> HiveScanRegistry::TakeSince(idx_t &cursor) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	vector<shared_ptr<const HiveScanInfo>> result;
+	for (; cursor < scans.size(); cursor++) {
+		auto alive = scans[cursor].lock();
+		if (alive) {
+			result.push_back(std::move(alive));
+		}
+	}
+	return result;
+}
+
+void HiveScanRegistry::Clear() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	scans.clear();
 }
 
 void ClearHiveListingCache(ClientContext &context) {
@@ -93,45 +99,17 @@ string HiveQueryCache::TableKey(const string &catalog, const string &database, c
 }
 
 void HiveQueryCache::QueryEnd(ClientContext &context) {
+	scans.Clear();
 	partitions.Clear();
+	tables.Clear();
 	directory_listings.Clear();
 	annotated_lock_guard<annotated_mutex> guard(lock);
-	glue_tables.clear();
-	samples.clear();
-	footers.clear();
 	scan_count = 0;
 }
 
 idx_t HiveQueryCache::NextScanId() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	return ++scan_count;
-}
-
-shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &entry = glue_tables[key];
-	if (!entry) {
-		entry = make_shared_ptr<GlueTableEntry>();
-	}
-	return entry;
-}
-
-shared_ptr<HiveTableSampleEntry> HiveQueryCache::GetSample(const string &table) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &entry = samples[table];
-	if (!entry) {
-		entry = make_shared_ptr<HiveTableSampleEntry>();
-	}
-	return entry;
-}
-
-shared_ptr<HiveFooterEntry> HiveQueryCache::GetFooters(const string &key) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	auto &entry = footers[key];
-	if (!entry) {
-		entry = make_shared_ptr<HiveFooterEntry>();
-	}
-	return entry;
 }
 
 shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,

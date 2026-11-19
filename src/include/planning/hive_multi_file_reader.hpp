@@ -96,7 +96,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
 
 private:
-	string FootersCacheKey(bool path_filtered) const;
+	//! How the footers are read, which tells apart the footers of one table (HiveTableCacheEntry::footers)
+	string FootersVariant(bool path_filtered) const;
 	vector<shared_ptr<BaseUnionData>> ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
 	                                              idx_t max_files) const;
 

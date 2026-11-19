@@ -281,18 +281,16 @@ string HiveScanInfo::CacheKey() const {
 static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, const MultiFileBindData &bind_data,
                                                      const HiveMultiFileList &hive_list) {
 	auto &info = hive_list.ScanInfo();
-	auto entry = HiveQueryCache::Get(context)->GetSample(info.CacheKey());
-	annotated_lock_guard<annotated_mutex> guard(entry->lock);
-	if (!entry->sample) {
+	return HiveQueryCache::Get(context)->GetTable(info.CacheKey())->sample.GetOrLoad([&]() {
 		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
-		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
-		if (entry->sample->listed) {
-			event.files = entry->sample->files;
+		auto sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
+		if (sample->listed) {
+			event.files = sample->files;
 		}
 		event.Finish();
 		DUCKDB_LOG(context, GlueScanLogType, event);
-	}
-	return entry->sample;
+		return sample;
+	});
 }
 
 idx_t HiveFooterStatisticsMaxFiles(ClientContext &context) {
@@ -331,18 +329,18 @@ vector<shared_ptr<BaseUnionData>> HiveScanInfo::ReadFooters(ClientContext &conte
 	return std::move(reading->union_readers);
 }
 
-string HiveScanInfo::FootersCacheKey(bool path_filtered) const {
+string HiveScanInfo::FootersVariant(bool path_filtered) const {
 	// the footers are read with the scan's binary_as_string, which follows its schema
-	auto key = CacheKey();
+	string variant;
 	auto binary_as_string = reader_parameters.find("binary_as_string");
 	if (binary_as_string != reader_parameters.end()) {
-		key += "\x1f" + binary_as_string->second.ToString();
+		variant += "\x1f" + binary_as_string->second.ToString();
 	}
 	// Different path filters read different files, whose footer bounds cannot be shared between scans.
 	if (path_filtered) {
-		key += StringUtil::Format("\x1fpath_filters\x1f%llu", scan_id);
+		variant += StringUtil::Format("\x1fpath_filters\x1f%llu", scan_id);
 	}
-	return key;
+	return variant;
 }
 
 unique_ptr<MultiFileBindData> HiveScanInfo::FooterStatisticsBindData(ClientContext &context,
@@ -351,19 +349,13 @@ unique_ptr<MultiFileBindData> HiveScanInfo::FooterStatisticsBindData(ClientConte
 		return nullptr;
 	}
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
-	auto entry = HiveQueryCache::Get(context)->GetFooters(FootersCacheKey(hive_list.HasPathFilters()));
-	vector<shared_ptr<BaseUnionData>> footers;
-	{
-		annotated_lock_guard<annotated_mutex> guard(entry->lock);
-		if (!entry->read) {
-			entry->read = true;
-			auto max_files = HiveFooterStatisticsMaxFiles(context);
-			if (max_files > 0) {
-				entry->footers = ReadFooters(context, bind_data, max_files);
-			}
-		}
-		footers = entry->footers;
-	}
+	auto slot =
+	    HiveQueryCache::Get(context)->GetTable(CacheKey())->footers.Get(FootersVariant(hive_list.HasPathFilters()));
+	auto footers = *slot->GetOrLoad([&]() {
+		auto max_files = HiveFooterStatisticsMaxFiles(context);
+		return make_shared_ptr<const HiveFooters>(max_files > 0 ? ReadFooters(context, bind_data, max_files)
+		                                                        : HiveFooters());
+	});
 	if (footers.empty()) {
 		return nullptr;
 	}

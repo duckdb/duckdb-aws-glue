@@ -1255,9 +1255,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	                                  nullptr, bound_function, empty_ref);
 	HiveScanInfoScope scope(scan_info);
 	bind_data = scan_function.bind(context, bind_input, return_types, names);
-	if (!scan_info->catalog_name.empty() && !scan_info->partition_keys.empty()) {
-		HiveQueryCache::Get(context)->Partitions().RegisterScan(scan_info);
-	}
+	HiveQueryCache::Get(context)->Scans().Register(scan_info);
 	scan_function.SetName("hive_scan");
 	return scan_function;
 }

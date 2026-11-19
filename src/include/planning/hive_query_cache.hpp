@@ -13,50 +13,90 @@ class BaseUnionData;
 struct HiveScanInfo;
 struct HiveTableSample;
 
-//! What Glue said about a table the running query scans
-struct GlueTableEntry {
+//! A value the running query loads once: the first caller loads it while the others wait. A load that throws or
+//! returns null leaves the slot empty, so that the next caller loads it again
+template <class T>
+class HiveCacheSlot {
+public:
+	template <class LOAD>
+	shared_ptr<T> GetOrLoad(LOAD &&load) {
+		// per slot, so that loads of different values do not wait on each other
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		if (!value) {
+			value = load();
+		}
+		return value;
+	}
+
+private:
 	annotated_mutex lock;
-	//! Null until a scan of a partitioned table first needs them (HivePartitionCache)
-	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
+	shared_ptr<T> value DUCKDB_GUARDED_BY(lock);
 };
 
-//! The sample of a table, measured once per query for every scan of the table
-struct HiveTableSampleEntry {
+//! Entries by key, created on first use. The map's lock is only held to find an entry, never while it loads
+template <class V>
+class HiveCacheMap {
+public:
+	shared_ptr<V> Get(const string &key) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &entry = entries[key];
+		if (!entry) {
+			entry = make_shared_ptr<V>();
+		}
+		return entry;
+	}
+	void Clear() {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		entries.clear();
+	}
+
+private:
 	annotated_mutex lock;
-	//! Null until the first scan of the table measures it. Shared and immutable once set: every scan of the table in
-	//! the query (self joins, subqueries, a CTE inlined twice) reads the one sample, after the lock is released
-	shared_ptr<const HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<V>> entries DUCKDB_GUARDED_BY(lock);
 };
 
-//! The footers of a small unpartitioned parquet table's files, read once per query for every scan of the table
-struct HiveFooterEntry {
-	annotated_mutex lock;
-	//! Set by the first scan to ask; the footers stay empty when the table has none to give
-	bool read DUCKDB_GUARDED_BY(lock) = false;
-	vector<shared_ptr<BaseUnionData>> footers DUCKDB_GUARDED_BY(lock);
-};
+using HiveFooters = vector<shared_ptr<BaseUnionData>>;
 
-//! A directory's recursive listing, fetched a page at a time as it is read
-struct HiveDirectoryListingEntry {
-	annotated_mutex lock;
-	//! Null until some scan first asks for this directory
-	shared_ptr<MultiFileList> listing DUCKDB_GUARDED_BY(lock);
+//! What the running query learned about one table (HiveScanInfo::CacheKey), shared by every scan of it
+struct HiveTableCacheEntry {
+	//! Asked from Glue (HivePartitionCache)
+	HiveCacheSlot<const vector<GluePartitionInfo>> partitions;
+	//! Measured by the first scan of the table to ask, and read by the others (self joins, a CTE inlined twice)
+	HiveCacheSlot<const HiveTableSample> sample;
+	//! A small unpartitioned parquet table's footers, by how they are read (HiveScanInfo::FootersVariant); empty when
+	//! the table has none to give
+	HiveCacheMap<HiveCacheSlot<const HiveFooters>> footers;
 };
 
 //! Recursive directory listings by directory, each fetched once, page by page as it is read
 class HiveDirectoryListings {
 public:
 	shared_ptr<MultiFileList> Get(ClientContext &context, const string &directory);
+	void Clear() {
+		listings.Clear();
+	}
+
+private:
+	HiveCacheMap<HiveCacheSlot<MultiFileList>> listings;
+};
+
+//! The Hive scans bound in the running query, held weakly: a scan the optimizer removes is destroyed with its bind
+//! data and drops out. Each prefetch keeps its own cursor, so that it sees the scans bound since it last ran
+class HiveScanRegistry {
+public:
+	void Register(const shared_ptr<const HiveScanInfo> &scan);
+	//! The scans registered since 'cursor' that are still bound; moves 'cursor' past them
+	vector<shared_ptr<const HiveScanInfo>> TakeSince(idx_t &cursor);
 	void Clear();
 
 private:
 	annotated_mutex lock;
-	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> listings DUCKDB_GUARDED_BY(lock);
+	vector<weak_ptr<const HiveScanInfo>> scans DUCKDB_GUARDED_BY(lock);
 };
 
-//! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
-//! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
-//! every scan listing the same directory), the table samples and the footers read for statistics
+//! What the running query learned about the tables it scans, dropped when the query ends: per table its partitions
+//! (asked for once however often the query scans it), its sample and its footers, and the recursive listings of
+//! directories (shared by the estimate and every scan listing the same directory)
 class HiveQueryCache : public ClientContextState {
 public:
 	HiveQueryCache() : partitions(*this) {
@@ -68,15 +108,16 @@ public:
 
 	void QueryEnd(ClientContext &context) override;
 
+	HiveScanRegistry &Scans() {
+		return scans;
+	}
 	HivePartitionCache &Partitions() {
 		return partitions;
 	}
-	//! 'key' identifies the table (TableKey)
-	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
-	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
-	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
-	//! 'key' identifies the table and how its footers are read
-	shared_ptr<HiveFooterEntry> GetFooters(const string &key);
+	//! 'key' identifies the table: HiveScanInfo::CacheKey
+	shared_ptr<HiveTableCacheEntry> GetTable(const string &key) {
+		return tables.Get(key);
+	}
 	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
 	//! listing is kept beyond the query (glue_cache_listings)
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
@@ -85,12 +126,11 @@ public:
 	idx_t NextScanId();
 
 private:
+	HiveScanRegistry scans;
 	HivePartitionCache partitions;
+	HiveCacheMap<HiveTableCacheEntry> tables;
 	HiveDirectoryListings directory_listings;
 	annotated_mutex lock;
-	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
-	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
-	unordered_map<string, shared_ptr<HiveFooterEntry>> footers DUCKDB_GUARDED_BY(lock);
 	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;
 };
 
