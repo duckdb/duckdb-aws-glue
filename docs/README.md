@@ -549,6 +549,22 @@ descriptor with its columns, which the scan checks the partitions it reads again
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
 
+Each scan fetches its table's partitions when it first needs them: at filter pushdown when a filter on a partition
+key is pushed into it, otherwise when join ordering first estimates it. For a statement that scans several
+partitioned tables, that is one table after another. So when the first scan of a statement needs partitions, the
+partitions of every partitioned table its scans read that no cache holds yet are fetched concurrently,
+`glue_partition_load_parallelism` tables at a time (default 8; each with its `glue_get_partitions_segments`
+requests), and the scans take them from the query's cache. Subqueries, `UNION ALL` branches and CTEs are included; a
+scan the optimizer removed before then (e.g. `WHERE 1 = 0`) is not. A table alone in its catalog is left to its scan.
+
+When a request fails, the requests of that catalog not sent yet are not sent (other catalogs still prefetch), and the
+tables not fetched are fetched by their scans as before, which raise the error if it happens again. When Glue throttled
+a request (`ThrottlingException`, `SlowDown`, HTTP 429), no partitions are prefetched from that Glue catalog (account,
+region and endpoint; for `ATTACH ':'` the account Glue reports) for `glue_partition_load_cooldown` seconds (default
+300), in any connection: each connection compares the time of the last throttled prefetch with its own setting. Each prefetch is logged as a `GlueScan` event
+`prefetch`, its `detail` naming how many tables it fetched and why the others were not.
+`SET glue_partition_load_parallelism = 1` turns the prefetch off.
+
 ## Inspecting tables
 
 Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,
@@ -654,7 +670,9 @@ database with ThrottlingException, letting the SDK's retries through. A table na
 may not describe, as Lake Formation leaves it: GetTable on it fails with AccessDeniedException and GetTables leaves it
 out. Tests that need the proxy are skipped without it. It
 also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
-`link_db` as Glue does through a database resource link whose target is `target_db`.
+`link_db` as Glue does through a database resource link whose target is `target_db`, and `GLUE_ENDPOINT_ALIAS`: moto
+under another URL, which is another Glue catalog to the prefetch cool-down (`glue_partition_load_cooldown`), which
+outlives a test's database.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
