@@ -10,6 +10,8 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 SET active_grammar_extensions = ['glue_hive_ddl'];
 
@@ -17,18 +19,19 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.sql_customers;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.sql_customers;
 
 # a customers table, partitioned by zip and state
 statement ok
-CREATE TABLE my_datalake.default.sql_customers (id INTEGER, name VARCHAR, zip VARCHAR, state VARCHAR) PARTITIONED BY (zip, state);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.sql_customers (id INTEGER, name VARCHAR, zip VARCHAR, state VARCHAR) PARTITIONED BY (zip, state);
 
 statement ok
-INSERT INTO my_datalake.default.sql_customers VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.sql_customers VALUES
     (1, 'ann', '98040', 'WA'),
     (2, 'bob', '98101', 'WA');
 
@@ -40,70 +43,70 @@ COPY (SELECT 3 AS id, 'cid' AS name) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custda
 # ALTER TABLE customers PARTITION (zip = '98040', state = 'WA') SET LOCATION 's3://.../custdata/';
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.sql_customers PARTITION (zip = '98040', state = 'WA') SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/';
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_customers PARTITION (zip = '98040', state = 'WA') SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/';
 
 # stored without the trailing slash
 query III
-SELECT zip, state, location FROM glue_partitions('my_datalake.default.sql_customers') ORDER BY zip;
+SELECT zip, state, location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_customers') ORDER BY zip;
 ----
 98040	WA	{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata
-98101	WA	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_customers/zip=98101/state=WA
+98101	WA	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_customers/zip=98101/state=WA
 
 # the read follows the new location, the other partition is untouched
 query III
-SELECT id, name, zip FROM my_datalake.default.sql_customers ORDER BY id;
+SELECT id, name, zip FROM my_datalake.{GLUE_TEST_DB}.sql_customers ORDER BY id;
 ----
 2	bob	98101
 3	cid	98040
 
 # the partition must exist
 statement error
-ALTER TABLE my_datalake.default.sql_customers PARTITION (zip = '00000', state = 'WA') SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/';
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_customers PARTITION (zip = '00000', state = 'WA') SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/';
 ----
 does not exist
 
 # the spec must be complete
 statement error
-ALTER TABLE my_datalake.default.sql_customers PARTITION (zip = '98040') SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/';
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_customers PARTITION (zip = '98040') SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/';
 ----
 
 #---------------------------------------------------------------------------
 # ALTER TABLE customers SET LOCATION 's3://...';   (the table itself)
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.sql_customers SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved_customers';
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_customers SET LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved_customers';
 
 query I
-SELECT location FROM glue_get_table_response('my_datalake.default.sql_customers');
+SELECT location FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.sql_customers');
 ----
 {DEFAULT_S3_LOCATION}/{TEST_DIR}/moved_customers
 
 # existing partitions keep their locations
 query II
-SELECT zip, location FROM glue_partitions('my_datalake.default.sql_customers') ORDER BY zip;
+SELECT zip, location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_customers') ORDER BY zip;
 ----
 98040	{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata
-98101	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_customers/zip=98101/state=WA
+98101	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_customers/zip=98101/state=WA
 
 # new partitions land under the new table location
 statement ok
-INSERT INTO my_datalake.default.sql_customers VALUES (4, 'dee', '97201', 'OR');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.sql_customers VALUES (4, 'dee', '97201', 'OR');
 
 query II
-SELECT zip, location FROM glue_partitions('my_datalake.default.sql_customers') WHERE zip = '97201';
+SELECT zip, location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_customers') WHERE zip = '97201';
 ----
 97201	{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved_customers/zip=97201/state=OR
 
 statement ok
-ALTER TABLE my_datalake.default.sql_customers ADD PARTITION (zip = '97202', state = 'OR');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_customers ADD PARTITION (zip = '97202', state = 'OR');
 
 query II
-SELECT zip, location FROM glue_partitions('my_datalake.default.sql_customers') WHERE zip = '97202';
+SELECT zip, location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_customers') WHERE zip = '97202';
 ----
 97202	{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved_customers/zip=97202/state=OR
 
 query IIII
-SELECT id, name, zip, state FROM my_datalake.default.sql_customers ORDER BY id;
+SELECT id, name, zip, state FROM my_datalake.{GLUE_TEST_DB}.sql_customers ORDER BY id;
 ----
 2	bob	98101	WA
 3	cid	98040	WA
@@ -113,13 +116,14 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as verify_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query I
-SELECT location FROM glue_get_table_response('verify_datalake.default.sql_customers');
+SELECT location FROM glue_get_table_response('verify_datalake.{GLUE_TEST_DB}.sql_customers');
 ----
 {DEFAULT_S3_LOCATION}/{TEST_DIR}/moved_customers
 
 statement ok
-DROP TABLE my_datalake.default.sql_customers;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.sql_customers;

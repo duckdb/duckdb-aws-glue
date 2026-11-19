@@ -35,8 +35,11 @@ test-local:
 	env $$(scripts/glue_second_account.sh) AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 $(PYTHON) duckdb/scripts/ci/run_tests.py ./build/$(TEST_BUILD)/test/unittest --test-config test/configs/local_glue.json --workers 1 --batch-size $(TEST_BATCH_SIZE) --retry 2 'test/sql/*'
 # CLOUD_TEST_CONFIG: a copy of cloud_glue.json pointing at another account, as .github/workflows/CloudGlueTests.yml does
 CLOUD_TEST_CONFIG ?= test/configs/cloud_glue.json
+# CLOUD_TEST_LIST: a file with one test path per line to run instead of all of test/sql (scripts/shard_tests.py writes
+# them), as the shards of .github/workflows/CloudGlueTests.yml do
+CLOUD_TEST_LIST ?=
 test-cloud:
-	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-config $(CLOUD_TEST_CONFIG) 'test/sql/*'
+	AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 ./build/$(TEST_BUILD)/test/unittest --test-config $(CLOUD_TEST_CONFIG) $(if $(CLOUD_TEST_LIST),-f $(CLOUD_TEST_LIST),'test/sql/*')
 # The C++ tests of test/unittest, whose binary a normal build skips. Its Glue table tests only run against a local
 # GLUE_ENDPOINT, so they need `make glue-fixture` first
 test-cpp:

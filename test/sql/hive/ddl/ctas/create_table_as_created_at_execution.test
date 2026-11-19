@@ -10,33 +10,36 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
     TYPE glue,
-    ENDPOINT '{GLUE_ENDPOINT}'
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_plan_side_effect;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect;
 
 # EXPLAIN builds the physical CTAS plan but never executes it, so planning must
 # not call Glue CreateTable (PREPARE and a prepared statement's rebind plan the
 # same way).
 statement ok
-EXPLAIN CREATE TABLE my_datalake.default.ctas_plan_side_effect
+EXPLAIN CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect') AS
 SELECT range AS id, range * 2 AS twice FROM range(10);
 
 # No catalog entry was created by physical planning.
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.ctas_plan_side_effect');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect');
 ----
 does not exist
 
 # Validation still happens while planning, before any Glue call. In debug builds
 # this also verifies the diagnostic's format arguments.
 statement error
-CREATE TABLE my_datalake.default.ctas_duplicate_partition
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_duplicate_partition
 (id INTEGER, p VARCHAR) PARTITIONED BY (p, p)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_duplicate_partition');
 ----
@@ -45,10 +48,10 @@ PARTITIONED BY column 'p' is listed twice for table 'ctas_duplicate_partition'
 # CTAS input may interleave partition and data columns. Glue stores data columns
 # separately and partition keys in PARTITIONED BY order; Parquet stores only data columns.
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_partition_order;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_partition_order;
 
 statement ok
-CREATE TABLE my_datalake.default.ctas_partition_order
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_partition_order
 PARTITIONED BY (year, region)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_partition_order') AS
 SELECT CASE range % 2 WHEN 0 THEN 'east' ELSE 'west' END AS region,
@@ -59,7 +62,7 @@ FROM range(4);
 
 query II
 SELECT column_name, data_type FROM duckdb_columns()
-WHERE database_name = 'my_datalake' AND table_name = 'ctas_partition_order'
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ctas_partition_order'
 ORDER BY column_index;
 ----
 id	BIGINT
@@ -72,7 +75,7 @@ SELECT response.StorageDescriptor.Columns[1].Name::VARCHAR,
        response.StorageDescriptor.Columns[2].Name::VARCHAR,
        response.PartitionKeys[1].Name::VARCHAR,
        response.PartitionKeys[2].Name::VARCHAR
-FROM glue_get_table_response('my_datalake.default.ctas_partition_order');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_partition_order');
 ----
 id	payload	year	region
 
@@ -86,7 +89,7 @@ ORDER BY column_id, name;
 2	payload
 
 query IIII
-SELECT * FROM my_datalake.default.ctas_partition_order ORDER BY id;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.ctas_partition_order ORDER BY id;
 ----
 0	row-0	2020	east
 1	row-1	2021	west
@@ -95,30 +98,30 @@ SELECT * FROM my_datalake.default.ctas_partition_order ORDER BY id;
 
 # Executing the same statement creates the table once and writes its rows.
 statement ok
-CREATE TABLE my_datalake.default.ctas_plan_side_effect
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect') AS
 SELECT range AS id, range * 2 AS twice FROM range(10);
 
 query II
-SELECT count(*), sum(twice) FROM my_datalake.default.ctas_plan_side_effect;
+SELECT count(*), sum(twice) FROM my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect;
 ----
 10	90
 
 query I
 SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect'
-FROM glue_get_table_response('my_datalake.default.ctas_plan_side_effect');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect');
 ----
 true
 
 # IF NOT EXISTS on an existing table: core plans no query, so nothing is
 # written and the table keeps its rows and files.
 statement ok
-CREATE TABLE IF NOT EXISTS my_datalake.default.ctas_plan_side_effect
+CREATE TABLE IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect') AS
 SELECT 99 AS id, 99 AS twice;
 
 query II
-SELECT count(*), sum(twice) FROM my_datalake.default.ctas_plan_side_effect;
+SELECT count(*), sum(twice) FROM my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect;
 ----
 10	90
 
@@ -129,15 +132,15 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effec
 
 # IF NOT EXISTS on a missing table creates and fills it like a plain CTAS.
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_if_not_exists;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists;
 
 statement ok
-CREATE TABLE IF NOT EXISTS my_datalake.default.ctas_if_not_exists
+CREATE TABLE IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_if_not_exists') AS
 SELECT range AS id FROM range(3);
 
 query I
-SELECT sum(id) FROM my_datalake.default.ctas_if_not_exists;
+SELECT sum(id) FROM my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists;
 ----
 3
 
@@ -145,21 +148,21 @@ SELECT sum(id) FROM my_datalake.default.ctas_if_not_exists;
 # location expression is evaluated once: Glue and the writer use the same path,
 # so the table sees the row that CTAS wrote.
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_resolved_once;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_resolved_once;
 
 statement ok
-CREATE TABLE my_datalake.default.ctas_resolved_once
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_resolved_once
 WITH (location = concat('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_resolved_once-', uuid()::VARCHAR)) AS
 SELECT 42 AS id;
 
 query I
-SELECT count(*) FROM my_datalake.default.ctas_resolved_once;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.ctas_resolved_once;
 ----
 1
 
 query I
 SELECT starts_with(location, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_resolved_once-')
-FROM glue_get_table_response('my_datalake.default.ctas_resolved_once');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_resolved_once');
 ----
 true
 
@@ -171,7 +174,7 @@ statement ok
 BEGIN;
 
 statement error
-CREATE TABLE my_datalake.default.ctas_txn_failure
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_txn_failure
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_txn_failure') AS
 SELECT range AS id FROM range(10);
 ----
@@ -181,7 +184,7 @@ statement ok
 ROLLBACK;
 
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.ctas_txn_failure');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_txn_failure');
 ----
 does not exist
 
@@ -196,18 +199,19 @@ statement ok
 ATTACH '{GLUE_CATALOG_ID}' AS read_only_glue (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    READ_ONLY
+    READ_ONLY,
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement error
-CREATE TABLE read_only_glue.default.ctas_read_only_failure
+CREATE TABLE read_only_glue.{GLUE_TEST_DB}.ctas_read_only_failure
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_read_only_failure') AS
 SELECT range AS id FROM range(10);
 ----
 read-only mode
 
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.ctas_read_only_failure');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_read_only_failure');
 ----
 does not exist
 
@@ -220,10 +224,10 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_read_only_failu
 # mid-stream) rolls the statement back, and the cleanup drops the table it
 # created: Glue is left with no such table and core removes the files it wrote.
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_projection_error;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_projection_error;
 
 statement error
-CREATE TABLE my_datalake.default.ctas_projection_error
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_projection_error
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_projection_error') AS
 SELECT CASE WHEN range > 5 THEN error('ctas projection failure') ELSE range END AS id
 FROM range(50);
@@ -231,7 +235,7 @@ FROM range(50);
 ctas projection failure
 
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.ctas_projection_error');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_projection_error');
 ----
 does not exist
 
@@ -243,32 +247,32 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_projection_erro
 # A successful CREATE TABLE AS afterwards, in the same connection, is unaffected:
 # the failed statement's cleanup did not disturb later statements.
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_after_failure;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_after_failure;
 
 statement ok
-CREATE TABLE my_datalake.default.ctas_after_failure
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_after_failure
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_after_failure') AS
 SELECT range AS id FROM range(42);
 
 query I
-SELECT count(*) FROM my_datalake.default.ctas_after_failure;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.ctas_after_failure;
 ----
 42
 
 statement ok
-DROP TABLE my_datalake.default.ctas_after_failure;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_after_failure;
 
 # A failure after the Glue table is created but later in the same statement also rolls the table back: a
 # partitioned CTAS creates the table, writes the files, then registers the partitions, and a registration
 # failure (injected here) must leave no table behind.
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_partition_fail;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_partition_fail;
 
 statement ok
 SET glue_debug_fail_partition_registration = 'InvalidInputException:0';
 
 statement error
-CREATE TABLE my_datalake.default.ctas_partition_fail
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_partition_fail
 PARTITIONED BY (p)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_partition_fail') AS
 SELECT range AS id, range % 2 AS p FROM range(10);
@@ -279,7 +283,7 @@ statement ok
 SET glue_debug_fail_partition_registration = '';
 
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.ctas_partition_fail');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_partition_fail');
 ----
 does not exist
 
@@ -287,34 +291,34 @@ does not exist
 # existing table is never dropped. (Glue has no transactions, so there is no way to fail a later statement in the
 # same transaction; a CTAS always runs in its own auto-commit transaction.)
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_if_not_exists_keep;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists_keep;
 
 statement ok
-CREATE TABLE my_datalake.default.ctas_if_not_exists_keep
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists_keep
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_if_not_exists_keep') AS
 SELECT range AS id FROM range(7);
 
 statement ok
-CREATE TABLE IF NOT EXISTS my_datalake.default.ctas_if_not_exists_keep
+CREATE TABLE IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists_keep
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_if_not_exists_keep') AS
 SELECT range AS id FROM range(999);
 
 # The original table is untouched: still present and still the first definition's 7 rows.
 query I
-SELECT count(*) FROM my_datalake.default.ctas_if_not_exists_keep;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists_keep;
 ----
 7
 
 statement ok
-DROP TABLE my_datalake.default.ctas_if_not_exists_keep;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists_keep;
 
 # Each transaction has its own list of created tables, so one transaction's rollback never drops another
 # transaction's table. A committed CTAS survives a later, separate CTAS that fails and rolls back.
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_txn_keep;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_txn_keep;
 
 statement ok
-CREATE TABLE my_datalake.default.ctas_txn_keep
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_txn_keep
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_txn_keep') AS
 SELECT range AS id FROM range(5);
 
@@ -322,7 +326,7 @@ statement ok
 SET glue_debug_fail_partition_registration = 'InvalidInputException:0';
 
 statement error
-CREATE TABLE my_datalake.default.ctas_txn_fail
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_txn_fail
 PARTITIONED BY (p)
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_txn_fail') AS
 SELECT range AS id, range % 2 AS p FROM range(6);
@@ -334,18 +338,18 @@ SET glue_debug_fail_partition_registration = '';
 
 # The failed transaction dropped only its own table.
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.ctas_txn_fail');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_txn_fail');
 ----
 does not exist
 
 # The earlier committed table is untouched: still present with its 5 rows.
 query I
-SELECT count(*) FROM my_datalake.default.ctas_txn_keep;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.ctas_txn_keep;
 ----
 5
 
 statement ok
-DROP TABLE my_datalake.default.ctas_txn_keep;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_txn_keep;
 
 # The same holds when the table location comes from the ATTACH DEFAULT_LOCATION
 # instead of a CREATE TABLE option: planning derives <default>/<database>/<table>
@@ -354,52 +358,53 @@ statement ok
 ATTACH '{GLUE_CATALOG_ID}' AS default_location_glue (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS default_location_glue.default.ctas_default_location;
+DROP TABLE IF EXISTS default_location_glue.{GLUE_TEST_DB}.ctas_default_location;
 
 statement ok
-EXPLAIN CREATE TABLE default_location_glue.default.ctas_default_location AS
+EXPLAIN CREATE TABLE default_location_glue.{GLUE_TEST_DB}.ctas_default_location AS
 SELECT range AS id FROM range(5);
 
 statement error
-SELECT * FROM glue_get_table_response('default_location_glue.default.ctas_default_location');
+SELECT * FROM glue_get_table_response('default_location_glue.{GLUE_TEST_DB}.ctas_default_location');
 ----
 does not exist
 
 query I
-SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ctas_default_location/*');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ctas_default_location/*');
 ----
 0
 
 statement ok
-CREATE TABLE default_location_glue.default.ctas_default_location AS
+CREATE TABLE default_location_glue.{GLUE_TEST_DB}.ctas_default_location AS
 SELECT range AS id FROM range(5);
 
 query II
-SELECT count(*), sum(id) FROM default_location_glue.default.ctas_default_location;
+SELECT count(*), sum(id) FROM default_location_glue.{GLUE_TEST_DB}.ctas_default_location;
 ----
 5	10
 
 query I
-SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ctas_default_location'
-FROM glue_get_table_response('default_location_glue.default.ctas_default_location');
+SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ctas_default_location'
+FROM glue_get_table_response('default_location_glue.{GLUE_TEST_DB}.ctas_default_location');
 ----
 true
 
 statement ok
-DROP TABLE default_location_glue.default.ctas_default_location;
+DROP TABLE default_location_glue.{GLUE_TEST_DB}.ctas_default_location;
 
 statement ok
-DROP TABLE my_datalake.default.ctas_partition_order;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_partition_order;
 
 statement ok
-DROP TABLE my_datalake.default.ctas_plan_side_effect;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_plan_side_effect;
 
 statement ok
-DROP TABLE my_datalake.default.ctas_if_not_exists;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_if_not_exists;
 
 statement ok
-DROP TABLE my_datalake.default.ctas_resolved_once;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_resolved_once;

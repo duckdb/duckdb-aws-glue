@@ -11,21 +11,24 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.orders_rename;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.orders_rename;
 
 statement ok
-CREATE TABLE my_datalake.default.orders_rename (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.orders_rename (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
 
 statement ok
-INSERT INTO my_datalake.default.orders_rename VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.orders_rename VALUES
     (1, 10.0, '2014-05-14', 'IN'),
     (2, 20.0, '2014-05-16', 'IN');
 
@@ -33,34 +36,34 @@ INSERT INTO my_datalake.default.orders_rename VALUES
 # ALTER TABLE orders PARTITION (dt = '2014-05-14', country = 'IN') RENAME TO PARTITION (dt = '2014-05-15', country = 'IN');
 #---------------------------------------------------------------------------
 statement ok
-CALL glue_rename_partition('my_datalake.default.orders_rename', {dt: '2014-05-14', country: 'IN'}, {dt: '2014-05-15', country: 'IN'});
+CALL glue_rename_partition('my_datalake.{GLUE_TEST_DB}.orders_rename', {dt: '2014-05-14', country: 'IN'}, {dt: '2014-05-15', country: 'IN'});
 
 query II
-SELECT dt, country FROM glue_partitions('my_datalake.default.orders_rename') ORDER BY dt;
+SELECT dt, country FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.orders_rename') ORDER BY dt;
 ----
 2014-05-15	IN
 2014-05-16	IN
 
 # renaming changes the partition values only: the data stays where it is (the table is external)
 query I
-SELECT location FROM glue_partitions('my_datalake.default.orders_rename') WHERE dt = '2014-05-15';
+SELECT location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.orders_rename') WHERE dt = '2014-05-15';
 ----
-{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_rename/dt=2014-05-14/country=IN
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_rename/dt=2014-05-14/country=IN
 
 # the partition values of the rows come from Glue, not from the directory name
 query III
-SELECT id, dt, country FROM my_datalake.default.orders_rename ORDER BY id;
+SELECT id, dt, country FROM my_datalake.{GLUE_TEST_DB}.orders_rename ORDER BY id;
 ----
 1	2014-05-15	IN
 2	2014-05-16	IN
 
 query I
-SELECT id FROM my_datalake.default.orders_rename WHERE dt = '2014-05-15';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.orders_rename WHERE dt = '2014-05-15';
 ----
 1
 
 query I
-SELECT count(*) FROM my_datalake.default.orders_rename WHERE dt = '2014-05-14';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.orders_rename WHERE dt = '2014-05-14';
 ----
 0
 
@@ -69,19 +72,19 @@ SELECT count(*) FROM my_datalake.default.orders_rename WHERE dt = '2014-05-14';
 #---------------------------------------------------------------------------
 # the source partition must exist
 statement error
-CALL glue_rename_partition('my_datalake.default.orders_rename', {dt: '2014-05-14', country: 'IN'}, {dt: '2014-05-17', country: 'IN'});
+CALL glue_rename_partition('my_datalake.{GLUE_TEST_DB}.orders_rename', {dt: '2014-05-14', country: 'IN'}, {dt: '2014-05-17', country: 'IN'});
 ----
 does not exist
 
 # the target partition must not exist
 statement error
-CALL glue_rename_partition('my_datalake.default.orders_rename', {dt: '2014-05-15', country: 'IN'}, {dt: '2014-05-16', country: 'IN'});
+CALL glue_rename_partition('my_datalake.{GLUE_TEST_DB}.orders_rename', {dt: '2014-05-15', country: 'IN'}, {dt: '2014-05-16', country: 'IN'});
 ----
 already exists
 
 # RENAME PARTITION does not rename partition columns
 statement error
-CALL glue_rename_partition('my_datalake.default.orders_rename', {dt: '2014-05-15', country: 'IN'}, {day: '2014-05-15', country: 'IN'});
+CALL glue_rename_partition('my_datalake.{GLUE_TEST_DB}.orders_rename', {dt: '2014-05-15', country: 'IN'}, {day: '2014-05-15', country: 'IN'});
 ----
 
 # the second attach sees the renamed partition
@@ -89,14 +92,15 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as verify_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
-SELECT dt, country FROM glue_partitions('verify_datalake.default.orders_rename') ORDER BY dt;
+SELECT dt, country FROM glue_partitions('verify_datalake.{GLUE_TEST_DB}.orders_rename') ORDER BY dt;
 ----
 2014-05-15	IN
 2014-05-16	IN
 
 statement ok
-DROP TABLE my_datalake.default.orders_rename;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_rename;

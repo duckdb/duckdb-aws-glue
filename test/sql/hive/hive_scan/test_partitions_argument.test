@@ -8,29 +8,32 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.pa_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.pa_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.pa_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.pa_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.pa_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.pa_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15');
 
 query I
-SELECT count(*) FROM my_datalake.default.pa_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pa_orders;
 ----
 2
 
 statement error
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pa_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partition_keys := ['dt']);
 ----
@@ -38,7 +41,7 @@ SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orde
 
 # no registered partition reads nothing, like a Glue table without partitions
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pa_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partition_keys := ['dt'],
     partitions := []);
@@ -47,14 +50,14 @@ SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orde
 
 # without partition_keys an empty list is unpartitioned and reads the whole root
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pa_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partitions := []);
 ----
 2
 
 query II
-SELECT id, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+SELECT id, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pa_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partition_keys := ['dt'],
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
@@ -65,7 +68,7 @@ ORDER BY id;
 
 # the partition keys default to the fields of the first partition
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pa_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}]);
 ----
@@ -73,10 +76,10 @@ SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orde
 
 # neither argument: unpartitioned, the whole root is read
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pa_orders',
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pa_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'});
 ----
 2
 
 statement ok
-DROP TABLE my_datalake.default.pa_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.pa_orders;

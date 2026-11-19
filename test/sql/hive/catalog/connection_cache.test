@@ -8,21 +8,24 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.cc_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.cc_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.cc_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.cc_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.cc_orders VALUES (1, '2026-01-01'), (2, '2026-01-02');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.cc_orders VALUES (1, '2026-01-01'), (2, '2026-01-02');
 
 statement ok
 CREATE MACRO glue_calls(api) AS (
@@ -46,7 +49,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I con1
-SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.cc_orders ORDER BY id;
 ----
 1
 2
@@ -61,7 +64,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I con1
-SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.cc_orders ORDER BY id;
 ----
 1
 2
@@ -77,7 +80,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I con2
-SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.cc_orders ORDER BY id;
 ----
 1
 2
@@ -92,7 +95,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I con2
-SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.cc_orders ORDER BY id;
 ----
 1
 2
@@ -105,13 +108,13 @@ SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
 # a write through con2 (a new partition) invalidates con2's caches, not con1's: con1 still serves
 # its cached partition list and does not see the new partition, with no Glue call
 statement ok con2
-INSERT INTO my_datalake.default.cc_orders VALUES (3, '2026-01-03');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.cc_orders VALUES (3, '2026-01-03');
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I con1
-SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.cc_orders ORDER BY id;
 ----
 1
 2
@@ -123,7 +126,7 @@ SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
 
 # con2's own write invalidated con2's cache: its next read resolves fresh and sees the new partition
 query I con2
-SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.cc_orders ORDER BY id;
 ----
 1
 2
@@ -132,13 +135,13 @@ SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
 # a write through con1 is con1's own invalidation: the next con1 read resolves fresh and sees
 # everything, con2's partition included
 statement ok con1
-INSERT INTO my_datalake.default.cc_orders VALUES (4, '2026-01-01');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.cc_orders VALUES (4, '2026-01-01');
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I con1
-SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.cc_orders ORDER BY id;
 ----
 1
 2
@@ -155,12 +158,12 @@ SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
 # --- not reach does not serve the old catalog's metadata. Warm con1 and con2 first.
 
 query I con1
-SELECT count(*) FROM my_datalake.default.cc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.cc_orders;
 ----
 4
 
 query I con2
-SELECT count(*) FROM my_datalake.default.cc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.cc_orders;
 ----
 4
 
@@ -171,19 +174,20 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 # a partition registered through the default connection, after con1 and con2 warmed their caches
 statement ok
-INSERT INTO my_datalake.default.cc_orders VALUES (5, '2026-01-04');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.cc_orders VALUES (5, '2026-01-04');
 
 # served from the pre-DETACH cache this would be 4 rows and no Glue call
 statement ok
 CALL truncate_duckdb_logs();
 
 query I con1
-SELECT count(*) FROM my_datalake.default.cc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.cc_orders;
 ----
 5
 
@@ -196,7 +200,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I con2
-SELECT count(*) FROM my_datalake.default.cc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.cc_orders;
 ----
 5
 
@@ -206,4 +210,4 @@ SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
 1	1
 
 statement ok
-DROP TABLE my_datalake.default.cc_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.cc_orders;

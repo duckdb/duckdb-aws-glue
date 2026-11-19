@@ -8,26 +8,29 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bi_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bi_orders;
 
 # a partitioned Glue table: planning a scan over it drives the get_bind_info callback
 statement ok
-CREATE TABLE my_datalake.default.bi_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bi_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.bi_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.bi_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15');
 
 # the bound schema is the one Glue defines (data columns first, partition key last)
 query II
-SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.bi_orders);
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.{GLUE_TEST_DB}.bi_orders);
 ----
 id	INTEGER
 amount	DOUBLE
@@ -35,7 +38,7 @@ dt	VARCHAR
 
 # registering get_bind_info must not change what the catalog scan reads
 query III
-SELECT id, amount, dt FROM my_datalake.default.bi_orders ORDER BY id;
+SELECT id, amount, dt FROM my_datalake.{GLUE_TEST_DB}.bi_orders ORDER BY id;
 ----
 1	10.0	2016-05-14
 2	20.0	2016-05-15
@@ -43,13 +46,13 @@ SELECT id, amount, dt FROM my_datalake.default.bi_orders ORDER BY id;
 # a filtered scan forces LogicalGet::GetTable() during optimization, invoking get_bind_info
 # partition pruning to the matching partition is also unchanged; a callback fault would fail here.
 query I
-SELECT id FROM my_datalake.default.bi_orders WHERE dt = '2016-05-15';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bi_orders WHERE dt = '2016-05-15';
 ----
 2
 
 # hive_scan() has no catalog entry, so the delegated bind info carries the format reader's scan type with a null table
 query III
-SELECT id, amount, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bi_orders',
+SELECT id, amount, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/bi_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
 ORDER BY id;
@@ -59,24 +62,24 @@ ORDER BY id;
 
 # with the table reported, DML binds against it: a Glue table has no rowid, so the catalog refuses the statement
 statement error
-DELETE FROM my_datalake.default.bi_orders WHERE id = 1;
+DELETE FROM my_datalake.{GLUE_TEST_DB}.bi_orders WHERE id = 1;
 ----
 <REGEX>:Not implemented Error.*DELETE is not supported for Glue tables.*
 
 statement error
-UPDATE my_datalake.default.bi_orders SET amount = 0;
+UPDATE my_datalake.{GLUE_TEST_DB}.bi_orders SET amount = 0;
 ----
 <REGEX>:Not implemented Error.*UPDATE is not supported for Glue tables.*
 
 statement error
-MERGE INTO my_datalake.default.bi_orders USING (SELECT 1 AS id) s ON bi_orders.id = s.id WHEN MATCHED THEN DELETE;
+MERGE INTO my_datalake.{GLUE_TEST_DB}.bi_orders USING (SELECT 1 AS id) s ON bi_orders.id = s.id WHEN MATCHED THEN DELETE;
 ----
 <REGEX>:Not implemented Error.*MERGE INTO is not supported for Glue tables.*
 
 statement error
-SELECT rowid FROM my_datalake.default.bi_orders;
+SELECT rowid FROM my_datalake.{GLUE_TEST_DB}.bi_orders;
 ----
 <REGEX>:Binder Error.*Referenced column "rowid" not found.*
 
 statement ok
-DROP TABLE my_datalake.default.bi_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bi_orders;

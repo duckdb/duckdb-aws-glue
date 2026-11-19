@@ -8,30 +8,33 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.comment_col;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.comment_col;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.comment_col_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.comment_col_view;
 
 statement ok
-CREATE TABLE my_datalake.default.comment_col (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.comment_col (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-COMMENT ON COLUMN my_datalake.default.comment_col.id IS 'the id';
+COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.id IS 'the id';
 
 statement ok
-COMMENT ON COLUMN my_datalake.default.comment_col.NAME IS 'it''s the name';
+COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.NAME IS 'it''s the name';
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' ORDER BY column_index;
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' ORDER BY column_index;
 ----
 id	the id
 name	it's the name
@@ -39,19 +42,19 @@ dt	NULL
 
 # stored in Glue
 query I
-SELECT columns FROM glue_get_table_response('my_datalake.default.comment_col');
+SELECT columns FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.comment_col');
 ----
 [{'name': id, 'type': int, 'comment': the id}, {'name': name, 'type': string, 'comment': 'it\'s the name'}]
 
 # other column changes keep the comments (glue_replace_columns with keep_comments)
 statement ok
-ALTER TABLE my_datalake.default.comment_col ALTER COLUMN id TYPE BIGINT;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.comment_col ALTER COLUMN id TYPE BIGINT;
 
 statement ok
-CALL glue_replace_columns('my_datalake.default.comment_col', {id: 'BIGINT', name: 'VARCHAR', extra: 'VARCHAR'}, keep_comments := true);
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.comment_col', {id: 'BIGINT', name: 'VARCHAR', extra: 'VARCHAR'}, keep_comments := true);
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' ORDER BY column_index;
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' ORDER BY column_index;
 ----
 id	the id
 name	it's the name
@@ -60,53 +63,53 @@ dt	NULL
 
 # NULL removes the comment
 statement ok
-COMMENT ON COLUMN my_datalake.default.comment_col.id IS NULL;
+COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.id IS NULL;
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' AND column_name = 'id';
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' AND column_name = 'id';
 ----
 id	NULL
 
 # errors
 statement error
-COMMENT ON COLUMN my_datalake.default.comment_col.nope IS 'x';
+COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.nope IS 'x';
 ----
 nope
 
 # COMMENT ON COLUMN also works on partition keys
 statement ok
-COMMENT ON COLUMN my_datalake.default.comment_col.dt IS 'the partition date';
+COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.dt IS 'the partition date';
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' AND column_name = 'dt';
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' AND column_name = 'dt';
 ----
 dt	the partition date
 
 # the comment lives on Glue's PartitionKeys (not Columns)
 query I
-SELECT partition_keys FROM glue_get_table_response('my_datalake.default.comment_col');
+SELECT partition_keys FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.comment_col');
 ----
 [{'name': dt, 'type': string, 'comment': the partition date}]
 
 # NULL clears a partition-key comment
 statement ok
-COMMENT ON COLUMN my_datalake.default.comment_col.dt IS NULL;
+COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col.dt IS NULL;
 
 query II
-SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'comment_col' AND column_name = 'dt';
+SELECT column_name, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'comment_col' AND column_name = 'dt';
 ----
 dt	NULL
 
 statement ok
-CREATE VIEW my_datalake.default.comment_col_view AS SELECT 1 AS a;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.comment_col_view AS SELECT 1 AS a;
 
 statement error
-COMMENT ON COLUMN my_datalake.default.comment_col_view.a IS 'x';
+COMMENT ON COLUMN my_datalake.{GLUE_TEST_DB}.comment_col_view.a IS 'x';
 ----
 Comments on Glue views are not supported yet
 
 statement ok
-DROP VIEW my_datalake.default.comment_col_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.comment_col_view;
 
 statement ok
-DROP TABLE my_datalake.default.comment_col;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.comment_col;

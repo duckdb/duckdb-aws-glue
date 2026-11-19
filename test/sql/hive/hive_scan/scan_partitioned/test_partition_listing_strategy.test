@@ -8,22 +8,25 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ls_events;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ls_events;
 
 statement ok
-CREATE TABLE my_datalake.default.ls_events (v INTEGER, part INTEGER) PARTITIONED BY (part);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ls_events (v INTEGER, part INTEGER) PARTITIONED BY (part);
 
 # 1100 partitions of one file each: listing the table location takes two pages, one after the other
 statement ok
-INSERT INTO my_datalake.default.ls_events SELECT i, i % 1100 FROM range(2200) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ls_events SELECT i, i % 1100 FROM range(2200) t(i);
 
 statement ok
 SET redact_http_logs = false;
@@ -49,7 +52,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query II
-SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 511;
+SELECT count(*), sum(v) FROM my_datalake.{GLUE_TEST_DB}.ls_events WHERE part BETWEEN 500 AND 511;
 ----
 24	25332
 
@@ -63,7 +66,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query II
-SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 539;
+SELECT count(*), sum(v) FROM my_datalake.{GLUE_TEST_DB}.ls_events WHERE part BETWEEN 500 AND 539;
 ----
 80	85560
 
@@ -80,7 +83,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query II
-SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 539;
+SELECT count(*), sum(v) FROM my_datalake.{GLUE_TEST_DB}.ls_events WHERE part BETWEEN 500 AND 539;
 ----
 80	85560
 
@@ -94,7 +97,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query II
-SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 599;
+SELECT count(*), sum(v) FROM my_datalake.{GLUE_TEST_DB}.ls_events WHERE part BETWEEN 500 AND 599;
 ----
 200	219900
 
@@ -114,7 +117,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query II
-SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 511;
+SELECT count(*), sum(v) FROM my_datalake.{GLUE_TEST_DB}.ls_events WHERE part BETWEEN 500 AND 511;
 ----
 24	25332
 
@@ -130,5 +133,5 @@ statement ok
 RESET threads;
 
 statement ok
-DROP TABLE my_datalake.default.ls_events;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ls_events;
 
