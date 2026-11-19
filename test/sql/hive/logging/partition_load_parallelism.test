@@ -1,0 +1,506 @@
+# name: test/sql/hive/logging/partition_load_parallelism.test
+# description: when the first scan of a statement needs partitions, the partitions of the partitioned Glue tables its scans still read load concurrently (glue_partition_load_parallelism), and a failed or throttled load falls back to each scan loading its own table
+# group: [logging]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.plp_a;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.plp_b;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.plp_c;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.plp_flat;
+
+statement ok
+CREATE TABLE my_datalake.default.plp_a (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.plp_a VALUES (1, 'x'), (2, 'y'), (3, 'z');
+
+statement ok
+CREATE TABLE my_datalake.default.plp_b (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.plp_b VALUES (1, 'x'), (2, 'y'), (3, 'z');
+
+statement ok
+CREATE TABLE my_datalake.default.plp_c (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.plp_c VALUES (1, 'x'), (2, 'y'), (3, 'z');
+
+statement ok
+CREATE TABLE my_datalake.default.plp_flat (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.plp_flat VALUES (1), (2), (3);
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as plp (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
+
+# The GetPartitions requests loading one of these tables takes: one against moto, two against AWS (it ends a listing
+# with an empty page). With more than one segment AWS's count differs per table. The tests below count tables loaded,
+# a request count that is no multiple of it being NULL.
+statement ok
+SET glue_get_partitions_segments = 1;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a;
+----
+3
+
+statement ok
+CREATE TEMP TABLE requests_per_table AS
+SELECT count(*) AS n FROM glue_requests() WHERE operation = 'AWSGlue.GetPartitions';
+
+statement ok
+CREATE TEMP MACRO tables_loaded() AS (
+    SELECT CASE WHEN requests % n = 0 THEN requests // n END
+    FROM (SELECT count(*) AS requests FROM glue_requests() WHERE operation = 'AWSGlue.GetPartitions'), requests_per_table);
+
+# ---- which scans are prefetched ----------------------------------------------------------------------------------
+
+# A three-way join: the three tables load in one prefetch, before any scan is sampled, and each scan finds its table
+# loaded. The same GetPartitions requests are sent as without the prefetch.
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query IIII
+SELECT count(*) FILTER (event = 'prefetch'), max(partitions) FILTER (event = 'prefetch'),
+       max(detail) FILTER (event = 'prefetch'), count(*) FILTER (event = 'partitions')
+FROM duckdb_logs_parsed('GlueScan');
+----
+1	9	loaded 3 of 3 tables	3
+
+query I
+SELECT max(timestamp) FILTER (event = 'prefetch') <= min(timestamp) FILTER (event = 'sample')
+FROM duckdb_logs_parsed('GlueScan');
+----
+true
+
+query I
+SELECT tables_loaded();
+----
+3
+
+# At 1 each scan loads its own table: the same requests, one table after another
+statement ok
+SET glue_partition_load_parallelism = 1;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query II
+SELECT count(*) FILTER (event = 'prefetch'), count(*) FILTER (event = 'partitions')
+FROM duckdb_logs_parsed('GlueScan');
+----
+0	3
+
+query I
+SELECT tables_loaded();
+----
+3
+
+statement ok
+RESET glue_partition_load_parallelism;
+
+# Scans with a filter on a partition key, which load their partitions at filter pushdown, are prefetched as well
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) WHERE a.dt = 'x' AND b.dt IN ('x', 'y');
+----
+1
+
+query II
+SELECT max(detail) FILTER (event = 'prefetch'),
+       tables_loaded()
+FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 2 of 2 tables	2
+
+# A table scanned twice is loaded once, and a statement with a single partitioned table has nothing to prefetch
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a x JOIN plp.default.plp_a y USING (id) JOIN plp.default.plp_flat f USING (id);
+----
+3
+
+query II
+SELECT count(*) FILTER (event = 'prefetch'),
+       tables_loaded()
+FROM duckdb_logs_parsed('GlueScan');
+----
+0	1
+
+# The scans of subqueries, IN lists and UNION ALL branches
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a
+WHERE id IN (SELECT id FROM plp.default.plp_b)
+  AND id <= (SELECT max(id) FROM plp.default.plp_c);
+----
+3
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 3 of 3 tables
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (
+    SELECT id FROM plp.default.plp_a UNION ALL SELECT id FROM plp.default.plp_b UNION ALL SELECT id FROM plp.default.plp_c);
+----
+9
+
+query II
+SELECT max(detail) FILTER (event = 'prefetch'),
+       tables_loaded()
+FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 3 of 3 tables	3
+
+# A scan the optimizer removes before any scan needs partitions is not loaded, with the prefetch as without
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (
+    SELECT id FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id)
+    UNION ALL
+    SELECT id FROM plp.default.plp_c WHERE 1 = 0);
+----
+3
+
+query II
+SELECT max(detail) FILTER (event = 'prefetch'),
+       tables_loaded()
+FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 2 of 2 tables	2
+
+statement ok
+SET glue_partition_load_parallelism = 1;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (
+    SELECT id FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id)
+    UNION ALL
+    SELECT id FROM plp.default.plp_c WHERE 1 = 0);
+----
+3
+
+query I
+SELECT tables_loaded();
+----
+2
+
+statement ok
+RESET glue_partition_load_parallelism;
+
+# Without the optimizer the first scan needs partitions when the query runs, and the prefetch runs then; EXPLAIN
+statement ok
+SET enable_optimizer = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id);
+----
+3
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 2 of 2 tables
+
+statement ok
+RESET enable_optimizer;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+EXPLAIN SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id);
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 2 of 2 tables
+
+# Tables of different attaches are prefetched per catalog: one table each leaves nothing to prefetch
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN my_datalake.default.plp_b b USING (id);
+----
+3
+
+query II
+SELECT count(*) FILTER (event = 'prefetch'),
+       tables_loaded()
+FROM duckdb_logs_parsed('GlueScan');
+----
+0	2
+
+# glue_partition_load_parallelism tables at a time
+statement ok
+SET glue_partition_load_parallelism = 2;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query I
+SELECT list(detail ORDER BY timestamp) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+[loaded 2 of 2 tables, loaded 1 of 1 tables]
+
+statement ok
+RESET glue_partition_load_parallelism;
+
+# ---- failures fall back to each scan loading its table -----------------------------------------------------------
+
+# The prefetch fails: each scan loads its table as at 1, and the answer is the same
+statement ok
+SET glue_debug_fail_partition_loads = 'InternalServiceException';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query II
+SELECT max(detail) FILTER (event = 'prefetch') LIKE
+           'loaded 0 of 3 tables; the others load when their scans need them: %injected by glue_debug_fail_partition_loads (InternalServiceException)',
+       count(*) FILTER (event = 'partitions')
+FROM duckdb_logs_parsed('GlueScan');
+----
+true	3
+
+query I
+SELECT tables_loaded();
+----
+3
+
+# A failed batch stops the prefetch: the batches after it are not sent
+statement ok
+SET glue_partition_load_parallelism = 2;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query I
+SELECT count(*) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+1
+
+statement ok
+RESET glue_partition_load_parallelism;
+
+# Not throttling: the next statement prefetches again
+statement ok
+RESET glue_debug_fail_partition_loads;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 3 of 3 tables
+
+# Throttled: the statement falls back as above, and prefetches against the catalog stop for the cool-down
+statement ok
+SET glue_debug_fail_partition_loads = 'ThrottlingException';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') LIKE
+           '%; Glue throttled the requests: no prefetch against this catalog for 300 s'
+FROM duckdb_logs_parsed('GlueScan');
+----
+true
+
+statement ok
+RESET glue_debug_fail_partition_loads;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query II
+SELECT max(detail) FILTER (event = 'prefetch'),
+       tables_loaded()
+FROM duckdb_logs_parsed('GlueScan');
+----
+skipped 3 tables: Glue throttled a prefetch against this catalog less than 300 s ago	3
+
+# The cool-down holds for every attach of the same Glue catalog
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.plp_a a JOIN my_datalake.default.plp_b b USING (id);
+----
+3
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') LIKE 'skipped 2 tables:%'
+FROM duckdb_logs_parsed('GlueScan');
+----
+true
+
+# Once the cool-down has passed, tables are prefetched again
+statement ok
+SET glue_partition_load_cooldown = 0;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query I
+SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
+----
+loaded 3 of 3 tables
+
+statement ok
+RESET glue_partition_load_cooldown;
+
+# ---- the caches --------------------------------------------------------------------------------------------------
+
+# Under the connection's metadata cache a later statement finds every table loaded, and loads nothing
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+----
+3
+
+query II
+SELECT count(*) FILTER (event = 'prefetch'),
+       tables_loaded()
+FROM duckdb_logs_parsed('GlueScan');
+----
+0	0
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+# A prepared statement prefetches when it is bound, and again when it is rebound for a new transaction
+statement ok
+PREPARE plp_join AS SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+EXECUTE plp_join;
+----
+3
+
+query I
+SELECT tables_loaded();
+----
+2
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DROP TABLE my_datalake.default.plp_a;
+
+statement ok
+DROP TABLE my_datalake.default.plp_b;
+
+statement ok
+DROP TABLE my_datalake.default.plp_c;
+
+statement ok
+DROP TABLE my_datalake.default.plp_flat;
