@@ -626,7 +626,7 @@ The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry stra
 before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
 the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got
 no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection). The retry limit is
-`glue_max_retries`, or 10 by default.
+`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew is reported like any other.
 
 ```sql
 CALL enable_logging('GlueRetry', storage = 'memory');

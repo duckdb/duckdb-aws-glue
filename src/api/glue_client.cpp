@@ -138,8 +138,7 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 // Read API
 //===--------------------------------------------------------------------===//
 string GlueAPI::GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog) {
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	// the catalog id of the first database that is not a resource link (a link's target is another catalog)
 	Aws::String next_token;

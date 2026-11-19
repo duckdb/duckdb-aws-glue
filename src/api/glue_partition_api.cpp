@@ -30,8 +30,7 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
                                    const string &location) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdatePartition");
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	auto &fetched = FetchedPartition(partition, database_name, table_name);
 	auto storage_descriptor = fetched.GetStorageDescriptor();
@@ -66,8 +65,7 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                            const string &table_name, const vector<string> &values, GluePartitionDetails &result,
                            string *raw_json) {
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetPartitionRequest request;
 	SetCatalogId(request, catalog);
@@ -105,8 +103,7 @@ bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, cons
                               const GluePartitionInput &partition, bool if_not_exists) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreatePartition");
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	auto &database_name = table.schema_name;
 	auto &table_name = table.name;
@@ -142,8 +139,7 @@ bool GlueAPI::DeletePartition(ClientContext &context, GlueCatalog &catalog, cons
                               const string &table_name, const vector<string> &values) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "DeletePartition");
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::DeletePartitionRequest request;
 	SetCatalogId(request, catalog);
@@ -194,8 +190,7 @@ map<vector<string>, string> GlueAPI::PartitionLocations(ClientContext &context, 
 	if (partitions.empty()) {
 		return existing;
 	}
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	// BatchGetPartition takes at most 1000 partitions per call, and may leave some unprocessed when throttled. Only
 	// calls that process none count as failed attempts.
@@ -249,8 +244,7 @@ void GlueAPI::BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog
 	if (partitions.empty()) {
 		return;
 	}
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	// BatchDeletePartition accepts at most 25 partitions per call. As for BatchCreatePartition, the SDK retries a
 	// failed request, not the single partitions a successful response refuses, so those are sent again here when the
@@ -297,8 +291,7 @@ string GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, co
                                 const vector<string> &new_values) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdatePartition");
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	auto &fetched = FetchedPartition(partition, database_name, table_name);
 
@@ -421,8 +414,7 @@ static int GetPartitionSegmentCount(ClientContext &context, const GlueCatalog &c
 
 vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCatalog &catalog,
                                                  const string &database_name, const string &table_name) {
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	auto total_segments = GetPartitionSegmentCount(context, catalog);
 	vector<vector<GluePartitionInfo>> segment_results(NumericCast<idx_t>(total_segments));
@@ -505,8 +497,7 @@ vector<GluePartitionInput> GlueAPI::BatchCreatePartitions(ClientContext &context
 	if (partitions.empty()) {
 		return already_existing;
 	}
-	GlueHttpClientContextScope http_scope(context);
-	GlueRequestTimer request_timer(context);
+	GlueCallScope call_scope(context);
 	auto client = GetClient(context, catalog);
 	auto injected = InjectedPartitionFailure::FromSettings(context);
 	auto &database_name = table.schema_name;
