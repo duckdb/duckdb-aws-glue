@@ -1,5 +1,5 @@
 """Forwards Glue requests to moto, except on a fault_* database, where a request fails with the Glue error the fault
-assigns to it: GetTables on fault_access_denied* / fault_invalid_input* fails outright, while CreateDatabase and
+assigns to it: GetTables and GetPartitions on fault_access_denied* / fault_invalid_input* fail outright, while CreateDatabase and
 CreateTable of fault_already_exists* are forwarded (so the object does exist afterwards) and then answered with
 AlreadyExistsException, as Glue answers a client that lost the race to create the same object. What the other client
 created differs from what was asked for, so a test can tell the winner from a replacement: the database carries
@@ -26,7 +26,7 @@ import uuid
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# GetTables on a database with this prefix fails with this error, nothing is forwarded
+# GetTables and GetPartitions on a database with this prefix fail with this error, nothing is forwarded
 LISTING_FAULTS = {"fault_access_denied": "AccessDeniedException", "fault_invalid_input": "InvalidInputException"}
 # a table with this prefix is one Lake Formation does not let the caller describe: GetTable on it fails with
 # AccessDeniedException, and GetTables leaves it out
@@ -67,7 +67,7 @@ def request_database(target, request):
 
 
 def listing_error(target, database):
-    if target != "AWSGlue.GetTables":
+    if target not in ("AWSGlue.GetTables", "AWSGlue.GetPartitions"):
         return None
     return next((error for prefix, error in LISTING_FAULTS.items() if database.startswith(prefix)), None)
 
