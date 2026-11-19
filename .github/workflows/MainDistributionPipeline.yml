@@ -17,7 +17,8 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@c286b12cee2aa16b714e76d0b46e530fcdb6dc05 # v2.0-cyanoptera 2026-11-11 pin
     with:
       ci_tools_version: c286b12cee2aa16b714e76d0b46e530fcdb6dc05 # v2.0-cyanoptera 2026-11-11 pin
-      exclude_archs: 'windows_amd64_rtools;windows_amd64_mingw'
+      # windows_amd64: MSVC 19.51 (windows-2025-vs2026) can not compile duckdb main's core_functions mode.cpp
+      exclude_archs: 'windows_amd64;windows_amd64_rtools;windows_amd64_mingw'
       extension_name: glue
 
   code-quality-check:
