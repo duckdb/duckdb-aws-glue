@@ -1,4 +1,5 @@
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_file_credentials.hpp"
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -263,6 +264,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 			                   table_info.schema_name, table_info.name, property);
 		}
 	}
+	scan_info->file_secret = GlueFileCredentialsCallback::Get(context, *this);
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

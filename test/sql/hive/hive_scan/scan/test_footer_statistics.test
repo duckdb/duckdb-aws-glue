@@ -1,0 +1,327 @@
+# name: test/sql/hive/hive_scan/scan/test_footer_statistics.test
+# description: A parquet scan of at most hive_footer_statistics_max_files files gives each data column the statistics of its files' footers, merged over all of them, and none when a footer can not say what the scan reads; its row count is the sum of the footers'
+# group: [scan]
+
+require parquet
+
+require glue
+
+# two files, in directories an unpartitioned scan reads like any other: i is 1 to 10 in the first and 11 to 20 in the
+# second, n is NULL in some rows of the second
+statement ok
+COPY (SELECT i::BIGINT AS i, printf('%s%02d', CASE WHEN i <= 10 THEN 'x' ELSE 'y' END, i) AS s,
+    CASE WHEN i <= 10 OR i % 2 = 0 THEN i * 10 END AS n, i <= 10 AS first FROM range(1, 21) t(i))
+TO '{TEST_DIR}/fs_flat' (FORMAT parquet, PARTITION_BY (first));
+
+statement ok
+CREATE MACRO fs_flat() AS TABLE FROM hive_scan('{TEST_DIR}/fs_flat', schema := {i: 'BIGINT', s: 'VARCHAR', n: 'BIGINT'});
+
+query II
+SELECT stats(i), stats(s) FROM fs_flat() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}	{'has_no_null': true, 'has_null': false, 'has_unicode': true, 'max': y20, 'min': x01}
+
+query I
+SELECT stats(n) FROM fs_flat() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true, 'max': 200, 'min': 10}
+
+# the optimizer prunes on them: a filter is answered over the files' merged range, not one file's
+query I
+SELECT count(*) FROM fs_flat() WHERE i > 15;
+----
+5
+
+query I
+SELECT count(*) FROM fs_flat() WHERE i > 20;
+----
+0
+
+query II rowsort
+SELECT i, s FROM fs_flat() WHERE i BETWEEN 10 AND 11;
+----
+10	x10
+11	y11
+
+query I
+SELECT count(*) FROM fs_flat() WHERE n IS NULL;
+----
+5
+
+# a scan of more files than the bound gives none, and 0 turns them off
+statement ok
+SET hive_footer_statistics_max_files = 1;
+
+query I
+SELECT stats(i) FROM fs_flat() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true}
+
+query I
+SELECT count(*) FROM fs_flat() WHERE i > 15;
+----
+5
+
+statement ok
+SET hive_footer_statistics_max_files = 0;
+
+query I
+SELECT stats(i) FROM fs_flat() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true}
+
+# the bound is inclusive, and at most 25
+statement ok
+SET hive_footer_statistics_max_files = 2;
+
+query I
+SELECT stats(i) FROM fs_flat() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}
+
+statement ok
+SET hive_footer_statistics_max_files = 25;
+
+query I
+SELECT stats(i) FROM fs_flat() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 20, 'min': 1}
+
+statement error
+SET hive_footer_statistics_max_files = 26;
+----
+<REGEX>:.*hive_footer_statistics_max_files is at most 25, not 26.*
+
+statement error
+SET GLOBAL hive_footer_statistics_max_files = 26;
+----
+<REGEX>:.*hive_footer_statistics_max_files is at most 25, not 26.*
+
+query I
+SELECT current_setting('hive_footer_statistics_max_files');
+----
+25
+
+statement ok
+RESET hive_footer_statistics_max_files;
+
+query I
+SELECT current_setting('hive_footer_statistics_max_files');
+----
+16
+
+# an empty file has no statistics, and holds no values the others' bounds must cover: it is skipped
+statement ok
+COPY (SELECT i::BIGINT AS i FROM range(1, 11) t(i)) TO '{TEST_DIR}/fs_empty_file' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+statement ok
+COPY (SELECT 1::BIGINT AS i LIMIT 0) TO '{TEST_DIR}/fs_empty_file/empty.parquet' (FORMAT parquet);
+
+query I
+SELECT stats(i) FROM hive_scan('{TEST_DIR}/fs_empty_file', schema := {i: 'BIGINT'}) LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 10, 'min': 1}
+
+query II
+EXPLAIN SELECT i FROM hive_scan('{TEST_DIR}/fs_empty_file', schema := {i: 'BIGINT'});
+----
+physical_plan	<REGEX>:.*Hive Scan.*~10 rows.*
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/fs_empty_file', schema := {i: 'BIGINT'}) WHERE i > 5;
+----
+5
+
+# a file's column name is matched to the table's ignoring case, as the scan matches it
+statement ok
+COPY (SELECT i::BIGINT AS "ID" FROM range(1, 4) t(i)) TO '{TEST_DIR}/fs_case' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+query I
+SELECT stats(id) FROM hive_scan('{TEST_DIR}/fs_case', schema := {id: 'BIGINT'}) LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 3, 'min': 1}
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/fs_case', schema := {id: 'BIGINT'}) WHERE id > 2;
+----
+1
+
+# the row counts of the footers add up to the scan's estimate. 1 row in one file and 3 in the other, which the
+# sample (the largest file's rows times the files) puts at 6
+statement ok
+COPY (SELECT i::BIGINT AS i, i <= 1 AS first FROM range(1, 5) t(i))
+TO '{TEST_DIR}/fs_uneven' (FORMAT parquet, PARTITION_BY (first));
+
+statement ok
+CREATE MACRO fs_uneven() AS TABLE FROM hive_scan('{TEST_DIR}/fs_uneven', schema := {i: 'BIGINT'});
+
+query II
+EXPLAIN SELECT i FROM fs_uneven();
+----
+physical_plan	<REGEX>:.*Hive Scan.*~4 rows.*
+
+query I
+SELECT count(*) FROM (SELECT i FROM fs_uneven() LIMIT 100);
+----
+4
+
+query I
+SELECT count(*) FROM (SELECT i FROM fs_uneven() LIMIT 3);
+----
+3
+
+# over the bound the count is the sample's estimate
+statement ok
+SET hive_footer_statistics_max_files = 1;
+
+query II
+EXPLAIN SELECT i FROM fs_uneven();
+----
+physical_plan	<REGEX>:.*Hive Scan.*~6 rows.*
+
+statement ok
+RESET hive_footer_statistics_max_files;
+
+# a partitioned scan gets none: listing its partitions while planning would read them before a join's filter prunes
+# them. With glue_enable_partition_key_statistics its partition keys keep the statistics of the partition values
+statement ok
+COPY (SELECT i::BIGINT AS i, CASE WHEN i <= 10 THEN 'a' ELSE 'b' END AS p FROM range(1, 21) t(i))
+TO '{TEST_DIR}/fs_part' (FORMAT parquet, PARTITION_BY (p));
+
+statement ok
+CREATE MACRO fs_part() AS TABLE FROM hive_scan('{TEST_DIR}/fs_part', schema := {i: 'BIGINT', p: 'VARCHAR'},
+    partitions := [{p: 'a'}, {p: 'b'}]);
+
+statement ok
+SET glue_enable_partition_key_statistics = true;
+
+query II
+SELECT stats(i), stats(p) FROM fs_part() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true}	{'approx_unique': 2, 'has_no_null': true, 'has_null': false, 'has_unicode': false, 'max': b, 'max_string_length': 1, 'min': a, 'min_string_length': 1}
+
+statement ok
+RESET glue_enable_partition_key_statistics;
+
+query II rowsort
+SELECT p, count(*) FROM fs_part() WHERE i > 9 GROUP BY p;
+----
+a	1
+b	10
+
+# nor an exact count
+query II
+EXPLAIN SELECT i FROM fs_part() LIMIT 100;
+----
+physical_plan	<REGEX>:.*Limit: 100.*
+
+#---------------------------------------------------------------------------
+# a footer that can not say what the scan reads gives a column none
+#---------------------------------------------------------------------------
+
+# a footer that can not be read gives no count either; planning goes on, and the scan fails on the file as before
+statement ok
+COPY (SELECT i::BIGINT AS i FROM range(1, 4) t(i)) TO '{TEST_DIR}/fs_unreadable' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+statement ok
+COPY (SELECT 'not a parquet file') TO '{TEST_DIR}/fs_unreadable/garbage.parquet' (FORMAT csv, HEADER false);
+
+query II
+EXPLAIN SELECT i FROM hive_scan('{TEST_DIR}/fs_unreadable', schema := {i: 'BIGINT'}) LIMIT 100;
+----
+physical_plan	<REGEX>:.*Limit: 100.*
+
+# nor column statistics: the readable file's alone would let this filter empty the scan without reading the other
+statement error
+SELECT count(*) FROM hive_scan('{TEST_DIR}/fs_unreadable', schema := {i: 'BIGINT'}) WHERE i > 100;
+----
+<REGEX>:.*No magic bytes found at end of file.*garbage\.parquet.*
+
+statement error
+SELECT i FROM hive_scan('{TEST_DIR}/fs_unreadable', schema := {i: 'BIGINT'});
+----
+<REGEX>:.*No magic bytes found at end of file.*garbage\.parquet.*
+
+# statistics DuckDB rejects (a column chunk of 0 values in a row group of 8 rows, from DuckDB's parquet-testing) fail
+# planning, as for read_parquet of the file
+statement error
+EXPLAIN SELECT x FROM hive_scan('test/data/parquet_column_num_values_mismatch', schema := {x: 'INTEGER'});
+----
+<REGEX>:.*metadata is corrupt. Column has 0 values but row group has 8 rows.*
+
+statement error
+SELECT x FROM hive_scan('test/data/parquet_column_num_values_mismatch', schema := {x: 'INTEGER'});
+----
+<REGEX>:.*metadata is corrupt. Column has 0 values but row group has 8 rows.*
+
+# a file without the column, which the scan reads as NULL
+statement ok
+COPY (SELECT i::BIGINT AS i, 'old' AS g FROM range(1, 4) t(i)) TO '{TEST_DIR}/fs_evolved' (FORMAT parquet, PARTITION_BY (g));
+
+statement ok
+COPY (SELECT i::BIGINT AS i, 'e' || i AS extra, 'new' AS g FROM range(4, 7) t(i))
+TO '{TEST_DIR}/fs_evolved' (FORMAT parquet, PARTITION_BY (g), APPEND);
+
+statement ok
+CREATE MACRO fs_evolved() AS TABLE FROM hive_scan('{TEST_DIR}/fs_evolved', schema := {i: 'BIGINT', extra: 'VARCHAR'});
+
+query II
+SELECT stats(i), stats(extra) FROM fs_evolved() LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 6, 'min': 1}	{'has_no_null': true, 'has_null': true, 'has_unicode': true}
+
+query I
+SELECT count(*) FROM fs_evolved() WHERE extra IS NULL;
+----
+3
+
+# a file that stores the column as another type than the schema, which the scan casts
+statement ok
+COPY (SELECT 1 AS k, 7::INTEGER AS v) TO '{TEST_DIR}/fs_retyped' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+query II
+SELECT stats(k), stats(v) FROM hive_scan('{TEST_DIR}/fs_retyped', schema := {k: 'INTEGER', v: 'BIGINT'}) LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 1, 'min': 1}	{'has_no_null': true, 'has_null': true}
+
+query I
+SELECT v FROM hive_scan('{TEST_DIR}/fs_retyped', schema := {k: 'INTEGER', v: 'BIGINT'}) WHERE v > 5;
+----
+7
+
+# a string column a table with a binary column reads as bytes and decodes: the footer describes the bytes
+statement ok
+COPY (SELECT 1 AS id, encode('ü') AS c, '\x00'::BLOB AS b) TO '{TEST_DIR}/fs_binary' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+query II
+SELECT stats(id), stats(c) FROM hive_scan('{TEST_DIR}/fs_binary', schema := {id: 'INTEGER', c: 'VARCHAR', b: 'BLOB'}) LIMIT 1;
+----
+{'has_no_null': true, 'has_null': false, 'max': 1, 'min': 1}	{'has_no_null': true, 'has_null': true, 'has_unicode': true}
+
+query I
+SELECT id FROM hive_scan('{TEST_DIR}/fs_binary', schema := {id: 'INTEGER', c: 'VARCHAR', b: 'BLOB'}) WHERE c = 'ü';
+----
+1
+
+# NaN floats in a file written without a NaN count: the footers are read with the scan's can_have_nan, so a filter
+# above the other values still reads the NaN row
+query I
+SELECT k FROM hive_scan('test/data/parquet_nan_statistics', format := 'parquet',
+    schema := {k: 'INTEGER', d: 'DOUBLE', f: 'FLOAT'}) WHERE d > 2.5;
+----
+2
+
+query I
+SELECT k FROM hive_scan('test/data/parquet_nan_statistics', format := 'parquet',
+    schema := {k: 'INTEGER', d: 'DOUBLE', f: 'FLOAT'}) WHERE f > 2.5;
+----
+2
+
+# text files have no footer
+statement ok
+COPY (SELECT i FROM range(1, 4) t(i)) TO '{TEST_DIR}/fs_csv' (FORMAT csv, HEADER false, PER_THREAD_OUTPUT true);
+
+query I
+SELECT stats(i) FROM hive_scan('{TEST_DIR}/fs_csv', format := 'csv', schema := {i: 'BIGINT'}) LIMIT 1;
+----
+{'has_no_null': true, 'has_null': true}

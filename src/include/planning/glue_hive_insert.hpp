@@ -60,6 +60,8 @@ private:
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
+	//! Adds the files of a write whose partitions are registered to the glue_written_files temporary table
+	void RecordWrittenFiles(ClientContext &context, const vector<string> &files) const;
 	//! Throws when a partition registration skipped as existing is registered at another location than its files
 	void CheckExistingPartitionLocations(ClientContext &context,
 	                                     const vector<GluePartitionInput> &already_existing) const;
@@ -73,6 +75,8 @@ public:
 	map<vector<string>, string> planned_locations;
 	//! The directories of existing partitions not laid out as <key=value>, with their Glue values.
 	unordered_map<string, vector<string>> partition_directories;
+	//! Names the files of this write, and its entry in the Glue transaction
+	string write_id;
 };
 
 } // namespace duckdb

@@ -1,6 +1,7 @@
 #include "api/glue_http_client.hpp"
 
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -13,9 +14,15 @@
 #include <aws/core/http/HttpRequest.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <aws/core/http/standard/StandardHttpResponse.h>
-#ifdef _WIN32
+// The SDK builds no HTTP client of its own for wasm, so there the bridge is the only transport and the setting is
+// ignored
+#if defined(__EMSCRIPTEN__)
+#define GLUE_HTTP_SDK_FALLBACK 0
+#elif defined(_WIN32)
+#define GLUE_HTTP_SDK_FALLBACK 1
 #include <aws/core/http/windows/WinHttpSyncHttpClient.h>
 #else
+#define GLUE_HTTP_SDK_FALLBACK 1
 #include <aws/core/http/curl/CurlHttpClient.h>
 #endif
 
@@ -53,6 +60,7 @@ namespace {
 //! Read the toggle, preferring the calling connection (a plain SET is session scoped) over the database settings.
 //! Defaults to true.
 bool NetworkCallsViaDuckDB(DatabaseInstance &db) {
+#if GLUE_HTTP_SDK_FALLBACK
 	Value value;
 	auto context = GlueHttpClientContextScope::Current();
 	if (context && context->TryGetCurrentSetting(NETWORK_VIA_DUCKDB_SETTING, value) && !value.IsNull()) {
@@ -61,6 +69,7 @@ bool NetworkCallsViaDuckDB(DatabaseInstance &db) {
 	if (db.TryGetCurrentSetting(NETWORK_VIA_DUCKDB_SETTING, value) && !value.IsNull()) {
 		return BooleanValue::Get(value);
 	}
+#endif
 	return true;
 }
 
@@ -229,8 +238,42 @@ private:
 	DatabaseInstance &db;
 };
 
+//! The database that loaded the extension last: the transport for SDK clients built outside any connection scope on
+//! platforms where the SDK has no HTTP client of its own (wasm). A weak_ptr, so closing that database cannot dangle.
+static mutex fallback_db_mutex;
+static weak_ptr<DatabaseInstance> fallback_db;
+
+static weak_ptr<DatabaseInstance> FallbackDatabase() {
+	lock_guard<mutex> guard(fallback_db_mutex);
+	return fallback_db;
+}
+
+//! Routes through the fallback database while it lives, and reports a network failure to the SDK once it is gone.
+class GlueFallbackHttpClient : public Aws::Http::HttpClient {
+public:
+	explicit GlueFallbackHttpClient(weak_ptr<DatabaseInstance> db_p) : db(std::move(db_p)) {
+	}
+
+	std::shared_ptr<Aws::Http::HttpResponse>
+	MakeRequest(const std::shared_ptr<Aws::Http::HttpRequest> &request, Aws::Utils::RateLimits::RateLimiterInterface *a,
+	            Aws::Utils::RateLimits::RateLimiterInterface *b) const override {
+		auto instance = db.lock();
+		if (instance) {
+			return GlueDuckDBHttpClient(*instance).MakeRequest(request, a, b);
+		}
+		auto aws_response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("GlueDuckDBHttp", request);
+		aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
+		aws_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
+		aws_response->SetClientErrorMessage("glue: no DuckDB database to route this AWS SDK request through");
+		return aws_response;
+	}
+
+private:
+	weak_ptr<DatabaseInstance> db;
+};
+
 //! The factory is process global and outlives any one DatabaseInstance, so it holds none: the database comes from the
-//! connection in the calling GlueHttpClientContextScope.
+//! connection in the calling GlueHttpClientContextScope, or (wasm, no scope) from the fallback above.
 class GlueDuckDBHttpClientFactory : public Aws::Http::HttpClientFactory {
 public:
 	std::shared_ptr<Aws::Http::HttpClient>
@@ -241,11 +284,17 @@ public:
 		auto context = GlueHttpClientContextScope::Current();
 		if (context) {
 			auto &db = DatabaseInstance::GetDatabase(*context);
-			if (NetworkCallsViaDuckDB(db) && db.ExtensionIsLoaded("httpfs")) {
+			if (NetworkCallsViaDuckDB(db) && (!GLUE_HTTP_SDK_FALLBACK || db.ExtensionIsLoaded("httpfs"))) {
 				return Aws::MakeShared<GlueDuckDBHttpClient>("GlueDuckDBHttp", db);
 			}
 		}
-#ifdef _WIN32
+#if !GLUE_HTTP_SDK_FALLBACK
+		// No connection scope, and no SDK transport to fall back on. The SDK itself asks for such clients: swapping in
+		// this factory recreates its EC2 metadata client when another SDK user (e.g. the aws extension) had built one,
+		// so throwing here fails LOAD. Route through the database that loaded glue last while it lives; afterwards hand
+		// out a client that fails every request the way an unreachable network would.
+		return Aws::MakeShared<GlueFallbackHttpClient>("GlueDuckDBHttp", FallbackDatabase());
+#elif defined(_WIN32)
 		return Aws::MakeShared<Aws::Http::WinHttpSyncHttpClient>("GlueDuckDBHttp", config);
 #else
 		return Aws::MakeShared<Aws::Http::CurlHttpClient>("GlueDuckDBHttp", config);
@@ -273,7 +322,11 @@ bool GlueNetworkCallsViaDuckDB(DatabaseInstance &db) {
 	return NetworkCallsViaDuckDB(db);
 }
 
-void RegisterGlueHttpClientFactory() {
+void RegisterGlueHttpClientFactory(DatabaseInstance &db) {
+	{
+		lock_guard<mutex> guard(fallback_db_mutex);
+		fallback_db = db.shared_from_this(); // last database to load the extension wins
+	}
 	// SetHttpClientFactory swaps process global SDK state and is not thread safe, so it must not run again for every
 	// database that loads the extension
 	static std::once_flag registered;

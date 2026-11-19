@@ -2,6 +2,7 @@
 
 #include "core/glue_types.hpp"
 #include "core/helpers.hpp"
+#include "core/hive_timestamp_formats.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
@@ -304,9 +305,14 @@ string GlueTableInfo::GetCodec(HiveFileFormat format) const {
 		if (codec == "none" || codec == "uncompressed") {
 			return "null";
 		}
-		if (!codec.empty() && codec != "snappy" && codec != "deflate" && codec != "null") {
+		// write_compression names it ZSTD; Avro names it zstandard
+		if (codec == "zstd") {
+			return "zstandard";
+		}
+		if (!codec.empty() && codec != "snappy" && codec != "deflate" && codec != "bzip2" && codec != "zstandard" &&
+		    codec != "null") {
 			throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB "
-			                              "writes only snappy and deflate compressed avro files",
+			                              "writes only snappy, deflate, bzip2 and zstandard compressed avro files",
 			                              schema_name, name, codec);
 		}
 		return codec;
@@ -353,14 +359,19 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	options.null_for_invalid_data =
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
-	options.false_unless_true = GetSerDe() == HiveSerDe::OPEN_CSV;
-	options.epoch_fields = GetSerDe() == HiveSerDe::OPEN_CSV;
+	options.serde = GetSerDe();
 	// without escapeChar OpenCSVSerde reads with a '\' escape, which read_csv, given the quote character, would keep;
 	// an explicit escapeChar '"', which this extension writes, is read as it is
 	string escape_char;
 	auto escape_set = TryGetProperty("escapeChar", escape_char) && !escape_char.empty();
 	if (GetSerDe() == HiveSerDe::OPEN_CSV && !escape_set && options.delimiter != "\\" && options.quote != "\\") {
 		options.field_escape = "\\";
+	}
+	string timestamp_formats;
+	if (GetSerDe() == HiveSerDe::LAZY_SIMPLE && TryGetProperty("timestamp.formats", timestamp_formats)) {
+		auto formats = HiveTimestampFormats::Parse(timestamp_formats);
+		options.timestamp_formats = std::move(formats.strptime_formats);
+		options.timestamp_millis = formats.millis;
 	}
 	return options;
 }

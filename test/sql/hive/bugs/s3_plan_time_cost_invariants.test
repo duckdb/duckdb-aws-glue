@@ -250,7 +250,7 @@ CREATE TABLE my_datalake.default.plancost_empty (id INTEGER, dt VARCHAR) PARTITI
 loop i 0 4
 
 statement ok
-CALL glue_add_partition('my_datalake.default.plancost_empty', {dt: 'd${i}'});
+CALL glue_add_partition('my_datalake.default.plancost_empty', {dt: 'd{i}'});
 
 endloop
 

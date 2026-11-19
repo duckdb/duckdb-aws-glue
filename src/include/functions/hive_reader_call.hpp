@@ -28,7 +28,8 @@ struct HiveReaderCall {
 
 //! Nothing when 'get' is not a Hive scan bound by this build of the extension, or reads its files in a way no reader
 //! call can say: a Parquet table with a binary column, whose string columns are decoded file by file, or a column the
-//! scan reads as another type than the table declares (a type the optimizer pushed into the scan)
+//! scan reads as another type than the table declares (a type the optimizer pushed into the scan), or with the
+//! credentials of a GlueFileCredentialsCallback, which a read of the files by path would not use
 optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get);
 //! The values of the partition a data file of the scan belongs to as the scan reads them, one constant per partition
 //! key in key order, named after the key. 'path' is the file's path as the scan listed it, or another spelling of it

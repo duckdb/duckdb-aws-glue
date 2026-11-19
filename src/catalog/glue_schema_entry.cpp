@@ -25,6 +25,7 @@
 
 #include "core/glue_types.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "catalog/glue_view.hpp"
@@ -103,10 +104,12 @@ static string BucketingOptionFor(const string &key) {
 
 //! The spelling to use for another engine's CREATE TABLE option, empty if the key is none of them
 static string OtherEngineOptionFor(const string &key) {
-	static const case_insensitive_map_t<string> SPELLINGS = {{"partitioned_by", "a PARTITIONED BY (...) clause"},
-	                                                         {"partitioning", "a PARTITIONED BY (...) clause"},
-	                                                         {"external_location", "option 'location'"},
-	                                                         {"field_delimiter", "option 'delimiter'"}};
+	static constexpr const char *PARTITIONED_BY_CLAUSE = "a PARTITIONED BY (...) clause";
+	static const case_insensitive_map_t<string> SPELLINGS = {
+	    {"partitioned_by", PARTITIONED_BY_CLAUSE},  {"partitioning", PARTITIONED_BY_CLAUSE},
+	    {"partition_by", PARTITIONED_BY_CLAUSE},    {"partition_columns", PARTITIONED_BY_CLAUSE},
+	    {"partition_keys", PARTITIONED_BY_CLAUSE},  {"PartitionKeys", PARTITIONED_BY_CLAUSE},
+	    {"external_location", "option 'location'"}, {"field_delimiter", "option 'delimiter'"}};
 	return LookupSpelling(SPELLINGS, key);
 }
 
@@ -596,6 +599,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
 	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
 	GlueViewNames::PinToCatalog(*check->node, catalog.GetName(), name);
+	GlueViewNames::MapIcebergTables(context, glue_catalog, database_info.name + "." + view_name, *check->node);
 	vector<LogicalType> types;
 	vector<Identifier> names;
 	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
@@ -629,7 +633,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		GlueColumn column;
 		auto aliased = i < info.aliases.size() && !info.aliases[i].GetIdentifierName().empty();
 		column.name = (aliased ? info.aliases[i] : info.names[i]).GetIdentifierName();
-		column.type = info.types[i].ToString();
+		column.type = GlueTypes::FromLogicalTypeForView(info.types[i]);
 		view.columns.push_back(std::move(column));
 	}
 	// re-fetch so the entry reflects what Glue stored
@@ -1064,7 +1068,18 @@ void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
 	// tables and views share the set, so the lookup returns whichever Glue holds under the name; the caller keeps
 	// the entries of the type it asked for
 	EntryLookupInfo lookup(info.type, QualifiedName(Identifier(name)));
-	auto entry = tables.GetEntry(context, lookup);
+	optional_ptr<CatalogEntry> entry;
+	try {
+		entry = tables.GetEntry(context, lookup);
+	} catch (const GlueException &ex) {
+		// like the listing this filter replaces, a table we may not describe is not listed
+		if (!ex.access_denied) {
+			throw;
+		}
+		ErrorData error(ex);
+		DUCKDB_LOG_WARNING(context, "Not listing Glue table '%s.%s': %s", database_info.name, name, error.RawMessage());
+		return;
+	}
 	if (entry) {
 		info.callback(*entry);
 	}

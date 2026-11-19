@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/create_table/create_table_other_engine_options.test
-# description: Other engines' spellings of CREATE TABLE options (partitioned_by, partitioning, external_location, field_delimiter) are refused naming the spelling to use, instead of being stored as table parameters that do nothing; write_compression is not among them, it is the table's codec
+# description: Other engines' spellings of CREATE TABLE options (partitioned_by, partitioning, partition_by, partition_columns, partition_keys, PartitionKeys, external_location, field_delimiter) are refused naming the spelling to use, instead of being stored as table parameters that do nothing; write_compression is not among them, it is the table's codec
 # group: [create_table]
 
 require httpfs
@@ -32,6 +32,31 @@ statement error
 CREATE TABLE my_datalake.default.engine_opts (id INTEGER, dt VARCHAR) WITH (PARTITIONING = ['dt']);
 ----
 Unknown CREATE TABLE option 'PARTITIONING', use a PARTITIONED BY (...) clause instead
+
+statement error
+CREATE TABLE my_datalake.default.engine_opts (id INTEGER, dt VARCHAR) WITH (partition_by = ['dt']);
+----
+Unknown CREATE TABLE option 'partition_by', use a PARTITIONED BY (...) clause instead
+
+statement error
+CREATE TABLE my_datalake.default.engine_opts WITH (partition_by = ['dt']) AS SELECT 1 AS id, 'a' AS dt;
+----
+Unknown CREATE TABLE option 'partition_by', use a PARTITIONED BY (...) clause instead
+
+statement error
+CREATE TABLE my_datalake.default.engine_opts (id INTEGER, dt VARCHAR) WITH (partition_columns = ['dt']);
+----
+Unknown CREATE TABLE option 'partition_columns', use a PARTITIONED BY (...) clause instead
+
+statement error
+CREATE TABLE my_datalake.default.engine_opts (id INTEGER, dt VARCHAR) WITH (partition_keys = ['dt']);
+----
+Unknown CREATE TABLE option 'partition_keys', use a PARTITIONED BY (...) clause instead
+
+statement error
+CREATE TABLE my_datalake.default.engine_opts (id INTEGER, dt VARCHAR) WITH (PartitionKeys = ['dt']);
+----
+Unknown CREATE TABLE option 'PartitionKeys', use a PARTITIONED BY (...) clause instead
 
 statement error
 CREATE TABLE my_datalake.default.engine_opts (id INTEGER) WITH (external_location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere');

@@ -159,6 +159,129 @@ JOIN flat_blobs b ON t.filename = b.filename;
 ----
 99	99
 
+# "$path" filtering on a Glue table
+statement ok
+COPY (SELECT 1000::INTEGER AS id, 'path'::VARCHAR AS name)
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_flat/path_filter.parquet' (FORMAT parquet);
+
+query II
+SELECT id, name FROM my_datalake.default.meta_flat
+WHERE "$path" = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_flat/path_filter.parquet';
+----
+1000	path
+
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM my_datalake.default.meta_flat
+WHERE "$path" = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_flat/path_filter.parquet';
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1 .*
+
+#--------------------------------------------------------------------------
+# "$path" filters prune files before opening them
+#--------------------------------------------------------------------------
+statement ok
+COPY (SELECT range AS id FROM range(1, 3))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning/selected.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT range AS id FROM range(3, 1003))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning/other.parquet' (FORMAT parquet);
+
+query I
+SELECT list(id ORDER BY id)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning', schema := {id: 'BIGINT'})
+WHERE "$path" = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning/selected.parquet';
+----
+[1, 2]
+
+query II
+EXPLAIN ANALYZE SELECT count(*)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning', schema := {id: 'BIGINT'})
+WHERE "$path" = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning/selected.parquet';
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1 .*
+
+query I
+SELECT count(*)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning', schema := {id: 'BIGINT'})
+WHERE "$path" LIKE '%/missing.parquet';
+----
+0
+
+# a filter that needs a data column must not prune files
+query I
+SELECT list(id ORDER BY id)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning', schema := {id: 'BIGINT'})
+WHERE "$path" LIKE '%/selected.parquet' OR id = 3;
+----
+[1, 2, 3]
+
+query II
+EXPLAIN ANALYZE SELECT count(*)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning', schema := {id: 'BIGINT'})
+WHERE "$path" LIKE '%/selected.parquet' OR id = 3;
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 2 .*
+
+# filename is the same file path
+query II
+EXPLAIN ANALYZE SELECT count(*)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning', schema := {id: 'BIGINT'})
+WHERE filename = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning/selected.parquet';
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1 .*
+
+# footer statistics from one path-filtered scan must not drop another scan's rows
+query I
+SELECT count(*)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning', schema := {id: 'BIGINT'})
+WHERE "$path" LIKE '%/selected.parquet' AND id = 1
+UNION ALL
+SELECT count(*)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning', schema := {id: 'BIGINT'})
+WHERE "$path" LIKE '%/other.parquet' AND id = 1000;
+----
+1
+1
+
+statement ok
+COPY (SELECT range AS id FROM range(10, 12))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning_partitioned/year=2024/selected.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT range AS id FROM range(12, 1012))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning_partitioned/year=2024/other.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT range AS id FROM range(2000, 3000))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning_partitioned/year=2025/other.parquet' (FORMAT parquet);
+
+foreach threshold 100 1
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query I
+SELECT list(id ORDER BY id)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning_partitioned',
+    schema := {id: 'BIGINT', year: 'INTEGER'}, partitions := [{year: 2024}, {year: 2025}])
+WHERE year = 2024 AND "$path" LIKE '%/selected.parquet';
+----
+[10, 11]
+
+query II
+EXPLAIN ANALYZE SELECT count(*)
+FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_pruning_partitioned',
+    schema := {id: 'BIGINT', year: 'INTEGER'}, partitions := [{year: 2024}, {year: 2025}])
+WHERE year = 2024 AND "$path" LIKE '%/selected.parquet';
+----
+analyzed_plan	<REGEX>:.*Total Files Read: 1 .*
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
 statement ok
 DROP TABLE my_datalake.default.meta_flat;
 

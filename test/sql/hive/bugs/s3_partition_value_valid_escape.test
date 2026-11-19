@@ -85,6 +85,9 @@ SELECT count(*) FROM my_datalake.default.esc WHERE k = 'a%2520b';
 0
 
 # ---- what the statistics claim ----------------------------------------------------------------------
+statement ok
+SET glue_enable_partition_key_statistics = true;
+
 # three distinct partition values, so at most three groups. This is the Mod 1 path: it builds min/max and the
 # distinct count from the same conversion, so a disagreement here would prune a partition that holds rows
 query II

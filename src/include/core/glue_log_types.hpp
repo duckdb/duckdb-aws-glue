@@ -50,6 +50,26 @@ public:
 	static string ConstructLogMessage(const GlueScanEvent &event);
 };
 
+//! A Glue API call the AWS SDK's retry strategy decided to retry, logged as GlueRetry before the wait. 'status' is NULL
+//! when the request got no response, 'error' and 'request_id' when the SDK has none (e.g. a dropped connection).
+struct GlueRetryEvent {
+	string error;
+	optional_idx status;
+	idx_t retry = 0;
+	string request_id;
+};
+
+class GlueRetryLogType : public LogType {
+public:
+	static constexpr const char *NAME = "GlueRetry";
+	static constexpr LogLevel LEVEL = LogLevel::LOG_WARNING;
+
+	GlueRetryLogType();
+
+	static LogicalType GetLogType();
+	static string ConstructLogMessage(const GlueRetryEvent &event);
+};
+
 void RegisterGlueLogTypes(DatabaseInstance &db);
 //! The Glue requests in the HTTP log: glue_requests()
 unique_ptr<CreateMacroInfo> GetGlueRequestsMacro();

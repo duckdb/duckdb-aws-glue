@@ -102,6 +102,7 @@ DROP TABLE web_site;
 CREATE TABLE glue_tpcds_${SF_NAME}_${FORMAT}_loaded AS SELECT 1 AS loaded;
 USE my_datalake.bench_tpcds_${SF_NAME}_${FORMAT};
 SET enable_external_file_cache=false;
+SET glue_enable_partition_key_statistics=false;
 
 reload
 CREATE SECRET (
@@ -120,6 +121,7 @@ ATTACH '123456789012' AS my_datalake (
 );
 USE my_datalake.bench_tpcds_${SF_NAME}_${FORMAT};
 SET enable_external_file_cache=false;
+SET glue_enable_partition_key_statistics=false;
 
 name DSQ${QUERY_NUMBER_PADDED}_${FORMAT}
 group tpcds_glue

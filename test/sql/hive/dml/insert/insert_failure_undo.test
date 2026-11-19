@@ -1,0 +1,279 @@
+# name: test/sql/hive/dml/insert/insert_failure_undo.test
+# description: the files of a write carry its write id; a failed CREATE TABLE AS or INSERT, partitioned or not and prepared or not, leaves no files and no table behind
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_write;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_ctas;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_ctas_marker;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_ctas_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_unpartitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_prepared;
+
+statement ok
+CREATE TABLE my_datalake.default.undo_write (id INTEGER, p INTEGER) PARTITIONED BY (p);
+
+#---------------------------------------------------------------------------
+# the files of one statement are named <write id>_<file id>, with one write id per statement
+#---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.undo_write SELECT i, i % 3 FROM range(9) t(i);
+
+query I
+SELECT count(*) >= 3 AND count(*) = count(*) FILTER (WHERE regexp_matches(parse_filename(file), '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}_'))
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_write/**');
+----
+true
+
+query I
+SELECT count(DISTINCT split_part(parse_filename(file), '_', 1)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_write/**');
+----
+1
+
+statement ok
+INSERT INTO my_datalake.default.undo_write SELECT i, i % 3 FROM range(9) t(i);
+
+query I
+SELECT count(DISTINCT split_part(parse_filename(file), '_', 1)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_write/**');
+----
+2
+
+#---------------------------------------------------------------------------
+# an INSERT whose query fails adds nothing
+#---------------------------------------------------------------------------
+# files are written and closed before the query fails: with a small flush threshold and one open file, a small INSERT
+# does what one into many partitions does at the defaults
+statement ok
+SET partitioned_write_flush_threshold = 1000;
+
+statement ok
+SET partitioned_write_max_open_files = 1;
+
+statement error
+INSERT INTO my_datalake.default.undo_write SELECT i, CASE WHEN i = 99999 THEN error('boom') ELSE i % 3 END FROM range(100000) t(i);
+----
+boom
+
+statement ok
+RESET partitioned_write_flush_threshold;
+
+statement ok
+RESET partitioned_write_max_open_files;
+
+query II
+SELECT count(*), count(DISTINCT p) FROM my_datalake.default.undo_write;
+----
+18	3
+
+query I
+SELECT count(DISTINCT split_part(parse_filename(file), '_', 1)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_write/**');
+----
+2
+
+#---------------------------------------------------------------------------
+# a CREATE TABLE AS whose query fails drops the table it created, so it can be run again
+#---------------------------------------------------------------------------
+statement error
+CREATE TABLE my_datalake.default.undo_ctas AS SELECT i, CASE WHEN i = 7 THEN error('boom') ELSE i END AS v FROM range(9) t(i);
+----
+boom
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'undo_ctas';
+----
+0
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_ctas/**');
+----
+0
+
+statement ok
+CREATE TABLE my_datalake.default.undo_ctas AS SELECT i, i AS v FROM range(9) t(i);
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_ctas;
+----
+9
+
+statement ok
+DROP TABLE my_datalake.default.undo_ctas;
+
+#---------------------------------------------------------------------------
+# files a scan skips (_SUCCESS) do not keep the table of a failed CREATE TABLE AS, so it can be run again
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 1 AS done) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_ctas_marker/_SUCCESS' (FORMAT csv);
+
+statement error
+CREATE TABLE my_datalake.default.undo_ctas_marker AS SELECT i, CASE WHEN i = 7 THEN error('boom') ELSE i END AS v FROM range(9) t(i);
+----
+boom
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'undo_ctas_marker';
+----
+0
+
+statement ok
+CREATE TABLE my_datalake.default.undo_ctas_marker AS SELECT i, i AS v FROM range(9) t(i);
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_ctas_marker;
+----
+9
+
+statement ok
+DROP TABLE my_datalake.default.undo_ctas_marker;
+
+#---------------------------------------------------------------------------
+# an INSERT in an explicit transaction is refused before it writes, so a COMMIT finds no write to undo
+#---------------------------------------------------------------------------
+statement ok
+BEGIN;
+
+statement error
+INSERT INTO my_datalake.default.undo_write SELECT i, i % 3 FROM range(10) t(i);
+----
+Transaction support is not
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_write;
+----
+18
+
+#---------------------------------------------------------------------------
+# a partitioned CREATE TABLE AS whose query fails after it has written files drops the table and deletes the files
+#---------------------------------------------------------------------------
+statement ok
+SET partitioned_write_flush_threshold = 1000;
+
+statement ok
+SET partitioned_write_max_open_files = 1;
+
+statement error
+CREATE TABLE my_datalake.default.undo_ctas_partitioned PARTITIONED BY (p) AS
+SELECT i, CASE WHEN i = 99999 THEN error('boom') ELSE i % 3 END AS p FROM range(100000) t(i);
+----
+boom
+
+statement ok
+RESET partitioned_write_flush_threshold;
+
+statement ok
+RESET partitioned_write_max_open_files;
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'undo_ctas_partitioned';
+----
+0
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_ctas_partitioned/**');
+----
+0
+
+#---------------------------------------------------------------------------
+# an unpartitioned INSERT whose query fails adds nothing
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.undo_unpartitioned (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.undo_unpartitioned SELECT i FROM range(9) t(i);
+
+statement error
+INSERT INTO my_datalake.default.undo_unpartitioned SELECT CASE WHEN i = 99999 THEN error('boom') ELSE i END FROM range(100000) t(i);
+----
+boom
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_unpartitioned;
+----
+9
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_unpartitioned/**');
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.undo_unpartitioned;
+
+#---------------------------------------------------------------------------
+# each EXECUTE of a prepared INSERT is a write of its own: one that fails undoes its own files only
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.undo_prepared (id INTEGER, p INTEGER) PARTITIONED BY (p);
+
+statement ok
+PREPARE insert_prepared AS INSERT INTO my_datalake.default.undo_prepared
+SELECT i, CASE WHEN i = $1 THEN error('boom') ELSE i % 3 END FROM range(100000) t(i);
+
+statement ok
+EXECUTE insert_prepared(-1);
+
+statement ok
+SET partitioned_write_flush_threshold = 1000;
+
+statement ok
+SET partitioned_write_max_open_files = 1;
+
+statement error
+EXECUTE insert_prepared(99999);
+----
+boom
+
+statement ok
+RESET partitioned_write_flush_threshold;
+
+statement ok
+RESET partitioned_write_max_open_files;
+
+statement ok
+EXECUTE insert_prepared(-1);
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_prepared;
+----
+200000
+
+query I
+SELECT count(DISTINCT split_part(parse_filename(file), '_', 1)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_prepared/**');
+----
+2
+
+statement ok
+DEALLOCATE insert_prepared;
+
+statement ok
+DROP TABLE my_datalake.default.undo_prepared;
+
+statement ok
+DROP TABLE my_datalake.default.undo_write;

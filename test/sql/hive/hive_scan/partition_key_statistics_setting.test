@@ -1,0 +1,37 @@
+# name: test/sql/hive/hive_scan/partition_key_statistics_setting.test
+# description: hive_scan() honors glue_enable_partition_key_statistics: no partition-key statistics by default, the bounds and the exact distinct count when true
+# group: [hive_scan]
+
+require parquet
+
+require glue
+
+# 4 partitions 10 apart, 1000 rows each: 4 distinct values
+statement ok
+COPY (SELECT i::INTEGER AS id, (10 + (i % 4) * 10)::INTEGER AS k FROM range(4000) t(i))
+TO '{TEST_DIR}/pkstats' (FORMAT parquet, PARTITION_BY (k));
+
+statement ok
+CREATE VIEW pkstats AS SELECT * FROM hive_scan('{TEST_DIR}/pkstats',
+    schema := {id: 'INTEGER', k: 'INTEGER'},
+    partitions := [{k: '10', location: NULL}, {k: '20', location: NULL}, {k: '30', location: NULL}, {k: '40', location: NULL}]);
+
+query II
+EXPLAIN SELECT k, count(*) FROM pkstats GROUP BY k;
+----
+physical_plan	<!REGEX>:.*Hash Group By.*~4 rows.*
+
+statement ok
+SET glue_enable_partition_key_statistics = true;
+
+query II
+EXPLAIN SELECT k, count(*) FROM pkstats GROUP BY k;
+----
+physical_plan	<REGEX>:.*Hash Group By.*~4 rows.*
+
+query II
+SELECT k, count(*) FROM pkstats WHERE k >= 20 GROUP BY k ORDER BY k;
+----
+20	1000
+30	1000
+40	1000

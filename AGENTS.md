@@ -15,7 +15,10 @@ testing, benchmarks). Keep it in sync when behavior changes.
 ## Build
 
 Extension template build (`extension-ci-tools`); the `duckdb` and `extension-ci-tools` submodules must be checked out.
-vcpkg is required (AWS SDK, openssl, curl, ...):
+vcpkg is required (AWS SDK, openssl, curl, ...). `vcpkg.json` takes `aws-sdk-cpp` and `aws-checksums` from the
+`vcpkg-duckdb-ports` registry and overlays `vcpkg_ports/aws-c-io`, whose patch stubs out sockets and TLS under
+emscripten so the SDK builds for wasm (there every request goes through DuckDB's HTTP layer; `CMakeLists.txt` names
+the vcpkg archives the wasm side module links):
 
 ```sh
 VCPKG_TOOLCHAIN_PATH='<vcpkg>/scripts/buildsystems/vcpkg.cmake' GEN=ninja make relassert   # what tests use
@@ -26,8 +29,8 @@ BUILD_BENCHMARK=1 ... make relassert                                            
 `ASAN_OPTIONS=detect_container_overflow=0` (otherwise false-positive container-overflow on secret/credential code).
 Each `src/` subdirectory has its own `CMakeLists.txt` (an `add_library_unity` object library appended to
 `GLUE_EXTENSION_FILES`, like DuckDB's own source tree): add new `.cpp` files there, and a new directory with
-`add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds` and `avro` (avro is
-loaded on demand for AvroSerDe tables).
+`add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds`, `avro` (avro is
+loaded on demand for AvroSerDe tables) and `iceberg` (for `ICEBERG_CATALOG`; needs `roaring` from vcpkg).
 
 Run `make format-fix` (clang-format over `src` and `test`, via the duckdb submodule) before committing.
 
@@ -40,8 +43,11 @@ SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CAT
   `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything through DuckDB's
   `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially in batches of 10 tests per process, retrying a
   failing batch twice: against the local servers a read right after a write occasionally comes back empty.
-- `test/configs/cloud_glue.json`: live AWS (credential chain, eu-central-1). `test/sql/cloud/` only runs here
-  (`require-env GLUE_TEST_CONFIG cloud`) and reads pre-existing tables in the account.
+- `test/configs/cloud_glue.json`: live AWS (credential chain, eu-west-1). `test/sql/cloud_glue/` only runs here
+  (`require-env GLUE_TEST_CONFIG cloud`) and attaches the Glue catalog both as `TYPE glue` and `TYPE iceberg`;
+  `skip_error_messages` is empty, so HTTP errors fail instead of skip.
+  A `credential_process` profile isn't resolved under the runner's HOME: export its credentials first
+  (`eval "$(aws configure export-credentials --profile <p> --format env)"`).
 
 Single test:
 
@@ -54,7 +60,7 @@ AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 \
   otherwise hangs for minutes on the EC2 metadata service. For cloud runs also export
   `AWS_PROFILE`, `AWS_CONFIG_FILE=$HOME/.aws/config` and `AWS_SHARED_CREDENTIALS_FILE=$HOME/.aws/credentials`.
 - Tests write under `{DEFAULT_S3_LOCATION}/{TEST_DIR}` so runs don't collide. `DROP TABLE`/`DROP SCHEMA` leave S3
-  files behind, and Glue has no transactions — nothing rolls back.
+  files behind, and Glue has no transactions — only a failed INSERT/CTAS cleans up after itself.
 - **Only run the tests the user asks for.** Several tests drop tables or whole Glue databases (e.g. `default`); against
   the cloud config that destroys real data. Check what a test drops before running it.
 - `test/configs/*.json` own the init SQL, env and skip policy. When something fails for one config only, skip the
@@ -99,7 +105,13 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
 - **Writing** `src/planning/glue_hive_insert.cpp`: INSERT and CTAS plan a `PhysicalCopyToFile` in the table's format
   with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. The copy is
   `GlueHiveCopy` (`src/execution/hive_copy.cpp`); for CTAS it carries the bound CREATE TABLE and creates the Glue table
-  when the sink starts, before any output is initialized, as `PhysicalInsert` does.
+  when the sink starts, before any output is initialized, as `PhysicalInsert` does. Each write gets a write id that
+  prefixes its file names; the copy adds it to the `GlueTransaction` (with the created table) and
+  `GlueHiveInsert::Finalize` completes it once the partitions are registered. A write still registered when the
+  transaction ends belongs to a failed statement: `GlueTransaction::Rollback` undoes it (`UndoHiveWrite`,
+  `src/execution/hive_write_undo.cpp`), deleting its files (by prefix) and the table a CTAS created, unless another
+  writer's data files are there or the table was created again since. A failed partition registration deletes its
+  files itself, in Finalize (the partitions it registered stay, empty).
 - **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition
