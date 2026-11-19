@@ -19,8 +19,7 @@ struct GluePrefetchedListing {
 class GlueTablePrefetchState {
 public:
 	void SetScannedSchemas(vector<string> names);
-	//! Called as a scan of database 'current' starts: from the second scan of a catalog scan on, returns true with
-	//! 'current' and the databases the scan visits after it
+	//! From the second database scan on: 'current' and the databases the catalog scan visits after it
 	bool TakeSchemasToPrefetch(const string &current, vector<string> &names);
 	void AddPrefetched(const vector<string> &names, idx_t generation);
 	//! Forget the catalog scan, and return the listings made for it
@@ -40,8 +39,7 @@ public:
 
 	//! The databases the catalog scan now under way visits
 	void RememberScannedSchemas(ClientContext &context, vector<string> names);
-	//! Called as a scan of database 'schema_name' starts: from the second scan on, lists it together with the next
-	//! databases the catalog scan visits
+	//! From the second database scan on, lists 'schema_name' together with the next databases the scan visits
 	void PrefetchTables(ClientContext &context, const string &schema_name);
 	//! Drop the listings made for the transaction that no scan used
 	void EndTransaction(GlueTablePrefetchState &state);
@@ -56,8 +54,7 @@ public:
 private:
 	GlueCatalog &catalog;
 	atomic<idx_t> generation {0};
-	//! Held while listing, so that scans of other connections and of the other children of a union wait for it
-	//! and find the listings made
+	//! Held while listing, so that concurrent scans wait and find the listings made
 	mutex lock;
 };
 

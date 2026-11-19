@@ -121,8 +121,8 @@ optional_ptr<GlueTransactionCache> GlueTransactionCache::Of(ClientContext &conte
 
 void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) {
 	// Get() not Of(): a connection-scoped cache outlives transactions and must be cleared even from a bare mutation
-	GlueTransaction::Get(context, catalog).cache->Clear();
 	catalog.Cast<GlueCatalog>().TablePrefetch().Invalidate();
+	GlueTransaction::Get(context, catalog).cache->Clear();
 	// The scope setting can change between statements, so the active transaction's cache may not be the
 	// connection-level one this write would otherwise leave stale: clear those too (all of them, matching
 	// the rollback hook — a write through any alias of the same Glue catalog must not be hidden by another's cache)

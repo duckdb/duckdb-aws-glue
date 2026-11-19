@@ -1,10 +1,10 @@
-# name: benchmark/list_tables_sequential.benchmark
-# description: list the tables of 16 databases whose GetTables takes 100 ms, in the local Glue (moto) through the fault proxy, one after another (glue_list_tables_parallelism = 1)
+# name: benchmark/list_tables.benchmark
+# description: list the tables of 16 databases whose GetTables takes 100 ms, in the local Glue (moto) through the fault proxy (glue_list_tables_parallelism lists them together)
 # group: [list_tables_benchmarks]
 
-name List the tables of 16 databases, one after another
+name List the tables of 16 slow databases
 group list_tables_benchmarks
-subgroup list_tables_sequential
+subgroup list_tables
 
 require httpfs
 
@@ -61,7 +61,6 @@ CREATE TABLE IF NOT EXISTS my_datalake.fault_slow_listing_15.t (id INTEGER);
 run
 DETACH DATABASE IF EXISTS my_datalake;
 ATTACH '123456789012' AS my_datalake (TYPE glue, ENDPOINT 'http://localhost:5556');
-SET glue_list_tables_parallelism = 1;
 SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name LIKE 'fault_slow_listing_%';
 
 result I

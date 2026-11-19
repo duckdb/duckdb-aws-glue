@@ -11,9 +11,9 @@ forwarded and overwrites the other client's change. A BatchCreatePartition on a 
 preceded by another client's registration of the same partitions at '<location>_by_another_client', so that each is
 refused with AlreadyExistsException while its files are not where Glue points. A CreatePartition on a
 fault_noncanonical_values* database registers each value with a leading '0', as another engine may spell an integer
-('01' for 1). A BatchCreatePartition on a fault_slow_partitions* database is
-forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while partitions are registered, and a
-GetTables on a fault_slow_listing* database only after SLOW_LISTING_SECONDS, as AWS Glue takes a while; one on a
+('01' for 1). A GetTables on a fault_slow_listing* database is forwarded only after SLOW_LISTING_SECONDS, as AWS
+Glue takes a while. A BatchCreatePartition on a fault_slow_partitions* database is
+forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while partitions are registered; one on a
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
