@@ -1,0 +1,133 @@
+# name: test/sql/hive/logging/glue_query_profile_retries.test
+# description: The query profile counts the Glue requests the SDK sent again
+# group: [logging]
+
+require httpfs
+
+require glue
+
+require json
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.fault_throttled_gpr;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.fault_throttled_gpr.t;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.fault_throttled_gpr.p;
+
+statement ok
+CREATE TABLE my_datalake.fault_throttled_gpr.t AS SELECT 42 AS id;
+
+# every request on a fault_throttled* database is refused once with ThrottlingException, then let through
+statement ok
+attach '{GLUE_CATALOG_ID}' as throttled_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_throttled_profile.json';
+
+query I
+SELECT id FROM throttled_dl.fault_throttled_gpr.t;
+----
+42
+
+statement ok
+SET enable_profiling = 'no_output';
+
+# the throttled GetTable is one retry and two requests; the unpartitioned table needs nothing else
+query III
+SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.request_time::DOUBLE > 0
+FROM read_json_objects('{TEST_DIR}/glue_throttled_profile.json') t(j);
+----
+1	2	true
+
+# the same through the AWS SDK's own HTTP client
+statement ok
+SET glue_network_calls_via_duckdb = false;
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_throttled_sdk_profile.json';
+
+query I
+SELECT id FROM throttled_dl.fault_throttled_gpr.t;
+----
+42
+
+statement ok
+SET enable_profiling = 'no_output';
+
+query III
+SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.request_time::DOUBLE > 0
+FROM read_json_objects('{TEST_DIR}/glue_throttled_sdk_profile.json') t(j);
+----
+1	2	true
+
+statement ok
+RESET glue_network_calls_via_duckdb;
+
+# retries on worker threads: 2 attempts for the GetTable and 2 for each of the 4 GetPartitions segments
+statement ok
+CREATE TABLE my_datalake.fault_throttled_gpr.p (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.fault_throttled_gpr.p VALUES (1, 'a'), (2, 'b');
+
+statement ok
+SET glue_get_partitions_segments = 4;
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/glue_throttled_segments_profile.json';
+
+query I
+SELECT count(*) FROM throttled_dl.fault_throttled_gpr.p;
+----
+2
+
+statement ok
+SET enable_profiling = 'no_output';
+
+statement ok
+RESET glue_get_partitions_segments;
+
+query III
+SELECT (j::VARIANT).glue.retries::UBIGINT, (j::VARIANT).glue.requests::UBIGINT, (j::VARIANT).glue.request_time::DOUBLE > 0
+FROM read_json_objects('{TEST_DIR}/glue_throttled_segments_profile.json') t(j);
+----
+5	10	true
+
+statement ok
+DETACH throttled_dl;
+
+statement ok
+DROP TABLE my_datalake.fault_throttled_gpr.t;
+
+statement ok
+DROP TABLE my_datalake.fault_throttled_gpr.p;
+
+statement ok
+DROP SCHEMA my_datalake.fault_throttled_gpr;

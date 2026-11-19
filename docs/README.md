@@ -614,6 +614,31 @@ where the SDK has none).
 `connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
 logged.
 
+With profiling enabled (`SET enable_profiling = 'json'`), the query profile reports what a query asked of Glue.
+`duckdb_available_metrics()` lists the metrics. A metric the query did not touch is absent.
+
+- `glue.requests`: Glue requests the AWS SDK attempted, every attempt counted, so retries and pages are included. It
+  does not count the credential calls of an AWS credential chain.
+- `glue.request_time`: time the query spent inside Glue API calls, in seconds, including the retries and the time the
+  AWS SDK waits between them (backoff). The parallel `GetPartitions` segments of one call are timed once, as the time
+  the query waited for all of them. Calls that run at the same time on different threads are each timed, so their sum
+  can exceed the query's wall time. It includes creating the Glue client for the first call, which reads the secret.
+- `glue.retries`: attempts the AWS SDK repeated after a failed one. Each of them is also counted in `glue.requests`.
+
+All three work with either HTTP client. A `CREATE TABLE AS` makes two calls outside the query's profile, a table lookup
+when it starts and a table drop when it is rolled back, and these are neither counted nor timed.
+
+A query that fails while it is bound, for example on a missing table (`GetTable` returns `EntityNotFound`), writes a
+profile without a `glue` entry, because DuckDB only gathers the metrics once a plan exists. Detail per request is in
+`glue_requests()` and detail per table scan is in the `GlueScan` log, both below.
+
+```sql
+SET enable_profiling = 'json';
+SET profiling_output = 'profile.json';
+SELECT count(*) FROM my_datalake.default.orders;
+SELECT (j::VARIANT).glue.requests, (j::VARIANT).glue.request_time FROM read_json_objects('profile.json') t(j);
+```
+
 The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
 `scan_id` that numbers the scans of a query from 1:
 
@@ -640,8 +665,7 @@ The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry stra
 before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
 the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got
 no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection). The retry limit is
-`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew does not go through the
-retry strategy and is not logged.
+`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew is reported like any other.
 
 ```sql
 CALL enable_logging('GlueRetry', storage = 'memory');
