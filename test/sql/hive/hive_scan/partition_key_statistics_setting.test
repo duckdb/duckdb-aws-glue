@@ -2,6 +2,9 @@
 # description: hive_scan() honors glue_enable_partition_key_statistics: no partition-key statistics by default, the bounds and the exact distinct count when true
 # group: [hive_scan]
 
+# Local Hive scans return no rows on Windows.
+require notwindows
+
 require parquet
 
 require glue
