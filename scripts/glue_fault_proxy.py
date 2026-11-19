@@ -45,7 +45,7 @@ SLOW_PARTITIONS_SECONDS = 4
 RECREATED_PREFIX = "fault_recreated_during_write"
 # BatchCreatePartition on a database with this prefix races another client registering the partitions elsewhere
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
-# CreatePartition or BatchCreatePartition on a database with this prefix registers each value with a leading '0'
+# BatchCreatePartition on a database with this prefix registers each value with a leading '0'
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
 # BatchDeletePartition on a database with this prefix races another client dropping the partitions
 RACED_DROP_PREFIX = "fault_partition_dropped"
@@ -128,14 +128,12 @@ def is_raced_partition_drop(target, database):
 
 
 def is_noncanonical_create(target, database):
-    return target in ("AWSGlue.CreatePartition", "AWSGlue.BatchCreatePartition") and database.startswith(
-        NONCANONICAL_PREFIX)
+    return target == "AWSGlue.BatchCreatePartition" and database.startswith(NONCANONICAL_PREFIX)
 
 
 def with_noncanonical_values(request):
-    """The partition as another engine registers it: each value with a leading '0'."""
-    partitions = request.get("PartitionInputList", [request.get("PartitionInput", {})])
-    for partition in partitions:
+    """The partitions as another engine registers them: each value with a leading '0'."""
+    for partition in request.get("PartitionInputList", []):
         partition["Values"] = ["0" + value for value in partition.get("Values", [])]
     return json.dumps(request).encode()
 

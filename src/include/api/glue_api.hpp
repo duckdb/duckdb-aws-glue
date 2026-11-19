@@ -109,11 +109,6 @@ public:
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                         const string &table_name, const vector<string> &values, GluePartitionDetails &result,
 	                         string *raw_json = nullptr);
-	//! Register one partition of a Hive table; its StorageDescriptor is the one of 'table', as fetched, with the
-	//! partition's location. Returns false if it already exists and 'if_not_exists' is set, throws a
-	//! CatalogException if it already exists otherwise.
-	static bool CreatePartition(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
-	                            const GluePartitionInput &partition, bool if_not_exists);
 	//! Unregister partitions (BatchDeletePartition, the data files are left in place) and return those that do not
 	//! exist; throws for the first partition Glue refuses, after retrying the errors that may pass.
 	static set<vector<string>> BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog,

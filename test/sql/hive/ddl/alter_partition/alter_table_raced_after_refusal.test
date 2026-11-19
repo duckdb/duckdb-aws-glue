@@ -1,0 +1,93 @@
+# name: test/sql/hive/ddl/alter_partition/alter_table_raced_after_refusal.test
+# description: a partition Glue refused under IF NOT EXISTS / IF EXISTS is not counted as the statement's own, so a later plain ADD / DROP of it in the same ALTER TABLE still reports that another client raced it
+# group: [alter_partition]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fault proxy registers the partitions of a BatchCreatePartition on a fault_partition_elsewhere* database
+# elsewhere first, and drops those of a BatchDeletePartition on a fault_partition_dropped* database first, as another
+# client that won the race would
+statement ok
+attach '{GLUE_CATALOG_ID}' as raced_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_partition_elsewhere_refused CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_partition_elsewhere_refused;
+
+statement ok
+CREATE TABLE my_datalake.fault_partition_elsewhere_refused.t (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+# the first add is refused under IF NOT EXISTS; the second add was checked and is refused too
+statement error
+ALTER TABLE raced_dl.fault_partition_elsewhere_refused.t ADD IF NOT EXISTS PARTITION (k = 'a') DROP IF EXISTS PARTITION (k = 'zz') ADD PARTITION (k = 'a');
+----
+<REGEX>:Catalog Error.*Partition \[a\] already exists in Glue table 'fault_partition_elsewhere_refused\.t': another client registered it after it was checked.*
+
+# a partition the statement registered itself is no race when it is added again
+statement ok
+ALTER TABLE my_datalake.fault_partition_elsewhere_refused.t ADD IF NOT EXISTS PARTITION (k = 'b') DROP IF EXISTS PARTITION (k = 'zz') ADD PARTITION (k = 'b');
+
+query I
+SELECT partition_values FROM glue_partitions('my_datalake.fault_partition_elsewhere_refused.t') ORDER BY ALL;
+----
+[a]
+[b]
+
+statement ok
+DROP SCHEMA my_datalake.fault_partition_elsewhere_refused CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_partition_dropped_refused CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_partition_dropped_refused;
+
+statement ok
+CREATE TABLE my_datalake.fault_partition_dropped_refused.t (id INTEGER, k INTEGER) PARTITIONED BY (k);
+
+statement ok
+ALTER TABLE my_datalake.fault_partition_dropped_refused.t ADD PARTITION (k = 1);
+
+# the first drop finds nothing under IF EXISTS; the second drop was checked and finds nothing too
+statement error
+ALTER TABLE raced_dl.fault_partition_dropped_refused.t DROP IF EXISTS PARTITION (k = 1) ADD IF NOT EXISTS PARTITION (k = 9) DROP PARTITION (k = 1);
+----
+<REGEX>:Catalog Error.*Partition \[1\] does not exist in Glue table 'fault_partition_dropped_refused\.t': another client dropped it after it was checked.*
+
+statement ok
+ALTER TABLE my_datalake.fault_partition_dropped_refused.t ADD PARTITION (k = 2);
+
+# a partition the statement deleted itself is no race when it is dropped again
+statement ok
+ALTER TABLE my_datalake.fault_partition_dropped_refused.t DROP PARTITION (k = 2) ADD IF NOT EXISTS PARTITION (k = 8) DROP PARTITION (k = 2);
+
+query I
+SELECT partition_values FROM glue_partitions('my_datalake.fault_partition_dropped_refused.t') ORDER BY ALL;
+----
+[8]
+[9]
+
+statement ok
+DROP SCHEMA my_datalake.fault_partition_dropped_refused CASCADE;

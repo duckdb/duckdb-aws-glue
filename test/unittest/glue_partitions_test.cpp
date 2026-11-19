@@ -26,6 +26,7 @@ static void RegisterRawPartition(Connection &con, const string &table, const vec
 	// the API needs a transaction; a failure rolls it back. No REQUIRE inside: Catch's failure exception is not a
 	// std::exception, RunFunctionInTransaction would not see it and the transaction would stay open
 	bool found = false;
+	idx_t refused = 0;
 	con.context->RunFunctionInTransaction([&]() {
 		auto &catalog = Catalog::GetCatalog(*con.context, Identifier("lake")).Cast<GlueCatalog>();
 		GlueTableInfo table_info;
@@ -36,9 +37,10 @@ static void RegisterRawPartition(Connection &con, const string &table, const vec
 		GluePartitionInput partition;
 		partition.values = values;
 		partition.location = location;
-		GlueAPI::CreatePartition(*con.context, catalog, table_info, partition, false);
+		refused = GlueAPI::BatchCreatePartitions(*con.context, catalog, table_info, {partition}).size();
 	});
 	REQUIRE(found);
+	REQUIRE(refused == 0);
 }
 
 TEST_CASE("glue_partitions lists the stored values next to the typed keys", "[glue_partitions][glue_catalog]") {

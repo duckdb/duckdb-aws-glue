@@ -15,7 +15,6 @@
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
 #include <aws/glue/model/BatchDeletePartitionRequest.h>
 #include <aws/glue/model/BatchGetPartitionRequest.h>
-#include <aws/glue/model/CreatePartitionRequest.h>
 #include <aws/glue/model/GetPartitionRequest.h>
 #include <aws/glue/model/GetPartitionsRequest.h>
 #include <aws/glue/model/Segment.h>
@@ -83,42 +82,6 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	result.fetched = make_shared_ptr<const GlueFetchedPartition>(partition);
 	if (raw_json) {
 		*raw_json = ToStdString(partition.Jsonize().View().WriteReadable());
-	}
-	return true;
-}
-
-bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
-                              const GluePartitionInput &partition, bool if_not_exists) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
-	CheckWritable(catalog, "CreatePartition");
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
-	auto &database_name = table.schema_name;
-	auto &table_name = table.name;
-
-	// A partition carries its own StorageDescriptor: the table's, with the partition's location
-	auto descriptor = FetchedTable(table).GetStorageDescriptor();
-	descriptor.SetLocation(partition.location);
-
-	Aws::Glue::Model::PartitionInput input;
-	input.SetValues(ToAwsValues(partition.values));
-	input.SetStorageDescriptor(descriptor);
-	Aws::Glue::Model::CreatePartitionRequest request;
-	SetCatalogId(request, catalog);
-	request.SetDatabaseName(database_name);
-	request.SetTableName(table_name);
-	request.SetPartitionInput(input);
-	auto outcome = client->CreatePartition(request);
-	if (!outcome.IsSuccess()) {
-		if (IsAlreadyExists(outcome)) {
-			if (if_not_exists) {
-				return false;
-			}
-			throw CatalogException("Partition [%s] already exists in Glue table '%s.%s'",
-			                       PartitionValuesToString(partition.values), database_name, table_name);
-		}
-		ThrowGlueError(outcome, StringUtil::Format("CreatePartition '%s.%s' [%s]", database_name, table_name,
-		                                           PartitionValuesToString(partition.values)));
 	}
 	return true;
 }

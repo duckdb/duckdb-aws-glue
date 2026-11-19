@@ -31,6 +31,9 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 //! NULL).
 Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
                             const LogicalType &type);
+//! Turn a partition spec {key: value, ...} into the partition values (as strings) in partition key order. The spec
+//! must name every partition key and nothing else.
+vector<string> ParsePartitionSpec(const string &function_name, const GluePartitionTarget &target, const Value &spec);
 
 //! glue_get_table_response('<catalog>.<schema>.<table>'): the Glue GetTable response for a table of an attached
 //! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
