@@ -1,4 +1,5 @@
 #include "api/glue_http_client.hpp"
+#include "core/glue_settings.hpp"
 
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -61,16 +62,12 @@ namespace {
 //! Defaults to true.
 bool NetworkCallsViaDuckDB(DatabaseInstance &db) {
 #if GLUE_HTTP_SDK_FALLBACK
-	Value value;
+	auto via_duckdb = GetSetting<bool>(db, NETWORK_VIA_DUCKDB_SETTING, true);
 	auto context = GlueHttpClientContextScope::Current();
-	if (context && context->TryGetCurrentSetting(NETWORK_VIA_DUCKDB_SETTING, value) && !value.IsNull()) {
-		return BooleanValue::Get(value);
-	}
-	if (db.TryGetCurrentSetting(NETWORK_VIA_DUCKDB_SETTING, value) && !value.IsNull()) {
-		return BooleanValue::Get(value);
-	}
-#endif
+	return context ? GetSetting<bool>(*context, NETWORK_VIA_DUCKDB_SETTING, via_duckdb) : via_duckdb;
+#else
 	return true;
+#endif
 }
 
 RequestType ToDuckDBRequestType(Aws::Http::HttpMethod method) {

@@ -16,7 +16,9 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "core/glue_log_types.hpp"
+#include "core/glue_settings.hpp"
 #include "core/glue_types.hpp"
+#include "core/hive_location.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
@@ -296,12 +298,10 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 }
 
 idx_t HiveFooterStatisticsMaxFiles(ClientContext &context) {
-	Value setting;
-	if (context.TryGetCurrentSetting("hive_footer_statistics_max_files", setting) && !setting.IsNull()) {
-		// SET checks the bound; DBConfig::SetOptionByName does not
-		return MinValue<idx_t>(setting.GetValue<idx_t>(), HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT);
-	}
-	return HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES;
+	auto max_files =
+	    GetSetting<idx_t>(context, "hive_footer_statistics_max_files", HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES);
+	// SET checks the bound; DBConfig::SetOptionByName does not
+	return MinValue<idx_t>(max_files, HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT);
 }
 
 //! The footers of every file of the table 'bind_data' scans, read by the reader's own maximum_files_for_stats on a
@@ -484,9 +484,7 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 		return info.format_statistics(context, footer_input);
 	}
 	// off by default: key statistics can cost a join on the key its run-time partition pruning
-	Value enabled;
-	if (!context.TryGetCurrentSetting("glue_enable_partition_key_statistics", enabled) || enabled.IsNull() ||
-	    !enabled.GetValue<bool>()) {
+	if (!GetSetting<bool>(context, "glue_enable_partition_key_statistics", false)) {
 		return nullptr;
 	}
 

@@ -1,6 +1,7 @@
 #include "catalog/glue_view_names.hpp"
 
 #include "catalog/glue_catalog.hpp"
+#include "core/glue_settings.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
@@ -244,7 +245,7 @@ bool UsableExternalCatalog(Catalog &catalog) {
 case_insensitive_set_t GlueViewNames::ExternalCatalogTypes(DatabaseInstance &db) {
 	case_insensitive_set_t types;
 	Value setting;
-	if (!db.TryGetCurrentSetting("experimental_glue_view_external_catalog_types", setting) || setting.IsNull()) {
+	if (!TryGetSetting(db, "experimental_glue_view_external_catalog_types", setting)) {
 		return types;
 	}
 	for (auto &type : ListValue::GetChildren(setting)) {

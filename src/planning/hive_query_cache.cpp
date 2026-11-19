@@ -1,5 +1,6 @@
 #include "planning/hive_query_cache.hpp"
 
+#include "core/glue_settings.hpp"
 #include "core/hive_location.hpp"
 
 #include "duckdb/common/file_system.hpp"
@@ -36,9 +37,7 @@ public:
 	}
 
 	void QueryEnd(ClientContext &context) override {
-		Value enabled;
-		if (!context.TryGetCurrentSetting("glue_cache_listings", enabled) || enabled.IsNull() ||
-		    !BooleanValue::Get(enabled)) {
+		if (!GetSetting<bool>(context, "glue_cache_listings", false)) {
 			Clear();
 		}
 	}

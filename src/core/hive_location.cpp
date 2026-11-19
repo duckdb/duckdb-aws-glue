@@ -7,7 +7,7 @@
 
 namespace duckdb {
 
-string ComparableLocation(const string &location) {
+string NormalizeLocation(const string &location) {
 	auto result = location;
 	StringUtil::RTrim(result, "/");
 	auto scheme = StringUtil::Lower(result.substr(0, 6));
@@ -54,8 +54,8 @@ optional_idx ListedFileSize(const OpenFileInfo &file) {
 }
 
 bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
-	auto path = ComparableLocation(file.path);
-	auto base = ComparableLocation(prefix) + "/";
+	auto path = NormalizeLocation(file.path);
+	auto base = NormalizeLocation(prefix) + "/";
 	if (!StringUtil::StartsWith(path, base)) {
 		return false;
 	}

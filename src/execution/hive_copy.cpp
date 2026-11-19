@@ -8,7 +8,6 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "core/hive_location.hpp"
-#include "planning/hive_multi_file_reader.hpp"
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
@@ -24,9 +23,9 @@ static void ThrowIfLocationInUse(ClientContext &context, GlueSchemaEntry &schema
                                  const string &location) {
 	auto &catalog = schema.catalog.Cast<GlueCatalog>();
 	auto &database_name = schema.GetDatabaseName();
-	auto target = ComparableLocation(location);
+	auto target = NormalizeLocation(location);
 	auto overlaps = [&](const string &other) {
-		return !other.empty() && LocationsOverlap(target, ComparableLocation(other));
+		return !other.empty() && LocationsOverlap(target, NormalizeLocation(other));
 	};
 	auto tables = GlueAPI::GetTables(context, catalog, database_name, false, nullptr, true);
 	for (auto &table : tables) {

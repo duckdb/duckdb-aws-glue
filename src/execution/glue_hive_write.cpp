@@ -4,7 +4,6 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_schema_set.hpp"
 #include "core/hive_location.hpp"
-#include "planning/hive_multi_file_reader.hpp"
 
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"

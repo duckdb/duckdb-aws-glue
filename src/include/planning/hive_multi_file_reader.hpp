@@ -164,7 +164,7 @@ private:
 	//! and one of them is in 'reading'
 	void ThrowIfLocationShared(idx_t owner, const unordered_set<idx_t> &reading) const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than
-	//! 'min_directory_size' characters of its ComparableLocation
+	//! 'min_directory_size' characters of its NormalizeLocation
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
 	//! IsDataFile below the deepest registered partition location containing the file (see OwningPartition), or below
 	//! the root when there is none, so a partition key such as '_k' is not read as a hidden directory
@@ -188,7 +188,7 @@ private:
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;
-	//! ComparableLocation of a registered partition location to its index in HiveScanInfo::Partitions(): the first
+	//! NormalizeLocation of a registered partition location to its index in HiveScanInfo::Partitions(): the first
 	//! partition registered there
 	mutable unordered_map<string, idx_t> partition_by_location;
 	//! For a location two or more partitions are registered at: the first of them (its entry in partition_by_location,

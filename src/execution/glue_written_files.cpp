@@ -1,4 +1,5 @@
 #include "execution/glue_written_files.hpp"
+#include "core/glue_settings.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -9,8 +10,7 @@
 namespace duckdb {
 
 bool GlueWrittenFiles::IsEnabled(ClientContext &context) {
-	Value enabled;
-	return context.TryGetCurrentSetting(SETTING, enabled) && !enabled.IsNull() && BooleanValue::Get(enabled);
+	return GetSetting<bool>(context, SETTING, false);
 }
 
 void GlueWrittenFiles::Append(ClientContext &context, const string &table, const vector<string> &files) {
