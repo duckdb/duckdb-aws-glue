@@ -475,7 +475,7 @@ query.
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
-| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`) |
+| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`); with `missing := true` also one per registered partition that is gone, and a `status` column (`added` or `missing`) |
 
 The functions that change Glue are called with `CALL`, outside a `BEGIN` transaction, since Glue has no transactions
 (see [Writing](#writing)).
@@ -518,8 +518,11 @@ WHERE (dt IS NULL) <> (partition_values[1] = '__HIVE_DEFAULT_PARTITION__')
 the partitions Glue does not have yet with `BatchCreatePartition`. A partition is a directory with one `<key>=<value>`
 component per partition key, in partition key order (keys compare case-insensitively); it is registered at that
 directory, with the values unescaped and cast to the key types (`year=07` is `7`). Directories that do not follow this
-scheme, whose values are empty or do not cast, that are already the location of a partition, or that hold no file a scan would read
-(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. A table with another
+scheme, whose values are empty or do not cast, that are already the location of a partition, or that hold no file a
+scan would read (only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. With
+`missing := true` it also reports the registered partitions whose location is below the table location but holds no
+file at all, with `status` `missing`, and keeps them (partitions located elsewhere are not listed, so they are not
+checked). A table with another
 engine's InputFormat over a Hive SerDe (one INSERT refuses too) is refused: its files are not laid out the way Hive
 writes them.
 
