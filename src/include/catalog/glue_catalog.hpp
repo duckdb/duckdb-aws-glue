@@ -84,7 +84,7 @@ public:
 	//! Called as a scan of database 'schema_name' starts: from the second scan on, lists it together with the next
 	//! databases the catalog scan visits, glue_list_tables_parallelism at a time
 	void PrefetchTables(ClientContext &context, const string &schema_name);
-	//! Drop the listings a prefetch made for these databases that no scan used
+	//! Drop the listings a prefetch made for these databases that no scan used, as the transaction ends
 	void DropListings(const vector<string> &names);
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;

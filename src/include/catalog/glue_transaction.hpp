@@ -204,7 +204,7 @@ public:
 	optional_ptr<GlueHiveWrite> FindHiveWrite(const string &write_id);
 	//! The write's files are written and its partitions registered, nothing to undo
 	void CompleteHiveWrite(const string &write_id);
-	//! The databases a prefetch listed, whose listings are dropped if no scan uses them (GlueCatalog::DropListings)
+	//! The databases a prefetch listed, whose listings no scan used are dropped when the transaction ends
 	void AddPrefetched(const vector<string> &names);
 	vector<string> TakePrefetched();
 

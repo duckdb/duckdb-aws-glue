@@ -308,10 +308,6 @@ void GlueCatalog::RememberScannedSchemas(ClientContext &context, vector<string> 
 	if (cache) {
 		cache->SetScannedSchemas(std::move(names));
 	}
-	auto transaction = Transaction::TryGet(context, GetAttached());
-	if (transaction) {
-		DropListings(transaction->Cast<GlueTransaction>().TakePrefetched());
-	}
 }
 
 void GlueCatalog::DropListings(const vector<string> &names) {
