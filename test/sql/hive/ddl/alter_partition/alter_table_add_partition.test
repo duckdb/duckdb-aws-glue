@@ -186,3 +186,28 @@ SELECT count(*) FROM glue_partitions('verify_datalake.default.orders_add');
 
 statement ok
 DROP TABLE my_datalake.default.orders_add;
+
+#---------------------------------------------------------------------------
+# a table at a local location takes local partition locations, and refuses S3 ones
+#---------------------------------------------------------------------------
+statement ok
+attach '{GLUE_CATALOG_ID}' as local_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_LOCATION '{TEST_DIR}');
+
+statement ok
+DROP TABLE IF EXISTS local_datalake.default.orders_add_local;
+
+statement ok
+CREATE TABLE local_datalake.default.orders_add_local (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+query I
+CALL glue_add_partition('local_datalake.default.orders_add_local', {dt: 'a'}, location := '{TEST_DIR}/elsewhere/dt=a');
+----
+{TEST_DIR}/elsewhere/dt=a
+
+statement error
+CALL glue_add_partition('local_datalake.default.orders_add_local', {dt: 'b'}, location := 's3://bucket/dt=b');
+----
+<REGEX>:Binder Error.*glue_add_partition: the location must be on the file system of the table location '.*', got 's3://bucket/dt=b'.*
+
+statement ok
+DROP TABLE local_datalake.default.orders_add_local;

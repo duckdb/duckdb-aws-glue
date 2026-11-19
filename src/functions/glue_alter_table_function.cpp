@@ -243,7 +243,21 @@ unique_ptr<GlobalTableFunctionState> GlueAlterTableInit(ClientContext &context, 
 	return make_uniq<GlueAlterTableState>();
 }
 
-string ParseLocation(const string &function_name, const Value &location) {
+//! The scheme of a location, lowercased; empty for a local path
+string LocationScheme(const string &location) {
+	auto end = location.find("://");
+	if (end == string::npos) {
+		return string();
+	}
+	return StringUtil::Lower(location.substr(0, end));
+}
+
+bool IsS3Scheme(const string &scheme) {
+	return scheme == "s3" || scheme == "s3a" || scheme == "s3n";
+}
+
+//! A location on the file system of the table's location: S3 for an S3 table (or one without a location in Glue)
+string ParseLocation(const string &function_name, const GluePartitionTarget &target, const Value &location) {
 	if (location.IsNull()) {
 		throw BinderException("%s: the location must not be NULL", function_name);
 	}
@@ -252,9 +266,16 @@ string ParseLocation(const string &function_name, const Value &location) {
 	if (result.empty()) {
 		throw BinderException("%s: the location must not be empty", function_name);
 	}
-	if (!StringUtil::StartsWith(StringUtil::Lower(result), "s3://") &&
-	    !StringUtil::StartsWith(StringUtil::Lower(result), "s3a://")) {
-		throw BinderException("%s: the location must be an S3 location (s3://...), got '%s'", function_name, result);
+	auto table_scheme = LocationScheme(target.table.location);
+	auto scheme = LocationScheme(result);
+	if (target.table.location.empty() || IsS3Scheme(table_scheme)) {
+		if (scheme != "s3" && scheme != "s3a") {
+			throw BinderException("%s: the location must be an S3 location (s3://...), got '%s'", function_name,
+			                      result);
+		}
+	} else if (scheme != table_scheme) {
+		throw BinderException("%s: the location must be on the file system of the table location '%s', got '%s'",
+		                      function_name, target.table.location, result);
 	}
 	return result;
 }
@@ -333,8 +354,11 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		if (name == "add") {
 			step.action = GlueAlterAction::ADD;
 			step.values = ParsePartitionPairsValue("ALTER TABLE ADD PARTITION", result->target, partition);
-			step.location = location.IsNull() ? DefaultPartitionLocation(result->target, step.values)
-			                                  : ParseLocation("ALTER TABLE ADD PARTITION", location);
+			if (location.IsNull()) {
+				step.location = DefaultPartitionLocation(result->target, step.values);
+			} else {
+				step.location = ParseLocation("ALTER TABLE ADD PARTITION", result->target, location);
+			}
 		} else if (name == "drop") {
 			step.action = GlueAlterAction::DROP;
 			step.values = ParsePartitionPairsValue("ALTER TABLE DROP PARTITION", result->target, partition);
@@ -345,10 +369,10 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		} else if (name == "set_partition_location") {
 			step.action = GlueAlterAction::SET_PARTITION_LOCATION;
 			step.values = ParsePartitionPairsValue("ALTER TABLE PARTITION SET LOCATION", result->target, partition);
-			step.location = ParseLocation("ALTER TABLE PARTITION SET LOCATION", location);
+			step.location = ParseLocation("ALTER TABLE PARTITION SET LOCATION", result->target, location);
 		} else if (name == "set_table_location") {
 			step.action = GlueAlterAction::SET_TABLE_LOCATION;
-			step.location = ParseLocation("ALTER TABLE SET LOCATION", location);
+			step.location = ParseLocation("ALTER TABLE SET LOCATION", result->target, location);
 		} else {
 			throw BinderException("glue_alter_table: unknown action '%s'", name);
 		}
@@ -545,7 +569,7 @@ unique_ptr<FunctionData> GlueAddPartitionBind(ClientContext &context, TableFunct
 	for (auto &option : input.named_parameters) {
 		auto &name = option.first.GetIdentifierName();
 		if (StringUtil::CIEquals(name, "location") && !option.second.IsNull()) {
-			step.location = ParseLocation("glue_add_partition", option.second);
+			step.location = ParseLocation("glue_add_partition", result->target, option.second);
 		} else if (StringUtil::CIEquals(name, "if_not_exists")) {
 			step.if_not_exists = OptionalFlag(option.second);
 		}
@@ -590,7 +614,7 @@ unique_ptr<FunctionData> GlueSetPartitionLocationBind(ClientContext &context, Ta
 	                               GlueAlterAction::SET_PARTITION_LOCATION);
 	auto &step = result->steps[0];
 	step.values = ParsePartitionSpec("glue_set_partition_location", result->target, input.inputs[1]);
-	step.location = ParseLocation("glue_set_partition_location", input.inputs[2]);
+	step.location = ParseLocation("glue_set_partition_location", result->target, input.inputs[2]);
 	names = {"location"};
 	return_types = {LogicalType::VARCHAR};
 	return std::move(result);
@@ -600,7 +624,7 @@ unique_ptr<FunctionData> GlueSetTableLocationBind(ClientContext &context, TableF
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result =
 	    BindSingleAction(context, "glue_set_table_location", input.inputs[0], GlueAlterAction::SET_TABLE_LOCATION);
-	result->steps[0].location = ParseLocation("glue_set_table_location", input.inputs[1]);
+	result->steps[0].location = ParseLocation("glue_set_table_location", result->target, input.inputs[1]);
 	names = {"location"};
 	return_types = {LogicalType::VARCHAR};
 	return std::move(result);
