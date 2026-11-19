@@ -1,0 +1,6 @@
+# name: benchmark/tpcds/planning/cloud_sf100/q37.benchmark
+# description: Plan (EXPLAIN) query 37 from the TPC-DS benchmark at SF100 on the partitioned parquet tables in the AWS Glue catalog
+# group: [cloud_sf100]
+
+template benchmark/tpcds/planning/cloud_sf100/tpcds_cloud_planning.benchmark.in
+QUERY_NUMBER_PADDED=37
