@@ -182,22 +182,26 @@ void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, Glue
 	CheckWritable(catalog, "BatchCreatePartition");
 
 	auto root_prefix = bind_data.root + "/";
+	// locations are compared in ComparableLocation form, so s3a:// and s3n:// partitions match an s3:// table
+	auto comparable_root_prefix = ComparableLocation(bind_data.root) + "/";
 	set<vector<string>> existing_values;
 	unordered_set<string> existing_locations;
-	// the registered partitions the listing below can tell are gone: those whose location is below the table location
-	map<vector<string>, string> listed_partitions;
+	// the registered partitions the listing below can tell are gone: those whose location is below the table location,
+	// as values -> (registered location, comparable location)
+	map<vector<string>, pair<string, string>> listed_partitions;
 	for (auto &partition : GlueAPI::GetPartitions(context, catalog, table.schema_name, table.name)) {
 		existing_values.insert(partition.values);
 		auto location = partition.location;
 		StringUtil::RTrim(location, "/");
-		if (bind_data.report_missing && StringUtil::StartsWith(location, root_prefix)) {
-			listed_partitions.emplace(partition.values, location);
+		auto comparable = ComparableLocation(location);
+		if (bind_data.report_missing && StringUtil::StartsWith(comparable, comparable_root_prefix)) {
+			listed_partitions.emplace(partition.values, make_pair(location, comparable));
 		}
-		existing_locations.insert(std::move(location));
+		existing_locations.insert(std::move(comparable));
 	}
 
-	// every directory below the table location that holds a file, at any depth: a partition location exists when
-	// an object is stored below it, as on S3
+	// with missing := true, every directory below the table location that holds a file, at any depth: a partition
+	// location exists when an object is stored below it, as on S3
 	unordered_set<string> directories_with_files;
 	unordered_set<string> seen_directories;
 	// values -> location: the first directory found for the values wins
@@ -205,10 +209,12 @@ void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, Glue
 	// never from a listing kept by glue_cache_listings (it misses files added after it), and not kept: a table can
 	// hold more files than fit in memory
 	ListFilesBelow(FileSystem::GetFileSystem(context), bind_data.root, [&](const OpenFileInfo &file) {
-		for (auto end = file.path.find_last_of('/'); end != string::npos && end > bind_data.root.size();
-		     end = file.path.find_last_of('/', end - 1)) {
-			if (!directories_with_files.insert(file.path.substr(0, end)).second) {
-				break;
+		if (bind_data.report_missing) {
+			for (auto end = file.path.find_last_of('/'); end != string::npos && end > bind_data.root.size();
+			     end = file.path.find_last_of('/', end - 1)) {
+				if (!directories_with_files.insert(ComparableLocation(file.path.substr(0, end))).second) {
+					break;
+				}
 			}
 		}
 		if (!IsDataFile(file, root_prefix)) {
@@ -229,7 +235,7 @@ void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, Glue
 			return;
 		}
 		auto location = root_prefix + partition_directory;
-		if (existing_values.count(values) || existing_locations.count(location)) {
+		if (existing_values.count(values) || existing_locations.count(ComparableLocation(location))) {
 			return;
 		}
 		discovered.emplace(std::move(values), std::move(location));
@@ -242,10 +248,10 @@ void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, Glue
 		state.added.push_back(std::move(partition));
 	}
 	for (auto &entry : listed_partitions) {
-		if (!directories_with_files.count(entry.second)) {
+		if (!directories_with_files.count(entry.second.second)) {
 			GluePartitionInput partition;
 			partition.values = entry.first;
-			partition.location = entry.second;
+			partition.location = entry.second.first;
 			state.missing.push_back(std::move(partition));
 		}
 	}

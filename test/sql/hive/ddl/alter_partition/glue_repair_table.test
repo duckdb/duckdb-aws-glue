@@ -452,6 +452,51 @@ statement ok
 DROP TABLE my_datalake.default.orders_repair_missing;
 
 #---------------------------------------------------------------------------
+# partitions registered with an s3a:// location are the same locations as the s3:// table's
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.orders_repair_s3a;
+
+statement ok
+CREATE TABLE my_datalake.default.orders_repair_s3a (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_s3a/dt=f/data.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_s3a/dt=h/data.parquet';
+
+# an empty one, one with files, and one whose directory is also the one a repair would find for other values
+statement ok
+CALL glue_add_partition('my_datalake.default.orders_repair_s3a', {dt: 'b'},
+    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/orders_repair_s3a/dt=b');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.orders_repair_s3a', {dt: 'f'},
+    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/orders_repair_s3a/dt=f');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.orders_repair_s3a', {dt: 'g'},
+    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/orders_repair_s3a/dt=h');
+
+# only the empty one is missing, reported at its registered location, and dt=h is not registered a second time
+query III
+SELECT dt, location = replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/orders_repair_s3a/dt=b', status
+FROM glue_repair_table('my_datalake.default.orders_repair_s3a', missing := true) ORDER BY status, dt;
+----
+b	true	missing
+
+query I
+SELECT dt FROM glue_partitions('my_datalake.default.orders_repair_s3a') ORDER BY dt;
+----
+b
+f
+g
+
+statement ok
+DROP TABLE my_datalake.default.orders_repair_s3a;
+
+#---------------------------------------------------------------------------
 # a partition key called status: the status column becomes status_1
 #---------------------------------------------------------------------------
 statement ok
