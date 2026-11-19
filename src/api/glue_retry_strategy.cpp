@@ -22,7 +22,7 @@ void GlueRetryStrategy::ReportRetry(const Aws::Client::AWSError<Aws::Client::Cor
 	if (!context) {
 		return;
 	}
-	GlueRequestMetrics::RecordRetry(*context);
+	GlueRequestMetrics::AddCount(*context, GlueRequestMetrics::RETRIES);
 	if (Logger::Get(*context).ShouldLog(GlueRetryLogType::NAME, GlueRetryLogType::LEVEL)) {
 		GlueRetryEvent event;
 		event.error = error.GetExceptionName().c_str();
@@ -62,24 +62,21 @@ bool GlueRetryStrategy::HasSendToken() {
 	return strategy->HasSendToken();
 }
 
-// The SDK (AWSClient::AttemptExhaustively) calls HasSendToken() before every attempt, and may stop there without
-// making one, and calls exactly one RequestBookkeeping() overload after each attempt that was made, the first
-// without and the later ones with the previous error. Counting in RequestBookkeeping() therefore counts each
-// attempt once, with either HTTP client.
-static void CountAttempt() {
+// the SDK calls exactly one RequestBookkeeping() after each attempt it makes, with either HTTP client
+void GlueRetryStrategy::ReportAttempt() const {
 	if (auto context = GlueHttpClientContextScope::Current()) {
-		GlueRequestMetrics::RecordRequest(*context);
+		GlueRequestMetrics::AddCount(*context, GlueRequestMetrics::REQUESTS);
 	}
 }
 
 void GlueRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome) {
-	CountAttempt();
+	ReportAttempt();
 	strategy->RequestBookkeeping(outcome);
 }
 
 void GlueRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome,
                                            const Aws::Client::AWSError<Aws::Client::CoreErrors> &last_error) {
-	CountAttempt();
+	ReportAttempt();
 	strategy->RequestBookkeeping(outcome, last_error);
 }
 

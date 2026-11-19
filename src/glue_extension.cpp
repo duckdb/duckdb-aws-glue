@@ -16,8 +16,8 @@
 #include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
-#include "core/glue_log_types.hpp"
 #include "api/glue_request_metrics.hpp"
+#include "core/glue_log_types.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
 #include <aws/core/Aws.h>

@@ -54,8 +54,7 @@ FROM read_json_objects('{TEST_DIR}/glue_request_metrics.json') t(j);
 ----
 2	true	true
 
-# each parallel GetPartitions segment is a request of its own: 1 GetTable + 4 GetPartitions. The time is the time the
-# query waited for the segments, which the worker threads do not add to.
+# each parallel GetPartitions segment is a request of its own: 1 GetTable + 4 GetPartitions
 statement ok
 SET glue_get_partitions_segments = 4;
 

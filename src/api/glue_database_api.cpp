@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_request_metrics.hpp"
 #include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/string_util.hpp"
@@ -15,6 +16,7 @@ namespace duckdb {
 
 vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatalog &catalog) {
 	GlueHttpClientContextScope http_scope(context);
+	GlueRequestTimer request_timer(context);
 	auto client = GetClient(context, catalog);
 	vector<GlueDatabaseInfo> result;
 	Aws::String next_token;
@@ -40,6 +42,7 @@ vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatal
 bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                           GlueDatabaseInfo &result, string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
+	GlueRequestTimer request_timer(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetDatabaseRequest request;
 	SetCatalogId(request, catalog);
@@ -64,6 +67,7 @@ GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &c
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateDatabase");
 	GlueHttpClientContextScope http_scope(context);
+	GlueRequestTimer request_timer(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::DatabaseInput input;
 	input.SetName(database.name);
@@ -92,6 +96,7 @@ GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &c
 void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	GlueHttpClientContextScope http_scope(context);
+	GlueRequestTimer request_timer(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetDatabaseRequest get_request;
 	SetCatalogId(get_request, catalog);
@@ -140,6 +145,7 @@ void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "DeleteDatabase");
 	GlueHttpClientContextScope http_scope(context);
+	GlueRequestTimer request_timer(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::DeleteDatabaseRequest request;
 	SetCatalogId(request, catalog);

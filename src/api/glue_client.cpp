@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_request_metrics.hpp"
 #include "api/glue_retry_strategy.hpp"
 
 #include "duckdb/common/string_util.hpp"
@@ -138,6 +139,7 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 //===--------------------------------------------------------------------===//
 string GlueAPI::GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog) {
 	GlueHttpClientContextScope http_scope(context);
+	GlueRequestTimer request_timer(context);
 	auto client = GetClient(context, catalog);
 	// the catalog id of the first database that is not a resource link (a link's target is another catalog)
 	Aws::String next_token;

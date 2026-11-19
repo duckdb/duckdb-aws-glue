@@ -16,23 +16,38 @@ void GlueRequestMetrics::Register(ExtensionLoader &loader) {
 	    {RETRIES, "uint64", "Glue requests the AWS SDK attempted again after a failed attempt", "requests"});
 }
 
-void GlueRequestMetrics::RecordRequest(ClientContext &context) noexcept {
+void GlueRequestMetrics::AddCount(ClientContext &context, const char *key) noexcept {
 	try {
-		auto &profiler = QueryProfiler::Get(context);
-		if (profiler.IsEnabled()) {
-			profiler.AddToMetricCounter(REQUESTS, 1);
-		}
+		QueryProfiler::Get(context).AddToMetricCounter(key, 1);
 	} catch (...) { // NOLINT: the AWS SDK must not see an exception from a metric
 	}
 }
 
-void GlueRequestMetrics::RecordRetry(ClientContext &context) noexcept {
+static thread_local bool glue_call_timed = false;
+
+GlueRequestTimer::GlueRequestTimer(ClientContext &context_p) noexcept {
+	if (glue_call_timed) {
+		return;
+	}
 	try {
-		auto &profiler = QueryProfiler::Get(context);
-		if (profiler.IsEnabled()) {
-			profiler.AddToMetricCounter(RETRIES, 1);
+		if (QueryProfiler::Get(context_p).IsEnabled()) {
+			context = &context_p;
+			glue_call_timed = true;
+			timer.Start();
 		}
-	} catch (...) { // NOLINT: the AWS SDK must not see an exception from a metric
+	} catch (...) { // NOLINT: a metric must not fail the call
+	}
+}
+
+GlueRequestTimer::~GlueRequestTimer() {
+	if (!context) {
+		return;
+	}
+	glue_call_timed = false;
+	try {
+		timer.End();
+		QueryProfiler::Get(*context).AddToMetricTiming(GlueRequestMetrics::REQUEST_TIME, timer.ElapsedNanos());
+	} catch (...) { // NOLINT: a destructor must not throw
 	}
 }
 

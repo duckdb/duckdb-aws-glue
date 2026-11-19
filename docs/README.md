@@ -584,13 +584,14 @@ With profiling enabled (`SET enable_profiling = 'json'`), the query profile repo
   does not count the credential calls of an AWS credential chain.
 - `glue.request_time`: time the query spent inside Glue API calls, in seconds, including the retries and the time the
   AWS SDK waits between them (backoff). The parallel `GetPartitions` segments of one call are timed once, as the time
-  the query waited for all of them. If calls ever run at the same time on different threads, each one is timed, so only
-  then can the total exceed the query's wall time. Creating the Glue client for the first call, which
-  reads the secret, is included.
+  the query waited for all of them. Calls that run at the same time on different threads are each timed, so their sum
+  can exceed the query's wall time. The time includes creating the Glue client for the first call, which reads the
+  secret, so the credential calls of a credential chain are timed even though `glue.requests` does not count them.
 - `glue.retries`: attempts the AWS SDK repeated after a failed one. Each of them is also counted in `glue.requests`.
 
-All three work with both HTTP clients, whatever `glue_network_calls_via_duckdb` is. Two small calls that a
-`CREATE TABLE AS` makes while it is set up and undone, a table lookup and a table drop, are neither counted nor timed.
+All three work with both HTTP clients, whatever `glue_network_calls_via_duckdb` is. A `CREATE TABLE AS` makes two
+calls outside the query's profile, a table lookup when it starts and a table drop when it is rolled back, and these are
+neither counted nor timed.
 
 A query that fails while it is bound, for example on a missing table (`GetTable` returns `EntityNotFound`), writes a
 profile without a `glue` entry, because DuckDB only gathers the metrics once a plan exists. Detail per request is in
@@ -627,8 +628,7 @@ The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry stra
 before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
 the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got
 no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection). The retry limit is
-`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew does not go through the
-retry strategy and is not logged.
+`glue_max_retries`, or 10 by default.
 
 ```sql
 CALL enable_logging('GlueRetry', storage = 'memory');

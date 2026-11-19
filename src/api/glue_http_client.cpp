@@ -1,5 +1,4 @@
 #include "api/glue_http_client.hpp"
-#include "api/glue_request_metrics.hpp"
 
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -9,7 +8,6 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/http/http_transport_manager.hpp"
-#include "duckdb/main/query_profiler.hpp"
 
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
@@ -44,35 +42,12 @@ static constexpr const char *NETWORK_VIA_DUCKDB_SETTING = "glue_network_calls_vi
 // Context scope
 //===--------------------------------------------------------------------===//
 static thread_local optional_ptr<ClientContext> current_glue_context;
-//! Whether a scope of this thread is timing already
-static thread_local bool glue_call_timed = false;
 
-GlueHttpClientContextScope::GlueHttpClientContextScope(ClientContext &context, bool time_call)
-    : previous(current_glue_context) {
+GlueHttpClientContextScope::GlueHttpClientContextScope(ClientContext &context) : previous(current_glue_context) {
 	current_glue_context = &context;
-	if (!time_call || glue_call_timed) {
-		return;
-	}
-	try {
-		if (QueryProfiler::Get(context).IsEnabled()) {
-			timed_context = &context;
-			glue_call_timed = true;
-			timer.Start();
-		}
-	} catch (...) { // NOLINT: a metric must not fail the call
-	}
 }
 
 GlueHttpClientContextScope::~GlueHttpClientContextScope() {
-	if (timed_context) {
-		glue_call_timed = false;
-		try {
-			timer.End();
-			QueryProfiler::Get(*timed_context)
-			    .AddToMetricTiming(GlueRequestMetrics::REQUEST_TIME, timer.ElapsedNanos());
-		} catch (...) { // NOLINT: a destructor must not throw
-		}
-	}
 	current_glue_context = previous;
 }
 

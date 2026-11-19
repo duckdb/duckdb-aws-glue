@@ -1,7 +1,6 @@
 #pragma once
 
 #include "duckdb/common/optional_ptr.hpp"
-#include "duckdb/common/profiler.hpp"
 
 namespace duckdb {
 class ClientContext;
@@ -20,22 +19,15 @@ bool GlueNetworkCallsViaDuckDB(DatabaseInstance &db);
 
 //! The AWS SDK creates HTTP requests without a DuckDB ClientContext, but the HTTP log belongs to a connection.
 //! Wrap every SDK call in this scope so the bridge can log the requests to the calling connection.
-//!
-//! The outermost scope of a thread also times the call for the `glue.request_time` metric, retries and backoff
-//! included, whichever HTTP client is used. A scope nested in another on the same thread is not timed again.
 class GlueHttpClientContextScope {
 public:
-	//! `time_call` is false for a scope that only provides the context, such as a worker thread of a call that the
-	//! calling thread times as a whole
-	explicit GlueHttpClientContextScope(ClientContext &context, bool time_call = true);
+	explicit GlueHttpClientContextScope(ClientContext &context);
 	~GlueHttpClientContextScope();
 
 	static optional_ptr<ClientContext> Current();
 
 private:
 	optional_ptr<ClientContext> previous;
-	optional_ptr<ClientContext> timed_context;
-	Profiler timer;
 };
 
 } // namespace duckdb
