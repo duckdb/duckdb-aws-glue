@@ -3,6 +3,7 @@
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "core/glue_log_types.hpp"
+#include "core/glue_settings.hpp"
 
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -263,36 +264,13 @@ string HiveScanInfo::Describe() const {
 	return database_name + "." + table_name;
 }
 
-//! Whether a listed object below 'prefix' (the location, with its trailing slash) is a data file. Hive skips _* and .*
-//! files and directories; EMR and S3 tools mark a directory with a <name>_$folder$ object next to it (an object, never
-//! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
-//! file of any format the reader opens
-bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
-	if (!StringUtil::StartsWith(file.path, prefix)) {
-		return false;
-	}
-	auto components = StringUtil::Split(file.path.substr(prefix.size()), '/');
-	for (auto &component : components) {
-		if (component.empty() || component[0] == '_' || component[0] == '.') {
-			return false;
-		}
-	}
-	if (components.empty() || StringUtil::EndsWith(components.back(), "_$folder$")) {
-		return false;
-	}
-	auto size = ListedFileSize(file);
-	return !size.IsValid() || size.GetIndex() > 0;
-}
-
 //! Glue tables only: a hive_scan root has no catalog, and no write through the extension clears its listing
 static bool CacheListings(ClientContext &context, const HiveScanInfo &scan_info) {
 	// a listing kept beyond the transaction may not have been made with the secret the file secret names
 	if (scan_info.catalog_name.empty() || !scan_info.file_secret.empty()) {
 		return false;
 	}
-	Value enabled;
-	return context.TryGetCurrentSetting("glue_cache_listings", enabled) && !enabled.IsNull() &&
-	       BooleanValue::Get(enabled);
+	return GetSetting<bool>(context, "glue_cache_listings", false);
 }
 
 //! Makes the open of 'file' read with the secret named 'file_secret', if any
@@ -376,7 +354,7 @@ shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {
 //! hive_partition_listing_threshold: the partitions read from which the table location is listed, when set
 static optional_idx ListingThreshold(ClientContext &context) {
 	Value setting;
-	if (context.TryGetCurrentSetting("hive_partition_listing_threshold", setting) && !setting.IsNull()) {
+	if (TryGetSetting(context, "hive_partition_listing_threshold", setting)) {
 		return setting.GetValue<idx_t>();
 	}
 	return optional_idx();
@@ -403,13 +381,13 @@ void HiveMultiFileList::PlanListings() const {
 		return;
 	}
 	// the partitions below the table root can be listed together
-	auto root = ComparableLocation(scan_info->root_location);
+	auto root = NormalizeLocation(scan_info->root_location);
 	vector<idx_t> below_root;
 	vector<idx_t> elsewhere;
 	auto partitions = scan_info->Partitions(client_context);
 	auto indexes = PartitionIndexes();
 	for (auto partition_index : *indexes) {
-		auto location = ComparableLocation((*partitions)[partition_index].location);
+		auto location = NormalizeLocation((*partitions)[partition_index].location);
 		// a location with an empty segment below the root ('t//p=x') holds files the root listing leaves out
 		bool empty_segment = location.find("//", root.size() + 1) != string::npos;
 		if (!root.empty() && location.size() > root.size() + 1 && StringUtil::StartsWith(location, root + "/") &&
@@ -472,7 +450,7 @@ void HiveMultiFileList::BuildPartitionLocations() const {
 	auto partitions = scan_info->Partitions(client_context);
 	unordered_map<string, vector<idx_t>> partitions_by_location;
 	for (idx_t i = 0; i < partitions->size(); i++) {
-		auto location = ComparableLocation((*partitions)[i].location);
+		auto location = NormalizeLocation((*partitions)[i].location);
 		if (location.empty()) {
 			continue;
 		}
@@ -515,7 +493,7 @@ void HiveMultiFileList::ThrowIfLocationShared(idx_t owner, const unordered_set<i
 }
 
 optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t min_directory_size) const {
-	auto path = ComparableLocation(file_path);
+	auto path = NormalizeLocation(file_path);
 	auto separator = path.find_last_of('/');
 	if (separator == string::npos) {
 		return optional_idx();
@@ -566,7 +544,7 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 	unordered_set<idx_t> reading(partition_indexes.begin(), partition_indexes.end());
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (idx_t i = 0; i < locations.size(); i++) {
-		auto comparable_size = ComparableLocation(locations[i]).size();
+		auto comparable_size = NormalizeLocation(locations[i]).size();
 		for (auto &file : listed[i]) {
 			// skip files of another partition registered at a location nested inside this one
 			auto owner = OwningPartition(file.path, comparable_size);
@@ -616,7 +594,7 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 	BuildPartitionLocations();
 	auto root_prefix = root + "/";
-	auto comparable_size = ComparableLocation(root).size() + 1;
+	auto comparable_size = NormalizeLocation(root).size() + 1;
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
 		if (!IsDataFile(file, root_prefix)) {
@@ -735,7 +713,7 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, scan_info->file_secret, listed);
 	// as ListPartitions keeps them: not the files of a partition registered at a location nested inside this one
 	BuildPartitionLocations();
-	auto comparable_size = ComparableLocation(location).size();
+	auto comparable_size = NormalizeLocation(location).size();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : listed) {
 		auto owner = OwningPartition(file.path, comparable_size);
@@ -752,7 +730,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	auto root = scan_info->root_location;
 	StringUtil::RTrim(root, "/");
 	auto root_prefix = root + "/";
-	auto comparable_root_size = ComparableLocation(root).size() + 1;
+	auto comparable_root_size = NormalizeLocation(root).size() + 1;
 	auto listing = HiveQueryCache::Get(client_context)
 	                   ->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info));
 	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
@@ -785,7 +763,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
-		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
+		in_sampled = sampled.IsValid() && StringUtil::StartsWith(NormalizeLocation(file.path), sampled_prefix);
 		if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
 			// pages come in key order, so the sampled partition's files are all seen
 			break;
@@ -801,7 +779,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 		if (!sampled.IsValid() && reading.count(owner.GetIndex())) {
 			sampled = owner;
 			sampled_prefix =
-			    ComparableLocation((*scan_info->Partitions(client_context))[owner.GetIndex()].location) + "/";
+			    NormalizeLocation((*scan_info->Partitions(client_context))[owner.GetIndex()].location) + "/";
 			in_sampled = true;
 		}
 		CarryFileSecret(file, scan_info->file_secret);
@@ -1117,11 +1095,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
 		{
 			// Hive reads a line of any length, read_csv none longer than max_line_size (2 MB by default)
-			idx_t max_line_size = HIVE_CSV_DEFAULT_MAX_LINE_SIZE;
-			Value setting;
-			if (context.TryGetCurrentSetting("hive_csv_max_line_size", setting) && !setting.IsNull()) {
-				max_line_size = UBigIntValue::Get(setting);
-			}
+			auto max_line_size = GetSetting<idx_t>(context, "hive_csv_max_line_size", HIVE_CSV_DEFAULT_MAX_LINE_SIZE);
 			param_map["max_line_size"] = Value::BIGINT(NumericCast<int64_t>(max_line_size));
 			// a line has to fit in one of the reader's buffers, which hold 32 MB by default
 			auto default_buffer_size = CSVReaderOptions().buffer_size_option.GetValue();
@@ -1135,9 +1109,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 			param_map["strict_mode"] = Value::BOOLEAN(false);
 			if (!scan_info->csv_options.quote.empty()) {
 				// the parallel scanner refuses null_padding together with a quoted line break (hive_csv_parallel)
-				Value parallel;
-				if (context.TryGetCurrentSetting("hive_csv_parallel", parallel) && !parallel.IsNull() &&
-				    !BooleanValue::Get(parallel)) {
+				if (!GetSetting<bool>(context, "hive_csv_parallel", true)) {
 					param_map["parallel"] = Value::BOOLEAN(false);
 				}
 			}

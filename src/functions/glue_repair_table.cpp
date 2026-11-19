@@ -18,7 +18,7 @@
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
 #include "functions/glue_functions.hpp"
-#include "planning/hive_multi_file_reader.hpp"
+#include "core/hive_location.hpp"
 
 namespace duckdb {
 

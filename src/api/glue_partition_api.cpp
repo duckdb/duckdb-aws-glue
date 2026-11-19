@@ -1,6 +1,7 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "core/glue_settings.hpp"
 
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/numeric_utils.hpp"
@@ -397,11 +398,7 @@ private:
 //! against a server given with ENDPOINT (moto ignores Segment and answers every segment with the whole table) and
 //! GLUE_DEFAULT_PARTITION_SEGMENTS against AWS.
 static int GetPartitionSegmentCount(ClientContext &context, const GlueCatalog &catalog) {
-	idx_t segments = 0;
-	Value setting;
-	if (context.TryGetCurrentSetting("glue_get_partitions_segments", setting) && !setting.IsNull()) {
-		segments = setting.GetValue<idx_t>();
-	}
+	auto segments = GetSetting<idx_t>(context, "glue_get_partitions_segments", 0);
 	if (segments == 0) {
 		segments = catalog.options.endpoint.empty() ? GLUE_DEFAULT_PARTITION_SEGMENTS : 1;
 	}
@@ -470,11 +467,7 @@ struct InjectedPartitionFailure {
 		return result;
 	}
 	static InjectedPartitionFailure FromSettings(ClientContext &context) {
-		Value setting;
-		if (!context.TryGetCurrentSetting("glue_debug_fail_partition_registration", setting) || setting.IsNull()) {
-			return InjectedPartitionFailure();
-		}
-		return Parse(setting.ToString());
+		return Parse(GetSetting<string>(context, "glue_debug_fail_partition_registration", string()));
 	}
 	bool Fails(idx_t index, idx_t attempt) const {
 		return enabled && index >= from && (attempt == 0 || !IsTransientPartitionError(code));

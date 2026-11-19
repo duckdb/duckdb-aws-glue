@@ -23,6 +23,7 @@
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 
+#include "core/glue_settings.hpp"
 #include "core/glue_types.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -114,9 +115,7 @@ static string OtherEngineOptionFor(const string &key) {
 }
 
 static void CheckBucketedTablesEnabled(ClientContext &context, const string &key) {
-	Value enabled;
-	if (context.TryGetCurrentSetting("glue_create_bucketed_tables", enabled) && !enabled.IsNull() &&
-	    enabled.GetValue<bool>()) {
+	if (GetSetting<bool>(context, "glue_create_bucketed_tables", false)) {
 		return;
 	}
 	throw BinderException("CREATE TABLE option '%s' creates a bucketed Glue table, which DuckDB can read but not "

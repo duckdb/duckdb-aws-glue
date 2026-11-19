@@ -135,6 +135,10 @@ Follow DuckDB's style (`duckdb/AGENTS.md`):
 - Exceptions for query-terminating errors (`BinderException`, `NotImplementedException`, `IOException`, ...);
   `D_ASSERT` only for programmer errors, never for anything user input or Glue responses can trigger.
 - When reading or writing vectors, use `Vector::Values<T>()` / `FlatVector::Writer<T>()` rather than `ToUnifiedFormat` loops.
+- Read settings with `GetSetting<T>(context, name, default)` (or `TryGetSetting` for a `Value`) from
+  `core/glue_settings.hpp`, not a hand-written `TryGetCurrentSetting` + `IsNull()` check. DuckDB's typed
+  `ClientContext::TryGetCurrentSetting<T>` is no substitute: it throws on a NULL setting (e.g. an option registered
+  with a NULL default).
 
 ## Change checklist
 

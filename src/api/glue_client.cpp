@@ -1,6 +1,7 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
 #include "api/glue_retry_strategy.hpp"
+#include "core/glue_settings.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -72,15 +73,7 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	auto &endpoint = catalog.options.endpoint;
 	// The glue_max_retries flag: a custom retry limit for Glue API calls. -1 (the default) keeps the SDK's own
 	// retry policy; 0 means no retries (single attempt); 1-10 sets that many retries, capped at 10.
-	int64_t glue_max_retries = -1;
-	Value glue_max_retries_setting;
-	if (context.TryGetCurrentSetting("glue_max_retries", glue_max_retries_setting) &&
-	    !glue_max_retries_setting.IsNull()) {
-		glue_max_retries = glue_max_retries_setting.GetValue<int64_t>();
-		if (glue_max_retries > 10) {
-			glue_max_retries = 10;
-		}
-	}
+	auto glue_max_retries = MinValue<int64_t>(GetSetting<int64_t>(context, "glue_max_retries", -1), 10);
 	auto cache_key = key_id + "\x1f" + session_token + "\x1f" + region + "\x1f" + endpoint + "\x1f" +
 	                 (via_duckdb ? "duckdb" : "sdk") + "\x1f" + to_string(glue_max_retries);
 

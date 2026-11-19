@@ -148,8 +148,8 @@ static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstanc
 //! the copy drops those, so it would write the files to another directory than the one the partition is read from.
 static string RelativePartitionPath(const string &table_location, const string &partition_location, bool &writable) {
 	writable = true;
-	auto prefix = ComparableLocation(table_location) + "/";
-	auto location = ComparableLocation(partition_location);
+	auto prefix = NormalizeLocation(table_location) + "/";
+	auto location = NormalizeLocation(partition_location);
 	if (!StringUtil::StartsWith(location, prefix)) {
 		return string();
 	}
@@ -755,7 +755,7 @@ using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 void GlueHiveInsert::CheckExistingPartitionLocations(ClientContext &context,
                                                      const vector<GluePartitionInput> &already_existing) const {
 	auto check = [&](const GluePartitionInput &partition, const string &registered) {
-		if (ComparableLocation(registered) != ComparableLocation(partition.location)) {
+		if (NormalizeLocation(registered) != NormalizeLocation(partition.location)) {
 			throw IOException("rows of partition [%s] were written to '%s', but the partition is registered at '%s'",
 			                  StringUtil::Join(partition.values, ", "), partition.location, registered);
 		}

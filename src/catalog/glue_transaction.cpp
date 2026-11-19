@@ -1,5 +1,6 @@
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "core/glue_settings.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "planning/hive_query_cache.hpp"
 
@@ -130,12 +131,8 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 }
 
 bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {
-	Value scope;
-	if (context.TryGetCurrentSetting("glue_metadata_cache_scope", scope) && !scope.IsNull()) {
-		return StringUtil::Lower(StringValue::Get(scope)) == "connection";
-	}
-	// matches the registered default of glue_metadata_cache_scope: 'transaction'
-	return false;
+	auto scope = GetSetting<string>(context, "glue_metadata_cache_scope", "transaction");
+	return StringUtil::Lower(scope) == "connection";
 }
 
 void GlueTransactionCache::OnDetach(ClientContext &context, Catalog &catalog) {

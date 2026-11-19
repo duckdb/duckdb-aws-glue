@@ -8,6 +8,7 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 
+#include "core/glue_settings.hpp"
 #include "core/glue_types.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
@@ -55,11 +56,7 @@ void GlueTableSet::SetTableTypeTag(GlueTable &entry) {
 }
 
 bool GlueTableSet::BatchTableLookups(ClientContext &context) {
-	Value setting;
-	if (context.TryGetCurrentSetting("glue_batch_table_lookup", setting) && !setting.IsNull()) {
-		return BooleanValue::Get(setting);
-	}
-	return true;
+	return GetSetting<bool>(context, "glue_batch_table_lookup", true);
 }
 
 void GlueTableSet::LoadEntries(ClientContext &context) {

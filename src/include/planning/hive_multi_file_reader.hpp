@@ -91,10 +91,6 @@ private:
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
 };
 
-//! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with
-//! '_' or '.', as Spark's _SUCCESS), not a directory marker (_$folder$) and not empty
-bool IsDataFile(const OpenFileInfo &file, const string &prefix);
-
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so
 //! only the partitions a query reads are ever listed. When at least 'hive_partition_listing_threshold' of those
@@ -155,7 +151,7 @@ private:
 	//! and one of them is in 'reading'
 	void ThrowIfLocationShared(idx_t owner, const unordered_set<idx_t> &reading) const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than
-	//! 'min_directory_size' characters of its ComparableLocation
+	//! 'min_directory_size' characters of its NormalizeLocation
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
 	//! Add a listed file of the partition unless this list already has it. Called with
 	//! HiveScanInfo::file_partitions_lock held.
@@ -175,7 +171,7 @@ private:
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;
-	//! ComparableLocation of a registered partition location to its index in HiveScanInfo::Partitions(): the first
+	//! NormalizeLocation of a registered partition location to its index in HiveScanInfo::Partitions(): the first
 	//! partition registered there
 	mutable unordered_map<string, idx_t> partition_by_location;
 	//! For a location two or more partitions are registered at: the first of them (its entry in partition_by_location,
