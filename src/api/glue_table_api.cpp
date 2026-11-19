@@ -2,9 +2,11 @@
 #include "api/glue_http_client.hpp"
 #include "catalog/glue_transaction.hpp"
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parallel/task_executor.hpp"
 
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/glue/model/CreateTableRequest.h>
@@ -19,10 +21,9 @@
 
 namespace duckdb {
 
-vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                         bool single_page, optional_ptr<bool> has_more, bool throw_if_denied) {
-	GlueHttpClientContextScope http_scope(context);
-	auto client = GetClient(context, catalog);
+static vector<GlueTableInfo> FetchTables(Aws::Glue::GlueClient &client, ClientContext &context, GlueCatalog &catalog,
+                                         const string &database_name, bool single_page, optional_ptr<bool> has_more,
+                                         bool throw_if_denied) {
 	vector<GlueTableInfo> result;
 	if (has_more) {
 		*has_more = false;
@@ -35,7 +36,7 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 		if (!next_token.empty()) {
 			request.SetNextToken(next_token);
 		}
-		auto outcome = client->GetTables(request);
+		auto outcome = client.GetTables(request);
 		if (!outcome.IsSuccess()) {
 			// the database was dropped after it was listed: it has no tables to list
 			if (IsEntityNotFound(outcome)) {
@@ -62,6 +63,80 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 		}
 	} while (!next_token.empty());
 	return result;
+}
+
+vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                         bool single_page, optional_ptr<bool> has_more, bool throw_if_denied) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	return FetchTables(*client, context, catalog, database_name, single_page, has_more, throw_if_denied);
+}
+
+class FetchDatabaseTablesTask : public BaseExecutorTask {
+public:
+	FetchDatabaseTablesTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
+	                        GlueCatalog &catalog, const vector<string> &database_names, const string &fail_database,
+	                        atomic<idx_t> &next, vector<GlueDatabaseTables> &results)
+	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog),
+	      database_names(database_names), fail_database(fail_database), next(next), results(results) {
+	}
+
+	void ExecuteTask() override {
+		GlueHttpClientContextScope http_scope(context);
+		while (!context.IsInterrupted()) {
+			auto index = next++;
+			if (index >= database_names.size()) {
+				return;
+			}
+			try {
+				auto tables = FetchTables(client, context, catalog, database_names[index], false, nullptr, false);
+				if (StringUtil::CIEquals(database_names[index], fail_database)) {
+					throw GlueException("injected by glue_debug_fail_list_tables", false);
+				}
+				results[index].tables = std::move(tables);
+				results[index].fetched = true;
+			} catch (const GlueException &) {
+				// the scan lists it again and reports the error there
+			}
+		}
+	}
+	string TaskType() const override {
+		return "FetchDatabaseTablesTask";
+	}
+
+private:
+	ClientContext &context;
+	Aws::Glue::GlueClient &client;
+	GlueCatalog &catalog;
+	const vector<string> &database_names;
+	const string &fail_database;
+	atomic<idx_t> &next;
+	vector<GlueDatabaseTables> &results;
+};
+
+vector<GlueDatabaseTables> GlueAPI::GetTablesOfDatabases(ClientContext &context, GlueCatalog &catalog,
+                                                         const vector<string> &database_names, idx_t parallelism) {
+	vector<GlueDatabaseTables> results(database_names.size());
+	if (database_names.empty()) {
+		return results;
+	}
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	Value fail_setting;
+	string fail_database;
+	if (context.TryGetCurrentSetting("glue_debug_fail_list_tables", fail_setting) && !fail_setting.IsNull()) {
+		fail_database = fail_setting.ToString();
+	}
+	atomic<idx_t> next(0);
+	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+	auto tasks = MinValue<idx_t>(parallelism, database_names.size());
+	for (idx_t i = 0; i < tasks; i++) {
+		executor.ScheduleTask(make_uniq<FetchDatabaseTablesTask>(executor, context, *client, catalog, database_names,
+		                                                         fail_database, next, results));
+	}
+	executor.WorkOnTasks();
+	context.BlockingInterruptCheck();
+	return results;
 }
 
 bool GlueAPI::GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,

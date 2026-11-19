@@ -47,6 +47,7 @@ void GlueTransaction::Commit() {
 			                   write->database_name, write->table_name);
 		}
 	}
+	glue_catalog.TablePrefetch().EndTransaction(cache->prefetch_state);
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
@@ -54,6 +55,8 @@ void GlueTransaction::Commit() {
 
 void GlueTransaction::Rollback() {
 	UndoHiveWrite();
+	glue_catalog.TablePrefetch().Invalidate();
+	glue_catalog.TablePrefetch().EndTransaction(cache->prefetch_state);
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
@@ -118,6 +121,7 @@ optional_ptr<GlueTransactionCache> GlueTransactionCache::Of(ClientContext &conte
 
 void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) {
 	// Get() not Of(): a connection-scoped cache outlives transactions and must be cleared even from a bare mutation
+	catalog.Cast<GlueCatalog>().TablePrefetch().Invalidate();
 	GlueTransaction::Get(context, catalog).cache->Clear();
 	// The scope setting can change between statements, so the active transaction's cache may not be the
 	// connection-level one this write would otherwise leave stale: clear those too (all of them, matching

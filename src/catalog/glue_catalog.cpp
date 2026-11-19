@@ -22,6 +22,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_file_credentials.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_table_prefetch.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/glue_view.hpp"
@@ -31,7 +32,7 @@
 namespace duckdb {
 
 GlueCatalog::GlueCatalog(AttachedDatabase &db_p, AccessMode access_mode, GlueAttachOptions options_p)
-    : Catalog(db_p), access_mode(access_mode), options(std::move(options_p)), schemas(*this) {
+    : Catalog(db_p), access_mode(access_mode), options(std::move(options_p)), schemas(*this), table_prefetch(*this) {
 }
 
 GlueCatalog::~GlueCatalog() {
@@ -295,7 +296,12 @@ string GlueCatalog::GetTableLocation(const GlueDatabaseInfo &database, const str
 }
 
 void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
-	schemas.Scan(context, [&](CatalogEntry &schema) { callback(schema.Cast<GlueSchemaEntry>()); });
+	vector<string> names;
+	schemas.Scan(context, [&](CatalogEntry &schema) {
+		names.push_back(schema.name.GetIdentifierName());
+		callback(schema.Cast<GlueSchemaEntry>());
+	});
+	table_prefetch.RememberScannedSchemas(context, std::move(names));
 }
 
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
@@ -303,13 +309,21 @@ vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientConte
 	string name;
 	if (filters.GetSchemaOid() ||
 	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
-		return Catalog::GetSchemasForScan(context, filters);
+		auto scanned = Catalog::GetSchemasForScan(context, filters);
+		// the scan visits only what the filters kept
+		vector<string> names;
+		for (auto &schema : scanned) {
+			names.push_back(schema.get().name.GetIdentifierName());
+		}
+		table_prefetch.RememberScannedSchemas(context, std::move(names));
+		return scanned;
 	}
 	vector<reference<SchemaCatalogEntry>> result;
 	auto entry = schemas.GetEntry(context, name);
 	if (entry) {
 		result.push_back(entry->Cast<SchemaCatalogEntry>());
 	}
+	table_prefetch.RememberScannedSchemas(context, entry ? vector<string> {name} : vector<string>());
 	return result;
 }
 

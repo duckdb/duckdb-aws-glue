@@ -65,6 +65,8 @@ public:
 	void Alter(CatalogTransaction transaction, AlterInfo &info) override;
 	void Scan(ClientContext &context, CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
 	void Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
+	//! Without prefetching: the suggestions search only some databases
+	SimilarCatalogEntry GetSimilarEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
 	//! Serves a single-name equality on the entry name with one table lookup instead of listing every table
 	void Scan(ClientContext &context, SchemaScanInfo &info) override;
 	void DropEntry(ClientContext &context, DropInfo &info) override;

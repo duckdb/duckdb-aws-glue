@@ -1051,7 +1051,24 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	if (!CatalogTypeIsSupported(type)) {
 		return;
 	}
+	catalog.Cast<GlueCatalog>().TablePrefetch().PrefetchTables(context, name.GetIdentifierName());
 	tables.Scan(context, callback);
+}
+
+SimilarCatalogEntry GlueSchemaEntry::GetSimilarEntry(CatalogTransaction transaction,
+                                                     const EntryLookupInfo &lookup_info) {
+	SimilarCatalogEntry result;
+	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
+		return result;
+	}
+	tables.Scan(transaction.GetContext(), [&](CatalogEntry &entry) {
+		auto score = StringUtil::SimilarityRating(entry.name.GetIdentifierName(), lookup_info.GetEntryName());
+		if (score > result.score) {
+			result.score = score;
+			result.name = Identifier(entry.name.GetIdentifierName());
+		}
+	});
+	return result;
 }
 
 void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalog/glue_table_prefetch.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -74,6 +75,9 @@ public:
 	idx_t Id() const {
 		return id;
 	}
+
+public:
+	GlueTablePrefetchState prefetch_state;
 
 private:
 	static idx_t NextId();

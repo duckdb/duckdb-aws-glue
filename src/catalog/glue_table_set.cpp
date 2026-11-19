@@ -66,8 +66,14 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 	if (is_loaded) {
 		return;
 	}
-	auto tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName());
 	auto cache = GlueTransactionCache::Of(context, catalog);
+	vector<GlueTableInfo> tables;
+	if (prefetched && prefetched_generation == catalog.TablePrefetch().Generation()) {
+		tables = std::move(*prefetched);
+	} else {
+		tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName());
+	}
+	prefetched.reset();
 	for (auto &table : tables) {
 		if (cache) {
 			// Without this the per reference GetEntry re-fetches every table this one request
@@ -96,6 +102,27 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 		entries.emplace(table.name, std::move(entry));
 	}
 	is_loaded = true;
+}
+
+bool GlueTableSet::NeedsListing(idx_t generation) {
+	lock_guard<mutex> guard(entry_lock);
+	return !is_loaded && !(prefetched && prefetched_generation == generation);
+}
+
+void GlueTableSet::DropListing(idx_t generation) {
+	lock_guard<mutex> guard(entry_lock);
+	if (prefetched_generation == generation) {
+		prefetched.reset();
+	}
+}
+
+void GlueTableSet::SetListing(idx_t generation, vector<GlueTableInfo> tables) {
+	lock_guard<mutex> guard(entry_lock);
+	if (is_loaded) {
+		return;
+	}
+	prefetched = make_uniq<vector<GlueTableInfo>>(std::move(tables));
+	prefetched_generation = generation;
 }
 
 void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache) {
@@ -210,6 +237,8 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 
 optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> entry) {
 	lock_guard<mutex> guard(entry_lock);
+	// a pending listing predates this change
+	prefetched.reset();
 	auto name = entry->name.GetIdentifierName();
 	RetireEntry(name);
 	auto result = entries.emplace(name, std::move(entry));
@@ -218,6 +247,7 @@ optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> en
 
 void GlueTableSet::RemoveEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
+	prefetched.reset();
 	RetireEntry(name);
 }
 
