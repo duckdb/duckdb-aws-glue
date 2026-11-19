@@ -738,7 +738,20 @@ their timings (5 runs each) in two jobs of about three minutes, so it runs only 
 queries. The parquet job runs `benchmark/*.benchmark`, the parquet benchmarks of `benchmark/pushdown/` and
 `benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
 `benchmark/pushdown/` and `benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
-other queries and the json and avro TPC benchmarks only run locally.
+other queries and the json and avro TPC benchmarks only run locally. Six more jobs plan all 99 TPC-DS queries
+(`benchmark/tpcds/planning/local_sf1/`, below), about seven minutes each.
+
+`benchmark/tpcds/planning/local_sf1/` plans (`EXPLAIN`) the 99 TPC-DS queries at SF1 on parquet tables in the local
+Glue whose fact tables have one partition per day, as many as at SF100, so planning makes as many Glue and S3
+requests as on the cloud tables. Its load writes the tables through moto and SeaweedFS; the queries are planned
+through the latency proxies of `scripts/docker-compose.yml` (`scripts/latency_proxy.py`, ports 5558 and 9101), which
+delay each Glue request by 40 ms (at most 10 at a time) and each S3 request by 15 ms. A request that waits for
+another one adds its delay and requests in flight together share it, so a change that makes Glue calls or listings
+serial shows up as time, as it does against AWS. The delays are fitted to the planning times of the cloud tables
+from a GitHub runner (`CloudTPCDSBenchmark.yml`: 109 s for the 99 queries, 123 s locally). The proxies keep the
+answers to reads, as moto takes seconds for a GetPartitions of 1800 partitions: restart them
+(`docker compose -f scripts/docker-compose.yml restart glue-latency-proxy s3-latency-proxy`) after rebuilding the
+fixture. `GLUE_LATENCY_MS`, `GLUE_MAX_CONCURRENCY` and `S3_LATENCY_MS` change the delays.
 
 `benchmark/tpcds/cloud_sf100/partitioned/` runs the 99 TPC-DS queries at SF100 on parquet tables in a live AWS Glue
 catalog (`176760123605`, us-east-1, database `tpcds_sf100_partitioned`), whose fact tables have one partition per day
@@ -749,6 +762,8 @@ optimizer); it reads the text of DuckDB's query files, so both suites follow the
 pr_number=123`), merged into the head of the branch it targets, with that head, or the branch it is started on (`--ref`) with that
 branch a day ago (its newest first-parent commit older than 24 hours), on them; `-f benchmarks=execution` or `-f benchmarks=planning` runs one of
 the two suites (default both, in 8 and 2 parallel jobs). A maintainer starts it.
+`scripts/benchmarks/generate_tpcds_benchmarks.sh` writes the per-query files of the three suites; the regression
+jobs fail when they are out of date.
 
 ## Building
 
