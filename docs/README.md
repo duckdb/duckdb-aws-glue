@@ -187,7 +187,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   `bigint` to `int`, `double` to `int` or `string` to `int` do not. Nested types are not checked.
 - Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
   `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
-  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
+  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too. Filters that depend only on
+  `"$path"` or `filename` are applied to listed paths before files are opened, so nonmatching files are not read; the
+  relevant file locations are still listed.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
