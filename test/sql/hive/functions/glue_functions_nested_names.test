@@ -8,11 +8,14 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
@@ -37,7 +40,7 @@ SELECT * FROM glue_partitions('my_datalake.zz.nested_names_db.pt');
 does not support nested schemas: zz.nested_names_db
 
 statement error
-SELECT * FROM glue_partitions('my_datalake.default.nested_names_db.pt');
+SELECT * FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.nested_names_db.pt');
 ----
 does not support nested schemas
 

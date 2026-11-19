@@ -20,6 +20,8 @@
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
+#include <cmath>
+
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
@@ -116,8 +118,9 @@ static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const 
 	if (lines == 0) {
 		return optional_idx();
 	}
-	auto bytes_per_line = static_cast<double>(sample_size) / static_cast<double>(lines);
-	auto rows = static_cast<idx_t>(static_cast<double>(file_size) / bytes_per_line);
+	// rounded, not truncated: a file the sample reads whole has exactly its lines, which the division can miss by one
+	auto rows = static_cast<idx_t>(
+	    std::llround(static_cast<double>(file_size) * static_cast<double>(lines) / static_cast<double>(sample_size)));
 	rows = rows > header_lines ? rows - header_lines : 0;
 	return MaxValue<idx_t>(rows, 1);
 }

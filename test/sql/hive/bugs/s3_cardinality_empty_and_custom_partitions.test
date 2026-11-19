@@ -25,61 +25,64 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.mixloc;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.mixloc;
 
 statement ok
-CREATE TABLE my_datalake.default.mixloc (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.mixloc (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.mixloc SELECT i, 'd1' FROM generate_series(1,300) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.mixloc SELECT i, 'd1' FROM generate_series(1,300) t(i);
 
 # one ordinary partition, 300 rows
 query II
-SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.mixloc')), (SELECT count(*) FROM my_datalake.default.mixloc);
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.mixloc')), (SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.mixloc);
 ----
 1	300
 
 # register a second partition that has no data at all
 statement ok
-CALL glue_add_partition('my_datalake.default.mixloc', {dt:'d_empty'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.mixloc', {dt:'d_empty'});
 
 query II
-SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.mixloc')), (SELECT count(*) FROM my_datalake.default.mixloc);
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.mixloc')), (SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.mixloc);
 ----
 2	300
 
 # THE DEFECT: the table still holds 300 rows, so the estimate must not have grown for an empty partition.
 # Today it is ~4,000 (two partitions), where before the empty one it was ~2,000.
 query II
-EXPLAIN SELECT * FROM my_datalake.default.mixloc;
+EXPLAIN SELECT * FROM my_datalake.{GLUE_TEST_DB}.mixloc;
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~[1-9][0-9]{0,2} rows?.*
 
 # ---- a custom location must not change the values or the read ---------------------------------------
 statement ok
-INSERT INTO my_datalake.default.mixloc SELECT i, 'd2' FROM generate_series(1,50) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.mixloc SELECT i, 'd2' FROM generate_series(1,50) t(i);
 
 statement ok
-CALL glue_set_partition_location('my_datalake.default.mixloc', {dt:'d2'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/mixloc/moved_d2');
+CALL glue_set_partition_location('my_datalake.{GLUE_TEST_DB}.mixloc', {dt:'d2'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/mixloc/moved_d2');
 
 # the rows written before the move stay at the old path, so d2 reads empty -- that is the documented
 # behaviour of SET LOCATION, asserted here so the statistics work does not quietly change it
 query I
-SELECT count(*) FROM my_datalake.default.mixloc;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.mixloc;
 ----
 300
 
 # the partition VALUES are unchanged by the move, which is what statistics are built from
 query T
-SELECT dt FROM glue_partitions('my_datalake.default.mixloc') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.mixloc') ORDER BY dt;
 ----
 d1
 d2
@@ -87,9 +90,9 @@ d_empty
 
 # and a filter on the moved partition's value still resolves, returning nothing rather than erroring
 query I
-SELECT count(*) FROM my_datalake.default.mixloc WHERE dt = 'd2';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.mixloc WHERE dt = 'd2';
 ----
 0
 
 statement ok
-DROP TABLE my_datalake.default.mixloc;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.mixloc;

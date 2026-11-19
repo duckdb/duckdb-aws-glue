@@ -8,42 +8,45 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_as_text;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_as_text;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_as_binary;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_as_binary;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_invalid;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_invalid;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_mixed;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_mixed;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_nested;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_nested;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_both;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_both;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_both_invalid;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_both_invalid;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_nested_binary;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_nested_binary;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_nested_list;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_nested_list;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bytes_nested_map;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bytes_nested_map;
 
 # a BLOB column is written as BYTE_ARRAY without a logical type
 statement ok
@@ -55,12 +58,12 @@ SELECT typeof(c) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_te
 BLOB
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_as_text (id INTEGER, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_text');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_as_text (id INTEGER, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_text');
 
 # the table has no binary column, so the reader itself reads the bytes as text (binary_as_string), not as an
 # escaped rendering of them
 query IIII
-SELECT id, replace(replace(c, chr(9), '<TAB>'), chr(10), '<LF>'), length(c), typeof(c) FROM my_datalake.default.bytes_as_text ORDER BY id;
+SELECT id, replace(replace(c, chr(9), '<TAB>'), chr(10), '<LF>'), length(c), typeof(c) FROM my_datalake.{GLUE_TEST_DB}.bytes_as_text ORDER BY id;
 ----
 1	plain	5	VARCHAR
 2	ü€😀	3	VARCHAR
@@ -73,7 +76,7 @@ statement ok
 SET binary_as_string = false;
 
 query II
-SELECT id, c FROM my_datalake.default.bytes_as_text WHERE id = 2;
+SELECT id, c FROM my_datalake.{GLUE_TEST_DB}.bytes_as_text WHERE id = 2;
 ----
 2	ü€😀
 
@@ -82,35 +85,35 @@ RESET binary_as_string;
 
 # filters and functions see the decoded text
 query I
-SELECT id FROM my_datalake.default.bytes_as_text WHERE c = 'ü€😀';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_as_text WHERE c = 'ü€😀';
 ----
 2
 
 query I
-SELECT id FROM my_datalake.default.bytes_as_text WHERE c > 'q' ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_as_text WHERE c > 'q' ORDER BY id;
 ----
 2
 3
 
 query I
-SELECT id FROM my_datalake.default.bytes_as_text WHERE c IN ('plain', 'line' || chr(10) || 'break') ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_as_text WHERE c IN ('plain', 'line' || chr(10) || 'break') ORDER BY id;
 ----
 1
 4
 
 query I
-SELECT upper(c) FROM my_datalake.default.bytes_as_text WHERE id = 1;
+SELECT upper(c) FROM my_datalake.{GLUE_TEST_DB}.bytes_as_text WHERE id = 1;
 ----
 PLAIN
 
 # a scan that reads no column (count(*) passes only a virtual column id) and one that mixes a virtual column in
 query I
-SELECT count(*) FROM my_datalake.default.bytes_as_text;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bytes_as_text;
 ----
 5
 
 query II
-SELECT c, filename LIKE '%bytes_as_text%' FROM my_datalake.default.bytes_as_text WHERE id = 2;
+SELECT c, filename LIKE '%bytes_as_text%' FROM my_datalake.{GLUE_TEST_DB}.bytes_as_text WHERE id = 2;
 ----
 ü€😀	true
 
@@ -119,10 +122,10 @@ statement ok
 COPY (SELECT * FROM (VALUES (1, '\xC3\xBC'::BLOB), (2, '\x00\xFF'::BLOB)) t(id, b) ORDER BY id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_binary/data.parquet' (FORMAT PARQUET);
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_as_binary (id INTEGER, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_binary');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_as_binary (id INTEGER, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_as_binary');
 
 query III
-SELECT id, b, typeof(b) FROM my_datalake.default.bytes_as_binary ORDER BY id;
+SELECT id, b, typeof(b) FROM my_datalake.{GLUE_TEST_DB}.bytes_as_binary ORDER BY id;
 ----
 1	\xC3\xBC	BLOB
 2	\x00\xFF	BLOB
@@ -132,7 +135,7 @@ statement ok
 SET binary_as_string = true;
 
 query III
-SELECT id, b, typeof(b) FROM my_datalake.default.bytes_as_binary ORDER BY id;
+SELECT id, b, typeof(b) FROM my_datalake.{GLUE_TEST_DB}.bytes_as_binary ORDER BY id;
 ----
 1	\xC3\xBC	BLOB
 2	\x00\xFF	BLOB
@@ -146,15 +149,15 @@ statement ok
 COPY (SELECT 1 AS id, '\xFF\xFE'::BLOB AS c) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid/data.parquet' (FORMAT PARQUET);
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_invalid (id INTEGER, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_invalid (id INTEGER, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid');
 
 statement error
-SELECT c FROM my_datalake.default.bytes_invalid;
+SELECT c FROM my_datalake.{GLUE_TEST_DB}.bytes_invalid;
 ----
 Invalid string encoding found in Parquet file "{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid/data.parquet": value "\xFF\xFE" is not valid UTF8!
 
 statement error
-SELECT id FROM my_datalake.default.bytes_invalid WHERE c = 'x';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_invalid WHERE c = 'x';
 ----
 Invalid string encoding found in Parquet file "{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_invalid/data.parquet": value "\xFF\xFE" is not valid UTF8!
 
@@ -164,10 +167,10 @@ statement ok
 COPY (SELECT * FROM (VALUES (1, encode('plain'), '\x00\xFF'::BLOB), (2, encode('ü€😀'), '\xC3\xBC'::BLOB), (3, encode('tab' || chr(9) || 'here'), NULL), (4, NULL, NULL), (5, encode('\x41'), NULL)) t(id, c, b) ORDER BY id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both/data.parquet' (FORMAT PARQUET);
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_both (id INTEGER, c VARCHAR, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_both (id INTEGER, c VARCHAR, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both');
 
 query IIIIII
-SELECT id, replace(c, chr(9), '<TAB>'), length(c), typeof(c), b, typeof(b) FROM my_datalake.default.bytes_both ORDER BY id;
+SELECT id, replace(c, chr(9), '<TAB>'), length(c), typeof(c), b, typeof(b) FROM my_datalake.{GLUE_TEST_DB}.bytes_both ORDER BY id;
 ----
 1	plain	5	VARCHAR	\x00\xFF	BLOB
 2	ü€😀	3	VARCHAR	\xC3\xBC	BLOB
@@ -177,38 +180,38 @@ SELECT id, replace(c, chr(9), '<TAB>'), length(c), typeof(c), b, typeof(b) FROM 
 
 # the filter compares the text, not the bytes: the four characters \x41 are not the byte 0x41 ('A')
 query I
-SELECT id FROM my_datalake.default.bytes_both WHERE c = 'ü€😀';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_both WHERE c = 'ü€😀';
 ----
 2
 
 query I
-SELECT id FROM my_datalake.default.bytes_both WHERE c = '\x41';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_both WHERE c = '\x41';
 ----
 5
 
 query I
-SELECT id FROM my_datalake.default.bytes_both WHERE c = 'A';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_both WHERE c = 'A';
 ----
 
 query I
-SELECT id FROM my_datalake.default.bytes_both WHERE c > 'q' ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_both WHERE c > 'q' ORDER BY id;
 ----
 2
 3
 
 query I
-SELECT id FROM my_datalake.default.bytes_both WHERE c < 'a' ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_both WHERE c < 'a' ORDER BY id;
 ----
 5
 
 query I
-SELECT id FROM my_datalake.default.bytes_both WHERE c IN ('plain', 'ü€😀') ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_both WHERE c IN ('plain', 'ü€😀') ORDER BY id;
 ----
 1
 2
 
 query II
-SELECT count(*), count(c) FROM my_datalake.default.bytes_both;
+SELECT count(*), count(c) FROM my_datalake.{GLUE_TEST_DB}.bytes_both;
 ----
 5	4
 
@@ -216,7 +219,7 @@ statement ok
 SET binary_as_string = true;
 
 query III
-SELECT id, c, b FROM my_datalake.default.bytes_both WHERE id = 2;
+SELECT id, c, b FROM my_datalake.{GLUE_TEST_DB}.bytes_both WHERE id = 2;
 ----
 2	ü€😀	\xC3\xBC
 
@@ -228,20 +231,20 @@ statement ok
 COPY (SELECT 1 AS id, '\xFF\xFE'::BLOB AS c, '\x00'::BLOB AS b) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both_invalid/data.parquet' (FORMAT PARQUET);
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_both_invalid (id INTEGER, c VARCHAR, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both_invalid');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_both_invalid (id INTEGER, c VARCHAR, b BLOB) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_both_invalid');
 
 statement error
-SELECT c FROM my_datalake.default.bytes_both_invalid;
+SELECT c FROM my_datalake.{GLUE_TEST_DB}.bytes_both_invalid;
 ----
 Failure in decode: could not convert blob to UTF8 string, the blob contained invalid UTF8 characters.
 
 statement error
-SELECT id FROM my_datalake.default.bytes_both_invalid WHERE c = 'x';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.bytes_both_invalid WHERE c = 'x';
 ----
 Failure in decode: could not convert blob to UTF8 string, the blob contained invalid UTF8 characters.
 
 query I
-SELECT b FROM my_datalake.default.bytes_both_invalid;
+SELECT b FROM my_datalake.{GLUE_TEST_DB}.bytes_both_invalid;
 ----
 \x00
 
@@ -255,10 +258,10 @@ SELECT typeof(s), typeof(c) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/
 VARCHAR	BLOB
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_mixed (id INTEGER, s VARCHAR, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_mixed');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_mixed (id INTEGER, s VARCHAR, c VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_mixed');
 
 query III
-SELECT id, s, c FROM my_datalake.default.bytes_mixed WHERE s = c;
+SELECT id, s, c FROM my_datalake.{GLUE_TEST_DB}.bytes_mixed WHERE s = c;
 ----
 1	ü€😀	ü€😀
 
@@ -299,10 +302,10 @@ statement ok
 COPY (SELECT 1 AS id, {'s': encode('ü'), 'n': 1} AS st) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested/data.parquet' (FORMAT PARQUET);
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_nested (id INTEGER, st STRUCT(s VARCHAR, n INTEGER)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_nested (id INTEGER, st STRUCT(s VARCHAR, n INTEGER)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested');
 
 query I
-SELECT st.s FROM my_datalake.default.bytes_nested;
+SELECT st.s FROM my_datalake.{GLUE_TEST_DB}.bytes_nested;
 ----
 ü
 
@@ -312,33 +315,33 @@ statement ok
 COPY (SELECT 1 AS id, {'s': encode('ü'), 'b': '\xC3\xBC'::BLOB} AS st) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_binary/data.parquet' (FORMAT PARQUET);
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_nested_binary (id INTEGER, st STRUCT(s VARCHAR, b BLOB)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_binary');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_nested_binary (id INTEGER, st STRUCT(s VARCHAR, b BLOB)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_binary');
 
 query III
-SELECT st.s, st.b, typeof(st.b) FROM my_datalake.default.bytes_nested_binary;
+SELECT st.s, st.b, typeof(st.b) FROM my_datalake.{GLUE_TEST_DB}.bytes_nested_binary;
 ----
 \xC3\xBC	\xC3\xBC	BLOB
 
 statement ok
-DROP TABLE my_datalake.default.bytes_as_text;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_as_text;
 
 statement ok
-DROP TABLE my_datalake.default.bytes_as_binary;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_as_binary;
 
 statement ok
-DROP TABLE my_datalake.default.bytes_invalid;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_invalid;
 
 statement ok
-DROP TABLE my_datalake.default.bytes_mixed;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_mixed;
 
 statement ok
-DROP TABLE my_datalake.default.bytes_nested;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_nested;
 
 statement ok
-DROP TABLE my_datalake.default.bytes_both;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_both;
 
 statement ok
-DROP TABLE my_datalake.default.bytes_both_invalid;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_both_invalid;
 
 # a binary element of an array or map column counts as a binary column too: the string column is decoded, the bytes
 # in the array and the map are kept (non-ASCII bytes: read as text they would fail the nested cast back to BLOB)
@@ -346,10 +349,10 @@ statement ok
 COPY (SELECT 1 AS id, encode('ü') AS c, ['\xC3\xBC'::BLOB, NULL] AS bl) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_list/data.parquet' (FORMAT PARQUET);
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_nested_list (id INTEGER, c VARCHAR, bl BLOB[]) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_list');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_nested_list (id INTEGER, c VARCHAR, bl BLOB[]) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_list');
 
 query III
-SELECT c, bl, typeof(bl) FROM my_datalake.default.bytes_nested_list;
+SELECT c, bl, typeof(bl) FROM my_datalake.{GLUE_TEST_DB}.bytes_nested_list;
 ----
 ü	['\\xC3\\xBC', NULL]	BLOB[]
 
@@ -357,18 +360,18 @@ statement ok
 COPY (SELECT 1 AS id, encode('ü') AS c, MAP {'k': '\xC3\xBC'::BLOB} AS m) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_map/data.parquet' (FORMAT PARQUET);
 
 statement ok
-CREATE TABLE my_datalake.default.bytes_nested_map (id INTEGER, c VARCHAR, m MAP(VARCHAR, BLOB)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_map');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bytes_nested_map (id INTEGER, c VARCHAR, m MAP(VARCHAR, BLOB)) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bytes_nested_map');
 
 query III
-SELECT c, m, typeof(m) FROM my_datalake.default.bytes_nested_map;
+SELECT c, m, typeof(m) FROM my_datalake.{GLUE_TEST_DB}.bytes_nested_map;
 ----
 ü	{k='\\xC3\\xBC'}	MAP(VARCHAR, BLOB)
 
 statement ok
-DROP TABLE my_datalake.default.bytes_nested_binary;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_nested_binary;
 
 statement ok
-DROP TABLE my_datalake.default.bytes_nested_list;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_nested_list;
 
 statement ok
-DROP TABLE my_datalake.default.bytes_nested_map;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bytes_nested_map;

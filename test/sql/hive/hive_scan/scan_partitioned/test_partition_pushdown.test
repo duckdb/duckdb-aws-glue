@@ -10,15 +10,18 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.pp_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.pp_orders;
 
 statement ok
 SET enable_external_file_cache=false;
@@ -29,24 +32,24 @@ statement ok
 SET threads = 16;
 
 statement ok
-CREATE TABLE my_datalake.default.pp_orders (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.pp_orders (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
 
 # six partitions below the table location ...
 statement ok
-INSERT INTO my_datalake.default.pp_orders VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.pp_orders VALUES
     (1, 10.0, '2016-05-14', 'IN'), (2, 11.0, '2016-05-14', 'US'),
     (3, 20.0, '2016-05-15', 'IN'), (4, 21.0, '2016-05-15', 'US'),
     (5, 30.0, '2016-05-16', 'IN'), (6, 31.0, '2016-05-16', 'US');
 
 # ... and one at a custom location outside it
 statement ok
-COPY (SELECT 7 AS id, 40.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom_in/data.parquet';
+COPY (SELECT 7 AS id, 40.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/zz_custom_in/data.parquet';
 
 statement ok
-CALL glue_add_partition('my_datalake.default.pp_orders', {dt: '2016-06-01', country: 'IN'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom_in');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.pp_orders', {dt: '2016-06-01', country: 'IN'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/zz_custom_in');
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.pp_orders');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.pp_orders');
 ----
 7
 
@@ -79,27 +82,27 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_orders WHERE dt = '2016-05-15';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE dt = '2016-05-15';
 ----
 2
 
 query I
 SELECT dir FROM listed_dirs() ORDER BY dir;
 ----
-default/pp_orders/dt=2016-05-15/country=IN/
-default/pp_orders/dt=2016-05-15/country=US/
+{GLUE_TEST_DB}/pp_orders/dt=2016-05-15/country=IN/
+{GLUE_TEST_DB}/pp_orders/dt=2016-05-15/country=US/
 
 #---------------------------------------------------------------------------
 # dynamic partition pruning tests
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.pp_days;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.pp_days;
 
 statement ok
-CREATE TABLE my_datalake.default.pp_days (id INTEGER, day_sk INTEGER) PARTITIONED BY (day_sk);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.pp_days (id INTEGER, day_sk INTEGER) PARTITIONED BY (day_sk);
 
 statement ok
-INSERT INTO my_datalake.default.pp_days VALUES (1, 2450815), (2, 2450816), (3, 2450817), (4, 2450817);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.pp_days VALUES (1, 2450815), (2, 2450816), (3, 2450817), (4, 2450817);
 
 statement ok
 CREATE TEMP TABLE wanted_days AS SELECT 2450817 AS d;
@@ -108,7 +111,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_days o, wanted_days w WHERE o.day_sk = w.d;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_days o, wanted_days w WHERE o.day_sk = w.d;
 ----
 2
 
@@ -129,7 +132,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_days o, wanted_days w WHERE o.id = w.d - 2450814;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_days o, wanted_days w WHERE o.id = w.d - 2450814;
 ----
 1
 
@@ -141,7 +144,7 @@ SELECT count(*) FROM read_files() WHERE file LIKE '%/pp_days/%';
 # several join keys: a range of partitions is read. Planning, before the join prunes, measures one file of the
 # partitions the scan may read, so one file of another partition can be read either way.
 statement ok
-INSERT INTO my_datalake.default.pp_days VALUES (5, 2450818), (6, NULL);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.pp_days VALUES (5, 2450818), (6, NULL);
 
 statement ok
 CREATE TEMP TABLE wanted_range AS SELECT * FROM (VALUES (2450817), (2450818)) t(d);
@@ -150,7 +153,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_days o, wanted_range w WHERE o.day_sk = w.d;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_days o, wanted_range w WHERE o.day_sk = w.d;
 ----
 3
 
@@ -172,7 +175,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_days o, wanted_pairs w WHERE o.day_sk = w.d AND o.id = w.id;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_days o, wanted_pairs w WHERE o.day_sk = w.d AND o.id = w.id;
 ----
 2
 
@@ -188,16 +191,16 @@ true
 
 # the same with a Hive table on the build side
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.pp_wanted;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.pp_wanted;
 
 statement ok
-CREATE TABLE my_datalake.default.pp_wanted AS SELECT * FROM wanted_range;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.pp_wanted AS SELECT * FROM wanted_range;
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_days o, my_datalake.default.pp_wanted w WHERE o.day_sk = w.d;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_days o, my_datalake.{GLUE_TEST_DB}.pp_wanted w WHERE o.day_sk = w.d;
 ----
 3
 
@@ -219,14 +222,14 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_days o, wanted_range w WHERE o.day_sk = w.d;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_days o, wanted_range w WHERE o.day_sk = w.d;
 ----
 3
 
 query I
 SELECT dir FROM listed_dirs();
 ----
-default/pp_days/
+{GLUE_TEST_DB}/pp_days/
 
 query I
 SELECT count(DISTINCT regexp_extract(file, 'day_sk=[^/]+')) FROM read_files() WHERE file LIKE '%/pp_days/day_sk=245081_/%' AND (file LIKE '%day_sk=2450817/%' OR file LIKE '%day_sk=2450818/%');
@@ -242,10 +245,10 @@ statement ok
 RESET hive_partition_listing_threshold;
 
 statement ok
-DROP TABLE my_datalake.default.pp_wanted;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.pp_wanted;
 
 statement ok
-DROP TABLE my_datalake.default.pp_days;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.pp_days;
 
 #---------------------------------------------------------------------------
 # a filter on both partition keys lists one partition
@@ -254,14 +257,14 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query II
-SELECT id, amount FROM my_datalake.default.pp_orders WHERE dt = '2016-05-15' AND country = 'IN';
+SELECT id, amount FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE dt = '2016-05-15' AND country = 'IN';
 ----
 3	20.0
 
 query I
 SELECT dir FROM listed_dirs();
 ----
-default/pp_orders/dt=2016-05-15/country=IN/
+{GLUE_TEST_DB}/pp_orders/dt=2016-05-15/country=IN/
 
 #---------------------------------------------------------------------------
 # a range: the partitions at and after 2016-05-16, including the one at the custom location
@@ -270,16 +273,16 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT sum(amount) FROM my_datalake.default.pp_orders WHERE dt >= '2016-05-16';
+SELECT sum(amount) FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE dt >= '2016-05-16';
 ----
 101.0
 
 query I
 SELECT dir FROM listed_dirs() ORDER BY dir;
 ----
-custom_in/
-default/pp_orders/dt=2016-05-16/country=IN/
-default/pp_orders/dt=2016-05-16/country=US/
+{GLUE_TEST_DB}/pp_orders/dt=2016-05-16/country=IN/
+{GLUE_TEST_DB}/pp_orders/dt=2016-05-16/country=US/
+zz_custom_in/
 
 #---------------------------------------------------------------------------
 # a filter on the second partition key only
@@ -288,7 +291,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_orders WHERE country = 'IN';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE country = 'IN';
 ----
 4
 
@@ -304,7 +307,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_orders WHERE dt = '1999-01-01';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE dt = '1999-01-01';
 ----
 0
 
@@ -320,7 +323,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_orders WHERE amount > 15;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE amount > 15;
 ----
 5
 
@@ -334,7 +337,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_orders;
 ----
 7
 
@@ -345,13 +348,13 @@ SELECT count(*) FROM listed_dirs();
 
 # Test CommonSubplanOptimizer does not trigger S3 listing during planning
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.pp_orders_twin;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.pp_orders_twin;
 
 statement ok
-CREATE TABLE my_datalake.default.pp_orders_twin (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.pp_orders_twin (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
 
 statement ok
-INSERT INTO my_datalake.default.pp_orders_twin VALUES (8, 50.0, '2016-05-14', 'IN'), (9, 51.0, '2016-05-14', 'US');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.pp_orders_twin VALUES (8, 50.0, '2016-05-14', 'IN'), (9, 51.0, '2016-05-14', 'US');
 
 # the same join twice, one common subplan, CommonSubplanOptimizer does not trigger listing
 statement ok
@@ -359,9 +362,9 @@ CALL truncate_duckdb_logs();
 
 query II
 EXPLAIN SELECT sum(c) FROM (
-    SELECT count(*) c FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt
+    SELECT count(*) c FROM my_datalake.{GLUE_TEST_DB}.pp_orders o JOIN my_datalake.{GLUE_TEST_DB}.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt
     UNION ALL
-    SELECT count(*) FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt);
+    SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_orders o JOIN my_datalake.{GLUE_TEST_DB}.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt);
 ----
 physical_plan	<REGEX>:.*CTE Name: __common_subplan.*
 
@@ -378,9 +381,9 @@ CALL truncate_duckdb_logs();
 # produced by HiveScanSerialize as identity
 query II
 EXPLAIN SELECT sum(c) FROM (
-    SELECT count(*) c FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'IN' GROUP BY o.dt
+    SELECT count(*) c FROM my_datalake.{GLUE_TEST_DB}.pp_orders o JOIN my_datalake.{GLUE_TEST_DB}.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'IN' GROUP BY o.dt
     UNION ALL
-    SELECT count(*) FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt);
+    SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_orders o JOIN my_datalake.{GLUE_TEST_DB}.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt);
 ----
 physical_plan	<!REGEX>:.*__common_subplan.*
 
@@ -391,12 +394,12 @@ SELECT count(*) FROM listed_dirs();
 2
 
 query II
-EXPLAIN SELECT id FROM my_datalake.default.pp_orders UNION ALL SELECT id FROM my_datalake.default.pp_orders_twin;
+EXPLAIN SELECT id FROM my_datalake.{GLUE_TEST_DB}.pp_orders UNION ALL SELECT id FROM my_datalake.{GLUE_TEST_DB}.pp_orders_twin;
 ----
 physical_plan	<!REGEX>:.*__common_subplan.*
 
 statement ok
-DROP TABLE my_datalake.default.pp_orders_twin;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.pp_orders_twin;
 
 #---------------------------------------------------------------------------
 # with the threshold lowered, the partitions below the table location are read with one recursive listing of the
@@ -409,14 +412,14 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query III
-SELECT id, dt, country FROM my_datalake.default.pp_orders WHERE dt = '2016-05-15' ORDER BY id;
+SELECT id, dt, country FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE dt = '2016-05-15' ORDER BY id;
 ----
 3	2016-05-15	IN
 4	2016-05-15	US
 
 # the root once: the cardinality estimate lists it while planning and the scan reuses that listing
 query II
-SELECT count(*) FILTER (WHERE dir = 'default/pp_orders/'), count(*) FILTER (WHERE dir LIKE 'default/pp_orders/dt=2016-05-15/%') FROM listed_dirs();
+SELECT count(*) FILTER (WHERE dir = '{GLUE_TEST_DB}/pp_orders/'), count(*) FILTER (WHERE dir LIKE '{GLUE_TEST_DB}/pp_orders/dt=2016-05-15/%') FROM listed_dirs();
 ----
 1	0
 
@@ -430,19 +433,19 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query II
-SELECT count(*), sum(id) FROM my_datalake.default.pp_orders;
+SELECT count(*), sum(id) FROM my_datalake.{GLUE_TEST_DB}.pp_orders;
 ----
 7	28
 
 query I
-SELECT dir FROM listed_dirs() WHERE dir NOT LIKE 'default/pp_orders/dt=%' ORDER BY dir;
+SELECT dir FROM listed_dirs() WHERE dir NOT LIKE '{GLUE_TEST_DB}/pp_orders/dt=%' ORDER BY dir;
 ----
-custom_in/
-default/pp_orders/
+{GLUE_TEST_DB}/pp_orders/
+zz_custom_in/
 
 # and no partition on top: the estimate took the root listing the scan reuses
 query I
-SELECT count(*) FROM listed_dirs() WHERE dir LIKE 'default/pp_orders/dt=%';
+SELECT count(*) FROM listed_dirs() WHERE dir LIKE '{GLUE_TEST_DB}/pp_orders/dt=%';
 ----
 0
 
@@ -451,12 +454,12 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.pp_orders WHERE country = 'US';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE country = 'US';
 ----
 3
 
 query II
-SELECT count(*) FILTER (WHERE dir = 'default/pp_orders/'), count(*) FILTER (WHERE dir LIKE 'default/pp_orders/dt=%/country=US/') FROM listed_dirs();
+SELECT count(*) FILTER (WHERE dir = '{GLUE_TEST_DB}/pp_orders/'), count(*) FILTER (WHERE dir LIKE '{GLUE_TEST_DB}/pp_orders/dt=%/country=US/') FROM listed_dirs();
 ----
 1	0
 
@@ -480,7 +483,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT id FROM my_datalake.default.pp_orders WHERE dt = '2016-05-15';
+EXPLAIN SELECT id FROM my_datalake.{GLUE_TEST_DB}.pp_orders WHERE dt = '2016-05-15';
 
 query I
 SELECT count(*) FROM listed_dirs();
@@ -490,7 +493,7 @@ SELECT count(*) FROM listed_dirs();
 # and it is one of the two partitions this query reads, not an arbitrary one. Which of the two gets listed
 # is a job-ordering detail and deliberately not pinned
 query I
-SELECT count(*) FROM listed_dirs() WHERE dir LIKE 'default/pp_orders/dt=2016-05-15/%';
+SELECT count(*) FROM listed_dirs() WHERE dir LIKE '{GLUE_TEST_DB}/pp_orders/dt=2016-05-15/%';
 ----
 1
 
@@ -504,12 +507,12 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT id FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_orders',
+SELECT id FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pp_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partitions := [
         {dt: '2016-05-14', country: 'IN', location: NULL},
         {dt: '2016-05-15', country: 'IN', location: NULL},
-        {dt: '2016-06-01', country: 'IN', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom_in'}
+        {dt: '2016-06-01', country: 'IN', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/zz_custom_in'}
     ])
 WHERE dt = '2016-06-01';
 ----
@@ -518,14 +521,15 @@ WHERE dt = '2016-06-01';
 query I
 SELECT dir FROM listed_dirs();
 ----
-custom_in/
+zz_custom_in/
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE my_datalake.default.pp_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.pp_orders;

@@ -8,69 +8,72 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.altusing_tbl;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.altusing_tbl;
 
 statement ok
-CREATE TABLE my_datalake.default.altusing_tbl (i INTEGER, j INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl (i INTEGER, j INTEGER);
 
 statement ok
-INSERT INTO my_datalake.default.altusing_tbl VALUES (1, 10), (2, 20);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.altusing_tbl VALUES (1, 10), (2, 20);
 
 # the data files can not be rewritten, so a USING expression is refused
 statement error
-ALTER TABLE my_datalake.default.altusing_tbl ALTER COLUMN i TYPE BIGINT USING i + 100;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl ALTER COLUMN i TYPE BIGINT USING i + 100;
 ----
 <REGEX>:Not implemented Error:.*USING is not supported for Hive tables.*
 
 statement error
-ALTER TABLE my_datalake.default.altusing_tbl ALTER COLUMN i SET DATA TYPE BIGINT USING j;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl ALTER COLUMN i SET DATA TYPE BIGINT USING j;
 ----
 <REGEX>:Not implemented Error:.*USING is not supported for Hive tables.*
 
 statement error
-ALTER TABLE my_datalake.default.altusing_tbl ALTER COLUMN i TYPE BIGINT USING i::VARCHAR;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl ALTER COLUMN i TYPE BIGINT USING i::VARCHAR;
 ----
 <REGEX>:Not implemented Error:.*USING is not supported for Hive tables.*
 
 # nothing changed
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'altusing_tbl' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'altusing_tbl' ORDER BY column_index;
 ----
 i	INTEGER
 j	INTEGER
 
 query II
-SELECT i, j FROM my_datalake.default.altusing_tbl ORDER BY i;
+SELECT i, j FROM my_datalake.{GLUE_TEST_DB}.altusing_tbl ORDER BY i;
 ----
 1	10
 2	20
 
 # a USING that is the plain cast of the column is what ALTER COLUMN TYPE does anyway
 statement ok
-ALTER TABLE my_datalake.default.altusing_tbl ALTER COLUMN i TYPE BIGINT USING CAST(i AS BIGINT);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl ALTER COLUMN i TYPE BIGINT USING CAST(i AS BIGINT);
 
 statement ok
-ALTER TABLE my_datalake.default.altusing_tbl ALTER COLUMN j TYPE BIGINT;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl ALTER COLUMN j TYPE BIGINT;
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'altusing_tbl' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'altusing_tbl' ORDER BY column_index;
 ----
 i	BIGINT
 j	BIGINT
 
 query II
-SELECT i, j FROM my_datalake.default.altusing_tbl ORDER BY i;
+SELECT i, j FROM my_datalake.{GLUE_TEST_DB}.altusing_tbl ORDER BY i;
 ----
 1	10
 2	20
 
 statement ok
-DROP TABLE my_datalake.default.altusing_tbl;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.altusing_tbl;

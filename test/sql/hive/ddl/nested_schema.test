@@ -8,11 +8,14 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
@@ -28,7 +31,7 @@ does not support nested schemas
 
 # under a database that exists too
 statement error
-CREATE SCHEMA my_datalake.default.ddl_nested_child;
+CREATE SCHEMA my_datalake.{GLUE_TEST_DB}.ddl_nested_child;
 ----
 does not support nested schemas
 
@@ -55,7 +58,7 @@ DROP SCHEMA IF EXISTS my_datalake.zz.ddl_nested_child CASCADE;
 does not support nested schemas
 
 statement error
-DROP SCHEMA my_datalake.default.ddl_nested_child;
+DROP SCHEMA my_datalake.{GLUE_TEST_DB}.ddl_nested_child;
 ----
 does not support nested schemas
 

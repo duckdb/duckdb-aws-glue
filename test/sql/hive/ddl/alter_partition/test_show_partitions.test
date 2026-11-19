@@ -8,32 +8,35 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.flight_delays;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.flight_delays;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.impressions_partitions;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.impressions_partitions;
 
 # a flight_delays table, partitioned by year
 statement ok
-CREATE TABLE my_datalake.default.flight_delays (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.flight_delays (flight VARCHAR, delay INTEGER, year INTEGER) PARTITIONED BY (year);
 
 statement ok
-INSERT INTO my_datalake.default.flight_delays VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.flight_delays VALUES
     ('AA1', 5, 2007), ('AA2', 0, 2015), ('AA3', 12, 1999), ('AA4', 3, 1993), ('AA5', 7, 2015);
 
 #---------------------------------------------------------------------------
 # glue_partitions(flight_delays_csv)  (unsorted, one <key>=<value> string per partition)
 #---------------------------------------------------------------------------
 query I
-SELECT 'year=' || year FROM glue_partitions('my_datalake.default.flight_delays') ORDER BY 1;
+SELECT 'year=' || year FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flight_delays') ORDER BY 1;
 ----
 year=1993
 year=1999
@@ -44,7 +47,7 @@ year=2015
 # SELECT * FROM glue_partitions(flight_delays_csv) ORDER BY year  (typed partition columns, sorted)
 #---------------------------------------------------------------------------
 query I
-SELECT year FROM glue_partitions('my_datalake.default.flight_delays') ORDER BY year;
+SELECT year FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flight_delays') ORDER BY year;
 ----
 1993
 1999
@@ -53,27 +56,27 @@ SELECT year FROM glue_partitions('my_datalake.default.flight_delays') ORDER BY y
 
 # the partition columns have the types of the Glue partition keys
 query II
-SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM glue_partitions('my_datalake.default.flight_delays'));
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flight_delays'));
 ----
 year	INTEGER
 location	VARCHAR
 partition_values	VARCHAR[]
 
 query I
-SELECT location FROM glue_partitions('my_datalake.default.flight_delays') WHERE year = 2007;
+SELECT location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flight_delays') WHERE year = 2007;
 ----
-{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/flight_delays/year=2007
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/flight_delays/year=2007
 
 # the second docs example: impressions partitioned by a dt string
 statement ok
-CREATE TABLE my_datalake.default.impressions_partitions (requestid VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.impressions_partitions (requestid VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.impressions_partitions VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.impressions_partitions VALUES
     ('r1', '2009-04-12-16-00'), ('r2', '2009-04-13-18-15'), ('r3', '2009-04-14-00-20'), ('r4', '2009-04-12-16-00');
 
 query I
-SELECT 'dt=' || dt FROM glue_partitions('my_datalake.default.impressions_partitions') ORDER BY 1;
+SELECT 'dt=' || dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.impressions_partitions') ORDER BY 1;
 ----
 dt=2009-04-12-16-00
 dt=2009-04-13-18-15
@@ -83,27 +86,27 @@ dt=2009-04-14-00-20
 # glue_partitions shows the partitions in metadata, not the partitions in the file system
 #---------------------------------------------------------------------------
 statement ok
-COPY (SELECT 'AA9' AS flight, 1 AS delay) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/flight_delays/year=2020/data.parquet';
+COPY (SELECT 'AA9' AS flight, 1 AS delay) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/flight_delays/year=2020/data.parquet';
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.flight_delays') WHERE year = 2020;
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flight_delays') WHERE year = 2020;
 ----
 0
 
 statement ok
-CALL glue_repair_table('my_datalake.default.flight_delays');
+CALL glue_repair_table('my_datalake.{GLUE_TEST_DB}.flight_delays');
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.flight_delays') WHERE year = 2020;
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flight_delays') WHERE year = 2020;
 ----
 1
 
 # a dropped partition disappears from the listing even though its files remain
 statement ok
-CALL glue_drop_partition('my_datalake.default.flight_delays', {year: 1993});
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.flight_delays', {year: 1993});
 
 query I
-SELECT year FROM glue_partitions('my_datalake.default.flight_delays') ORDER BY year;
+SELECT year FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flight_delays') ORDER BY year;
 ----
 1999
 2007
@@ -112,13 +115,13 @@ SELECT year FROM glue_partitions('my_datalake.default.flight_delays') ORDER BY y
 
 # only partitioned tables have partitions
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.flight_delays_plain;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.flight_delays_plain;
 
 statement ok
-CREATE TABLE my_datalake.default.flight_delays_plain (flight VARCHAR, delay INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.flight_delays_plain (flight VARCHAR, delay INTEGER);
 
 statement error
-SELECT * FROM glue_partitions('my_datalake.default.flight_delays_plain');
+SELECT * FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flight_delays_plain');
 ----
 not partitioned
 
@@ -128,10 +131,10 @@ SELECT * FROM glue_partitions('memory.main.nope');
 ----
 
 statement ok
-DROP TABLE my_datalake.default.flight_delays_plain;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.flight_delays_plain;
 
 statement ok
-DROP TABLE my_datalake.default.flight_delays;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.flight_delays;
 
 statement ok
-DROP TABLE my_datalake.default.impressions_partitions;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.impressions_partitions;

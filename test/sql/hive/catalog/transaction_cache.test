@@ -8,21 +8,24 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.tc_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.tc_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.tc_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.tc_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.tc_orders VALUES (1, 10.0, '2026-01-01'), (2, 20.0, '2026-01-02'), (3, 30.0, '2026-01-03');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.tc_orders VALUES (1, 10.0, '2026-01-01'), (2, 20.0, '2026-01-02'), (3, 30.0, '2026-01-03');
 
 statement ok
 CREATE MACRO glue_calls(api) AS (
@@ -40,7 +43,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 3
 
@@ -56,7 +59,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM (SELECT id FROM my_datalake.default.tc_orders UNION ALL SELECT id FROM my_datalake.default.TC_ORDERS);
+SELECT count(*) FROM (SELECT id FROM my_datalake.{GLUE_TEST_DB}.tc_orders UNION ALL SELECT id FROM my_datalake.{GLUE_TEST_DB}.TC_ORDERS);
 ----
 6
 
@@ -70,7 +73,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 3
 
@@ -87,7 +90,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 3
 
@@ -95,7 +98,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 3
 
@@ -106,7 +109,7 @@ SELECT glue_calls('GetPartitions'), glue_calls('GetTable');
 
 # Glue DDL stays rejected inside an explicit transaction (no transaction support in Glue)
 statement error
-CALL glue_add_partition('my_datalake.default.tc_orders', {dt: '2026-01-04'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.tc_orders', {dt: '2026-01-04'});
 ----
 <REGEX>:.*Transaction.*
 
@@ -115,13 +118,13 @@ COMMIT;
 
 # a partition added between transactions invalidates: the next statement resolves again
 statement ok
-CALL glue_add_partition('my_datalake.default.tc_orders', {dt: '2026-01-04'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.tc_orders', {dt: '2026-01-04'});
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 3
 
@@ -138,25 +141,25 @@ statement ok
 BEGIN;
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 3
 
 # existing partition: seen, the directory is listed by the scan
 statement ok con2
-INSERT INTO my_datalake.default.tc_orders VALUES (5, 50.0, '2026-01-01');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.tc_orders VALUES (5, 50.0, '2026-01-01');
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 4
 
 # new partition: not seen, the partition list is the transaction's
 statement ok con2
-INSERT INTO my_datalake.default.tc_orders VALUES (4, 40.0, '2026-01-05');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.tc_orders VALUES (4, 40.0, '2026-01-05');
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 4
 
@@ -164,13 +167,13 @@ statement ok
 COMMIT;
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 5
 
 # the cache does not change what is read
 query III
-SELECT id, amount, dt FROM my_datalake.default.tc_orders ORDER BY id;
+SELECT id, amount, dt FROM my_datalake.{GLUE_TEST_DB}.tc_orders ORDER BY id;
 ----
 1	10.0	2026-01-01
 2	20.0	2026-01-02
@@ -184,17 +187,17 @@ statement ok
 BEGIN;
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 5
 
 statement error
-SELECT no_such_column FROM my_datalake.default.tc_orders;
+SELECT no_such_column FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 <REGEX>:.*no_such_column.*
 
 statement error
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 <REGEX>:.*(aborted|invalidated).*
 
@@ -205,7 +208,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 ----
 5
 
@@ -217,7 +220,7 @@ SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
 # under the default (transaction) scope a prepared statement's execute-time bind refetches: prepare and
 # execute run in two transactions and the cache does not outlive the first
 statement ok
-PREPARE tc_prepared AS SELECT count(*) FROM my_datalake.default.tc_orders;
+PREPARE tc_prepared AS SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_orders;
 
 statement ok
 CALL truncate_duckdb_logs();
@@ -238,10 +241,10 @@ DEALLOCATE tc_prepared;
 # a table partitioned by two keys caches and prunes the same: served within the transaction,
 # re-resolved after a partition with both keys is registered
 statement ok
-CREATE TABLE my_datalake.default.tc_sales (id INTEGER, y VARCHAR, m VARCHAR) PARTITIONED BY (y, m);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.tc_sales (id INTEGER, y VARCHAR, m VARCHAR) PARTITIONED BY (y, m);
 
 statement ok
-INSERT INTO my_datalake.default.tc_sales VALUES (1, '2025', '01'), (2, '2025', '02'), (3, '2026', '01');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.tc_sales VALUES (1, '2025', '01'), (2, '2025', '02'), (3, '2026', '01');
 
 statement ok
 BEGIN;
@@ -250,7 +253,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.tc_sales;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_sales;
 ----
 3
 
@@ -264,7 +267,7 @@ CALL truncate_duckdb_logs();
 
 # the second statement is served from the first; pruning on both partition levels reads through the cache
 query I
-SELECT count(*) FROM my_datalake.default.tc_sales WHERE y = '2025' AND m = '01';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.tc_sales WHERE y = '2025' AND m = '01';
 ----
 1
 
@@ -278,13 +281,13 @@ COMMIT;
 
 # registering a partition with values for both keys invalidates: the next statement sees it
 statement ok
-CALL glue_add_partition('my_datalake.default.tc_sales', {y: '2026', m: '02'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.tc_sales', {y: '2026', m: '02'});
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query II
-SELECT y, m FROM glue_partitions('my_datalake.default.tc_sales') ORDER BY y, m;
+SELECT y, m FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.tc_sales') ORDER BY y, m;
 ----
 2025	01
 2025	02
@@ -297,7 +300,7 @@ SELECT glue_calls('GetPartitions');
 1
 
 statement ok
-DROP TABLE my_datalake.default.tc_sales;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.tc_sales;
 
 statement ok
-DROP TABLE my_datalake.default.tc_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.tc_orders;

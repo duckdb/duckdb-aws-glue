@@ -10,29 +10,32 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ins_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ins_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.ins_orders (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ins_orders (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
 
 # INSERT writes <key>=<value> directories below the table location and registers them
 statement ok
-INSERT INTO my_datalake.default.ins_orders VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ins_orders VALUES
     (1, 10.0, '2016-05-14', 'IN'),
     (2, 20.0, '2016-05-14', 'US'),
     (3, 30.0, '2016-05-15', 'IN');
 
 # a second INSERT into an existing partition appends a file
 statement ok
-INSERT INTO my_datalake.default.ins_orders VALUES (6, 60.0, '2016-05-14', 'IN');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ins_orders VALUES (6, 60.0, '2016-05-14', 'IN');
 
 # partitions whose data lives at custom locations, outside the table location and not laid out as <key>=<value>
 statement ok
@@ -42,17 +45,17 @@ statement ok
 COPY (SELECT 5 AS id, 50.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/us_may_16/data.parquet';
 
 statement ok
-CALL glue_add_partition('my_datalake.default.ins_orders', {dt: '2016-05-16', country: 'IN'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/india_may_16');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.ins_orders', {dt: '2016-05-16', country: 'IN'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/india_may_16');
 
 statement ok
-CALL glue_add_partition('my_datalake.default.ins_orders', {dt: '2016-05-16', country: 'US'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/us_may_16');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.ins_orders', {dt: '2016-05-16', country: 'US'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/us_may_16');
 
 query III
-SELECT dt, country, location FROM glue_partitions('my_datalake.default.ins_orders') ORDER BY dt, country;
+SELECT dt, country, location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.ins_orders') ORDER BY dt, country;
 ----
-2016-05-14	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders/dt=2016-05-14/country=IN
-2016-05-14	US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders/dt=2016-05-14/country=US
-2016-05-15	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders/dt=2016-05-15/country=IN
+2016-05-14	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders/dt=2016-05-14/country=IN
+2016-05-14	US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders/dt=2016-05-14/country=US
+2016-05-15	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders/dt=2016-05-15/country=IN
 2016-05-16	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/india_may_16
 2016-05-16	US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/us_may_16
 
@@ -60,7 +63,7 @@ SELECT dt, country, location FROM glue_partitions('my_datalake.default.ins_order
 # the read through the Glue catalog
 #---------------------------------------------------------------------------
 query IIII
-SELECT id, amount, dt, country FROM my_datalake.default.ins_orders ORDER BY id;
+SELECT id, amount, dt, country FROM my_datalake.{GLUE_TEST_DB}.ins_orders ORDER BY id;
 ----
 1	10.0	2016-05-14	IN
 2	20.0	2016-05-14	US
@@ -70,7 +73,7 @@ SELECT id, amount, dt, country FROM my_datalake.default.ins_orders ORDER BY id;
 6	60.0	2016-05-14	IN
 
 query I
-SELECT id FROM my_datalake.default.ins_orders WHERE dt = '2016-05-16' ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.ins_orders WHERE dt = '2016-05-16' ORDER BY id;
 ----
 4
 5
@@ -82,7 +85,7 @@ statement ok
 DETACH my_datalake;
 
 query IIII
-SELECT id, amount, dt, country FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders',
+SELECT id, amount, dt, country FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partitions := [
         {dt: '2016-05-14', country: 'IN', location: NULL},
@@ -102,7 +105,7 @@ ORDER BY id;
 
 # filters on partition columns prune partitions
 query I
-SELECT id FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders',
+SELECT id FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partitions := [
         {dt: '2016-05-14', country: 'IN', location: NULL},
@@ -117,7 +120,7 @@ ORDER BY id;
 
 # only the partitions given are read
 query II
-SELECT count(*), sum(amount) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders',
+SELECT count(*), sum(amount) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partitions := [{dt: '2016-05-14', country: 'IN'}]);
 ----
@@ -125,7 +128,7 @@ SELECT count(*), sum(amount) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/de
 
 # the partition keys can be given explicitly, e.g. to fix their order
 query II
-SELECT dt, count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders',
+SELECT dt, count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partition_keys := ['dt', 'country'],
     partitions := [{country: 'US', dt: '2016-05-14'}, {country: 'IN', dt: '2016-05-15'}])
@@ -136,13 +139,13 @@ GROUP BY dt ORDER BY dt;
 
 # the schema is required
 statement error
-SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders');
+SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders');
 ----
 schema
 
 # every partition needs a value for every partition key
 statement error
-SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders',
+SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partition_keys := ['dt', 'country'],
     partitions := [{dt: '2016-05-14'}]);
@@ -151,7 +154,7 @@ no value for partition key
 
 # partition keys must be columns of the schema
 statement error
-SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders',
+SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ins_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE'},
     partitions := [{dt: '2016-05-14', country: 'IN'}]);
 ----
@@ -161,8 +164,9 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE my_datalake.default.ins_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ins_orders;

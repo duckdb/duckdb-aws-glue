@@ -10,44 +10,47 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucketed;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucketed;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucketed_lower;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucketed_lower;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucketed_part;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucketed_part;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucketed_none;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucketed_none;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucketed_off;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucketed_off;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucketed_bad;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucketed_bad;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucketed_ctas;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bucketed_ctas;
 
 #---------------------------------------------------------------------------
 # off by default: DuckDB does not write a bucketed table, so creating one is opt-in
 #---------------------------------------------------------------------------
 statement error
-CREATE TABLE my_datalake.default.bucketed_off (id INTEGER) WITH (BucketColumns = ['id'], NumberOfBuckets = 4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_off (id INTEGER) WITH (BucketColumns = ['id'], NumberOfBuckets = 4);
 ----
 SET glue_create_bucketed_tables = true
 
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.bucketed_off');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed_off');
 ----
 does not exist
 
@@ -58,7 +61,7 @@ SET glue_create_bucketed_tables = true;
 # the StorageDescriptor gets the bucketing as given
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.bucketed (id INTEGER, amount DOUBLE, region VARCHAR) WITH (
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed (id INTEGER, amount DOUBLE, region VARCHAR) WITH (
     BucketColumns = ['id', 'region'],
     NumberOfBuckets = 8,
     SortColumns = [{'Column': 'id', 'SortOrder': 1}, {'Column': 'region', 'SortOrder': 0}]
@@ -66,7 +69,7 @@ CREATE TABLE my_datalake.default.bucketed (id INTEGER, amount DOUBLE, region VAR
 
 query II
 SELECT response.StorageDescriptor.BucketColumns::VARCHAR[], response.StorageDescriptor.NumberOfBuckets::INTEGER
-FROM glue_get_table_response('my_datalake.default.bucketed');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed');
 ----
 [id, region]	8
 
@@ -75,25 +78,25 @@ SELECT response.StorageDescriptor.SortColumns[1].Column::VARCHAR,
        response.StorageDescriptor.SortColumns[1].SortOrder::INTEGER,
        response.StorageDescriptor.SortColumns[2].Column::VARCHAR,
        response.StorageDescriptor.SortColumns[2].SortOrder::INTEGER
-FROM glue_get_table_response('my_datalake.default.bucketed');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed');
 ----
 id	1	region	0
 
 # and not also as table parameters
 query I
 SELECT list_filter(map_keys(parameters), lambda k: lower(k) LIKE '%bucket%' OR lower(k) LIKE '%sort%')
-FROM glue_get_table_response('my_datalake.default.bucketed');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed');
 ----
 []
 
 query I
-SELECT count(*) FROM my_datalake.default.bucketed;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bucketed;
 ----
 0
 
 # a write is refused, and the refusal reads the bucketing back: both sort directions survive the round trip
 statement error
-INSERT INTO my_datalake.default.bucketed VALUES (1, 1.0, 'r1');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.bucketed VALUES (1, 1.0, 'r1');
 ----
 the table is clustered by (id, region) into 8 buckets, sorted by (id ASC, region DESC), and DuckDB does not write
 
@@ -101,17 +104,17 @@ the table is clustered by (id, region) into 8 buckets, sorted by (id ASC, region
 # option names match case-insensitively, column names take the table's spelling
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.bucketed_lower (id INTEGER, amount DOUBLE) WITH (bucketcolumns = ['ID'], numberofbuckets = 2);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_lower (id INTEGER, amount DOUBLE) WITH (bucketcolumns = ['ID'], numberofbuckets = 2);
 
 query II
 SELECT response.StorageDescriptor.BucketColumns::VARCHAR[], response.StorageDescriptor.NumberOfBuckets::INTEGER
-FROM glue_get_table_response('my_datalake.default.bucketed_lower');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed_lower');
 ----
 [id]	2
 
 # no SortColumns, so no sort order
 statement error
-INSERT INTO my_datalake.default.bucketed_lower VALUES (1, 1.0);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.bucketed_lower VALUES (1, 1.0);
 ----
 the table is clustered by (id) into 2 buckets, and DuckDB does not write
 
@@ -119,25 +122,25 @@ the table is clustered by (id) into 2 buckets, and DuckDB does not write
 # a partitioned table is bucketed by its other columns
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.bucketed_part (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_part (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'amount', 'SortOrder': 0}]);
 
 query III
 SELECT response.PartitionKeys[1].Name::VARCHAR, response.StorageDescriptor.BucketColumns::VARCHAR[],
        response.StorageDescriptor.SortColumns[1].Column::VARCHAR
-FROM glue_get_table_response('my_datalake.default.bucketed_part');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed_part');
 ----
 dt	[id]	amount
 
 # a partition column is stored in the directory names, not in the files a bucket is made of
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER, dt VARCHAR) PARTITIONED BY (dt)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER, dt VARCHAR) PARTITIONED BY (dt)
 WITH (BucketColumns = ['dt'], NumberOfBuckets = 4);
 ----
 BucketColumns column 'dt' is a partition column of table 'bucketed_bad'
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER, dt VARCHAR) PARTITIONED BY (dt)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER, dt VARCHAR) PARTITIONED BY (dt)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'dt', 'SortOrder': 1}]);
 ----
 SortColumns column 'dt' is a partition column of table 'bucketed_bad'
@@ -146,12 +149,12 @@ SortColumns column 'dt' is a partition column of table 'bucketed_bad'
 # without the options a table is not bucketed
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.bucketed_none (id INTEGER, amount DOUBLE);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_none (id INTEGER, amount DOUBLE);
 
 query II
 SELECT coalesce(len(response.StorageDescriptor.BucketColumns::VARCHAR[]), 0),
        response.StorageDescriptor.NumberOfBuckets::INTEGER
-FROM glue_get_table_response('my_datalake.default.bucketed_none');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed_none');
 ----
 0	-1
 
@@ -159,117 +162,117 @@ FROM glue_get_table_response('my_datalake.default.bucketed_none');
 # bucketing Hive would not accept is refused
 #---------------------------------------------------------------------------
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = ['nope'], NumberOfBuckets = 4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = ['nope'], NumberOfBuckets = 4);
 ----
 BucketColumns column 'nope' is not a column of table 'bucketed_bad'
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id', 'ID'], NumberOfBuckets = 4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id', 'ID'], NumberOfBuckets = 4);
 ----
 BucketColumns lists column 'id' twice
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = [], NumberOfBuckets = 4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = [], NumberOfBuckets = 4);
 ----
 needs at least one column
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id', NULL], NumberOfBuckets = 4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id', NULL], NumberOfBuckets = 4);
 ----
 can not contain NULL
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = 'id', NumberOfBuckets = 4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = 'id', NumberOfBuckets = 4);
 ----
 must be a list of column names
 
 # Hive's CLUSTERED BY always says INTO n BUCKETS
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id']);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id']);
 ----
 BucketColumns needs NumberOfBuckets
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id'], NumberOfBuckets = 0);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id'], NumberOfBuckets = 0);
 ----
 must be a positive integer
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id'], NumberOfBuckets = -1);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id'], NumberOfBuckets = -1);
 ----
 must be a positive integer
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id'], NumberOfBuckets = 'four');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (BucketColumns = ['id'], NumberOfBuckets = 'four');
 ----
 must be a positive integer
 
 # and SORTED BY and INTO n BUCKETS only exist inside CLUSTERED BY
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (NumberOfBuckets = 4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (NumberOfBuckets = 4);
 ----
 NumberOfBuckets and SortColumns need BucketColumns
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (SortColumns = [{'Column': 'id', 'SortOrder': 1}]);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (SortColumns = [{'Column': 'id', 'SortOrder': 1}]);
 ----
 NumberOfBuckets and SortColumns need BucketColumns
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'id', 'SortOrder': 2}]);
 ----
 must be 1 (ascending) or 0 (descending)
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'nope', 'SortOrder': 1}]);
 ----
 SortColumns column 'nope' is not a column of table 'bucketed_bad'
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'id', 'SortOrder': 1}, {'Column': 'ID', 'SortOrder': 0}]);
 ----
 SortColumns lists column 'id' twice
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'SortOrder': 1}]);
 ----
 needs a 'Column' and a 'SortOrder'
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'id', 'Order': 1}]);
 ----
 takes structs of 'Column' and 'SortOrder'
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = ['id']);
 ----
 must be a list of {'Column': name, 'SortOrder': 1 or 0}
 
 # other engines' names for the options would otherwise become table parameters of an unbucketed table
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (bucketed_by = ['id']);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (bucketed_by = ['id']);
 ----
 a bucketed Glue table is created with option 'BucketColumns'
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (bucket_count = 4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (bucket_count = 4);
 ----
 a bucketed Glue table is created with option 'NumberOfBuckets'
 
 statement error
-CREATE TABLE my_datalake.default.bucketed_bad (id INTEGER) WITH (sort_columns = ['id']);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_bad (id INTEGER) WITH (sort_columns = ['id']);
 ----
 a bucketed Glue table is created with option 'SortColumns'
 
 # none of the refused statements created the table
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.bucketed_bad');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed_bad');
 ----
 does not exist
 
@@ -277,23 +280,23 @@ does not exist
 # CREATE TABLE ... AS would write the query result unbucketed: refused before the table is created
 #---------------------------------------------------------------------------
 statement error
-CREATE TABLE my_datalake.default.bucketed_ctas WITH (BucketColumns = ['id'], NumberOfBuckets = 4) AS SELECT 1 AS id;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bucketed_ctas WITH (BucketColumns = ['id'], NumberOfBuckets = 4) AS SELECT 1 AS id;
 ----
 is not supported: it creates a bucketed Glue table, and DuckDB does not write a bucketed layout
 
 statement error
-SELECT * FROM glue_get_table_response('my_datalake.default.bucketed_ctas');
+SELECT * FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bucketed_ctas');
 ----
 does not exist
 
 statement ok
-DROP TABLE my_datalake.default.bucketed;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bucketed;
 
 statement ok
-DROP TABLE my_datalake.default.bucketed_lower;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bucketed_lower;
 
 statement ok
-DROP TABLE my_datalake.default.bucketed_part;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bucketed_part;
 
 statement ok
-DROP TABLE my_datalake.default.bucketed_none;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bucketed_none;

@@ -8,10 +8,13 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
-    ENDPOINT '{GLUE_ENDPOINT}'
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
@@ -19,10 +22,10 @@ SHOW ALL TABLES;
 
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.hive_table_partitioned;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.hive_table_partitioned;
 
 statement ok
-CREATE TABLE IF NOT EXISTS my_datalake.default.hive_table_partitioned
+CREATE TABLE IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.hive_table_partitioned
 (int_col integer, variant_col VARIANT, timestamp_col TIMESTAMP) PARTITIONED BY (int_col) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hive_table_partitioned');
 
 query I
@@ -32,12 +35,12 @@ hive_table_partitioned
 
 # the table location in Glue
 query I
-SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hive_table_partitioned' FROM glue_get_table_response('my_datalake.default.hive_table_partitioned');
+SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hive_table_partitioned' FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.hive_table_partitioned');
 ----
 true
 
 query II
-select partition_keys[1].name, partition_keys[1].type from glue_get_table_response('my_datalake.default.hive_table_partitioned');
+select partition_keys[1].name, partition_keys[1].type from glue_get_table_response('my_datalake.{GLUE_TEST_DB}.hive_table_partitioned');
 ----
 int_col	int
 
@@ -45,6 +48,6 @@ mode skip
 
 # We are not inserting into hive tables yet.
 statement ok
-insert into my_datalake.default.hive_table values (1, 5::VARIANT, now());
+insert into my_datalake.{GLUE_TEST_DB}.hive_table values (1, 5::VARIANT, now());
 
 

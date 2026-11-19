@@ -10,11 +10,14 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 # the fixture tables (scripts/docker-compose.yml) share their location between runs: every run rewrites the file
@@ -88,10 +91,10 @@ ALTER TABLE my_datalake.default.fixture_openx_json RESET ('ignore.malformed.json
 # the Hive JsonSerDe (CREATE TABLE ... WITH (format = 'json')) has no ignore.malformed.json: it is not applied
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.json_hive_malformed;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.json_hive_malformed;
 
 statement ok
-CREATE TABLE my_datalake.default.json_hive_malformed (id INTEGER, name VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.json_hive_malformed (id INTEGER, name VARCHAR)
 WITH (format = 'json', location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/json_hive_malformed', 'ignore.malformed.json' = 'true');
 
 statement ok
@@ -102,12 +105,12 @@ COPY (SELECT * FROM (VALUES
 ) t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/json_hive_malformed/data.json' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
 statement error
-SELECT id, name FROM my_datalake.default.json_hive_malformed;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.json_hive_malformed;
 ----
 <REGEX>:.*Malformed JSON.*
 
 statement ok
-DROP TABLE my_datalake.default.json_hive_malformed;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.json_hive_malformed;
 
 #---------------------------------------------------------------------------
 # use.null.for.invalid.data: a value that does not fit its column is NULL, and a malformed line a row of NULLs

@@ -14,54 +14,59 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
+require-env GLUE_TEST_DB_SQL
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_plain;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_plain;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_partitioned;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_partitioned;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_bucketed;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_bucketed;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_csv_pipe;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_csv_pipe;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_csv_opencsv;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_csv_opencsv;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_csv_header;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_csv_header;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_json;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_json;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_avro;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_avro;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_params;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_params;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.rsp_sql_roundtrip;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.rsp_sql_roundtrip;
 
 #---------------------------------------------------------------------------
 # a plain parquet table — the sql column contains the full CREATE TABLE
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_plain (id BIGINT, name VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_plain (id BIGINT, name VARCHAR);
 
 query II
-SELECT sql LIKE '%CREATE TABLE "default".rsp_sql_plain%',
+SELECT sql LIKE '%CREATE TABLE {GLUE_TEST_DB_SQL}.rsp_sql_plain%',
        sql LIKE '%''format''=''parquet''%' AND sql LIKE '%''type''=''HIVE''%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_plain';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_plain';
 ----
 true	true
 
@@ -69,12 +74,12 @@ true	true
 # a partitioned table — PARTITIONED BY appears
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_partitioned (id BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_partitioned (id BIGINT, dt VARCHAR) PARTITIONED BY (dt);
 
 query I
 SELECT sql LIKE '%PARTITIONED BY (dt)%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_partitioned';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_partitioned';
 ----
 true
 
@@ -85,7 +90,7 @@ statement ok
 SET glue_create_bucketed_tables = true;
 
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_bucketed (id BIGINT, region VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_bucketed (id BIGINT, region VARCHAR)
 WITH (BucketColumns = list_value('id'), NumberOfBuckets = 4, SortColumns = list_value(struct_pack("Column" := 'region', SortOrder := 1)));
 
 query III
@@ -94,7 +99,7 @@ SELECT
     sql LIKE '%''NumberOfBuckets''=4%',
     sql LIKE '%''SortColumns''=list_value(struct_pack("Column" := ''region'', SortOrder := 1))%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_bucketed';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_bucketed';
 ----
 true	true	true
 
@@ -105,14 +110,14 @@ RESET glue_create_bucketed_tables;
 # csv with a non-default delimiter — 'delimiter' appears, serialization.format does not
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_csv_pipe (id BIGINT, name VARCHAR) WITH (format = 'csv', delimiter = '|');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_csv_pipe (id BIGINT, name VARCHAR) WITH (format = 'csv', delimiter = '|');
 
 query II
 SELECT
     sql LIKE '%''delimiter''=''|''%',
     sql LIKE '%''serialization.format''%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_csv_pipe';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_csv_pipe';
 ----
 true	false
 
@@ -120,7 +125,7 @@ true	false
 # csv with quote and escape → OpenCSVSerde → quote/escape in the sql
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_csv_opencsv (id BIGINT, name VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_csv_opencsv (id BIGINT, name VARCHAR)
 WITH (format = 'csv', delimiter = '|', quote = '"', escape = '\');
 
 query III
@@ -129,7 +134,7 @@ SELECT
     sql LIKE '%''quote''=''"''%',
     sql LIKE '%''escape''=''\''%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_csv_opencsv';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_csv_opencsv';
 ----
 true	true	true
 
@@ -137,14 +142,14 @@ true	true	true
 # csv with header = true → 'header'=true in sql, 'skip.header.line.count' via table params passthrough
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_csv_header (id BIGINT, name VARCHAR) WITH (format = 'csv', header = true);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_csv_header (id BIGINT, name VARCHAR) WITH (format = 'csv', header = true);
 
 query II
 SELECT
     sql LIKE '%''header''=true%',
     sql LIKE '%''skip.header.line.count''=''1''%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_csv_header';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_csv_header';
 ----
 true	true
 
@@ -152,22 +157,22 @@ true	true
 # json and avro tables emit format=json / format=avro
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_json (id BIGINT, payload VARCHAR) WITH (format = 'json');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_json (id BIGINT, payload VARCHAR) WITH (format = 'json');
 
 query I
 SELECT sql LIKE '%''format''=''json''%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_json';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_json';
 ----
 true
 
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_avro (id BIGINT, name VARCHAR) WITH (format = 'avro');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_avro (id BIGINT, name VARCHAR) WITH (format = 'avro');
 
 query I
 SELECT sql LIKE '%''format''=''avro''%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_avro';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_avro';
 ----
 true
 
@@ -175,14 +180,14 @@ true
 # Table.Parameters passthrough — custom tags from CREATE flow into the sql verbatim
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_params (id BIGINT) WITH (format = 'parquet', owner = 'alice', department = 'engineering');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_params (id BIGINT) WITH (format = 'parquet', owner = 'alice', department = 'engineering');
 
 query II
 SELECT
     sql LIKE '%''owner''=''alice''%',
     sql LIKE '%''department''=''engineering''%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_params';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_params';
 ----
 true	true
 
@@ -190,7 +195,7 @@ true	true
 # Round-trip — every parameter set on CREATE flows back through duckdb_tables().sql
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.rsp_sql_roundtrip (
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.rsp_sql_roundtrip (
     id BIGINT,
     name VARCHAR,
     region VARCHAR,
@@ -208,7 +213,7 @@ WITH (format      = 'csv',
 
 query IIIIIIIII
 SELECT
-    sql LIKE '%CREATE TABLE "default".rsp_sql_roundtrip%',
+    sql LIKE '%CREATE TABLE {GLUE_TEST_DB_SQL}.rsp_sql_roundtrip%',
     sql LIKE '%PARTITIONED BY (dt)%',
     sql LIKE '%''type''=''HIVE''%' AND sql LIKE '%''format''=''csv''%',
     sql LIKE '%''delimiter''=''|''%',
@@ -218,7 +223,7 @@ SELECT
     sql LIKE '%''owner''=''alice''%',
     sql LIKE '%''department''=''engineering''%' AND sql LIKE '%''cost_center''=''cc-100''%'
 FROM duckdb_tables()
-WHERE database_name = 'my_datalake' AND schema_name = 'default' AND table_name = 'rsp_sql_roundtrip';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'rsp_sql_roundtrip';
 ----
 true	true	true	true	true	true	true	true	true
 

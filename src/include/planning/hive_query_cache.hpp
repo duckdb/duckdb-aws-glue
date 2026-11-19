@@ -73,6 +73,8 @@ public:
 	}
 	//! 'key' identifies the table (TableKey)
 	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
+	//! The entry GetGlueTable made for 'key' in this query, null if no scan asked for the table
+	shared_ptr<GlueTableEntry> FindGlueTable(const string &key);
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
 	//! 'key' identifies the table and how its footers are read
@@ -94,6 +96,9 @@ private:
 	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;
 };
 
+//! The partitions of the table of 'info' if a scan fetched them in this query (HivePartitionCache), else null:
+//! Glue is not asked
+shared_ptr<const vector<GluePartitionInfo>> FindTablePartitions(ClientContext &context, const HiveScanInfo &info);
 //! Drop the connection's cached directory listings
 void ClearHiveListingCache(ClientContext &context);
 
