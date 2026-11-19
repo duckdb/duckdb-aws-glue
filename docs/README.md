@@ -657,7 +657,9 @@ database with ThrottlingException, letting the SDK's retries through. A table na
 may not describe, as Lake Formation leaves it: GetTable on it fails with AccessDeniedException and GetTables leaves it
 out. Tests that need the proxy are skipped without it. It
 also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
-`link_db` as Glue does through a database resource link whose target is `target_db`.
+`link_db` as Glue does through a database resource link whose target is `target_db`, and `GLUE_ENDPOINT_ALIAS`: moto
+under another URL, which is another Glue catalog to the prefetch cool-down (`glue_partition_load_cooldown`), which
+outlives a test's database.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)

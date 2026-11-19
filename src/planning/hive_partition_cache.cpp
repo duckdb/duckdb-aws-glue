@@ -12,22 +12,22 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/config.hpp"
 
 #include <chrono>
 
 namespace duckdb {
 
-//! glue_partition_load_parallelism when unset
-static constexpr idx_t DEFAULT_PARTITION_LOAD_PARALLELISM = 8;
-//! glue_partition_load_cooldown when unset, in seconds
-static constexpr idx_t DEFAULT_PARTITION_LOAD_COOLDOWN = 300;
-
-static idx_t GetIdxSetting(ClientContext &context, const char *name, idx_t default_value) {
+static idx_t GetIdxSetting(ClientContext &context, const char *name) {
 	Value setting;
-	if (context.TryGetCurrentSetting(name, setting) && !setting.IsNull()) {
-		return setting.GetValue<idx_t>();
+	if (!context.TryGetCurrentSetting(name, setting) || setting.IsNull()) {
+		// SET ... = NULL: the database's value, which is the registered default unless SET GLOBAL
+		DBConfig::GetConfig(context).TryGetCurrentSetting(name, setting);
 	}
-	return default_value;
+	if (setting.IsNull()) {
+		throw InvalidInputException("%s can not be NULL", name);
+	}
+	return setting.GetValue<idx_t>();
 }
 
 namespace {
@@ -113,7 +113,7 @@ void HivePartitionCache::Clear() {
 	registered_scans.clear();
 }
 
-bool HivePartitionCache::PrefetchBatch(ClientContext &context, GlueCatalog &catalog,
+bool HivePartitionCache::PrefetchBatch(ClientContext &context, GlueCatalog &catalog, const string &identity,
                                        const vector<reference<const HiveScanInfo>> &batch) {
 	vector<GluePartitionLoad> loads;
 	vector<string> names;
@@ -160,17 +160,17 @@ bool HivePartitionCache::PrefetchBatch(ClientContext &context, GlueCatalog &cata
 		}
 	}
 	if (throttled) {
-		auto cooldown = GetIdxSetting(context, "glue_partition_load_cooldown", DEFAULT_PARTITION_LOAD_COOLDOWN);
+		auto cooldown = GetIdxSetting(context, "glue_partition_load_cooldown");
 		event.detail +=
 		    StringUtil::Format("; Glue throttled the requests: no prefetch against this catalog for %llu s", cooldown);
-		GlueThrottledCatalogs::Get().Throttled(catalog.GlueCatalogIdentity(context));
+		GlueThrottledCatalogs::Get().Throttled(identity);
 	}
 	DUCKDB_LOG(context, GlueScanLogType, event);
 	return loaded == loads.size();
 }
 
 void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_ptr<const HiveScanInfo>> &scans) {
-	auto parallelism = GetIdxSetting(context, "glue_partition_load_parallelism", DEFAULT_PARTITION_LOAD_PARALLELISM);
+	auto parallelism = GetIdxSetting(context, "glue_partition_load_parallelism");
 	if (parallelism <= 1) {
 		return;
 	}
@@ -188,7 +188,7 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_pt
 		}
 		by_catalog[info.catalog_name].push_back(info);
 	}
-	auto cooldown = GetIdxSetting(context, "glue_partition_load_cooldown", DEFAULT_PARTITION_LOAD_COOLDOWN);
+	auto cooldown = GetIdxSetting(context, "glue_partition_load_cooldown");
 	for (auto &entry : by_catalog) {
 		auto &tables = entry.second;
 		if (tables.size() < 2) {
@@ -224,7 +224,7 @@ void HivePartitionCache::Prefetch(ClientContext &context, const vector<shared_pt
 			auto end = MinValue<idx_t>(start + parallelism, tables.size());
 			vector<reference<const HiveScanInfo>> batch(tables.begin() + static_cast<int64_t>(start),
 			                                            tables.begin() + static_cast<int64_t>(end));
-			if (!PrefetchBatch(context, catalog, batch)) {
+			if (!PrefetchBatch(context, catalog, identity, batch)) {
 				break;
 			}
 		}

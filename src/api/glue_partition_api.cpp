@@ -451,10 +451,20 @@ private:
 
 } // namespace
 
-//! Runs the segments as tasks on DuckDB's async threads; the first error is returned
+//! Runs the segments as tasks on DuckDB's async threads, a single one on this thread; the first error is returned
 static ErrorData FetchPartitionSegments(ClientContext &context, PartitionFetchState &state,
                                         vector<unique_ptr<PartitionSegment>> &segments) {
 	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+	if (segments.size() == 1) {
+		// one request chain: paged on this thread, as no other request could run meanwhile
+		FetchPartitionSegmentTask task(executor, context, state, *segments[0]);
+		try {
+			task.ExecuteTask();
+		} catch (std::exception &ex) {
+			return ErrorData(ex);
+		}
+		return ErrorData();
+	}
 	vector<unique_ptr<BaseExecutorTask>> tasks;
 	for (auto &segment : segments) {
 		tasks.push_back(make_uniq<FetchPartitionSegmentTask>(executor, context, state, *segment));

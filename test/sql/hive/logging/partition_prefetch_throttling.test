@@ -10,6 +10,8 @@ require-env GLUE_CATALOG_ID
 
 require-env GLUE_FAULT_ENDPOINT
 
+require-env GLUE_ENDPOINT_ALIAS
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -125,12 +127,16 @@ skipped 2 tables: Glue throttled a prefetch against this catalog less than 300 s
 statement ok
 DETACH throttled_implicit;
 
-# The cool-down is per Glue catalog: the same tables through moto directly are prefetched
+# The cool-down is per Glue catalog: the same tables through moto directly are prefetched. Through an endpoint no
+# other test uses: the cool-down is process wide, and another test of this process may have throttled GLUE_ENDPOINT
+statement ok
+attach '{GLUE_CATALOG_ID}' as unthrottled (TYPE glue, ENDPOINT '{GLUE_ENDPOINT_ALIAS}');
+
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.fault_throttled_ppt.a JOIN my_datalake.fault_throttled_ppt.b USING (id);
+SELECT count(*) FROM unthrottled.fault_throttled_ppt.a JOIN unthrottled.fault_throttled_ppt.b USING (id);
 ----
 2
 
@@ -138,6 +144,9 @@ query I
 SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
 ----
 loaded 2 of 2 tables
+
+statement ok
+DETACH unthrottled;
 
 # A failed prefetch stops the prefetch of its own catalog only: 'a_throttled' is prefetched before 'my_datalake'. On
 # its own connection, whose cache holds no partitions

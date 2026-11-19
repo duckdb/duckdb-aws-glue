@@ -37,8 +37,9 @@ private:
 	//! Load the partitions of the registered scans' tables that no cache holds, glue_partition_load_parallelism tables
 	//! at a time. A table whose load fails is left to Get; only an interrupt is thrown
 	void Prefetch(ClientContext &context, const vector<shared_ptr<const HiveScanInfo>> &scans);
-	//! Loads one batch of tables of 'catalog'; false when it failed and the catalog's later batches are not to be sent
-	bool PrefetchBatch(ClientContext &context, GlueCatalog &catalog,
+	//! Loads one batch of tables of 'catalog', whose GlueCatalogIdentity is 'identity'; false when it failed and the
+	//! catalog's later batches are not to be sent
+	bool PrefetchBatch(ClientContext &context, GlueCatalog &catalog, const string &identity,
 	                   const vector<reference<const HiveScanInfo>> &tables);
 
 private:
