@@ -12,7 +12,8 @@ preceded by another client's registration of the same partitions at '<location>_
 refused with AlreadyExistsException while its files are not where Glue points. A CreatePartition on a
 fault_noncanonical_values* database registers each value with a leading '0', as another engine may spell an integer
 ('01' for 1). A BatchCreatePartition on a fault_slow_partitions* database is
-forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while partitions are registered; one on a
+forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while partitions are registered, and a
+GetTables on a fault_slow_listing* database only after SLOW_LISTING_SECONDS, as AWS Glue takes a while; one on a
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
@@ -40,6 +41,9 @@ THROTTLED_PREFIX = "fault_throttled"
 # BatchCreatePartition on a database with this prefix is forwarded after a delay
 SLOW_PARTITIONS_PREFIX = "fault_slow_partitions"
 SLOW_PARTITIONS_SECONDS = 4
+# GetTables on a database with this prefix is forwarded after a delay
+SLOW_LISTING_PREFIX = "fault_slow_listing"
+SLOW_LISTING_SECONDS = 0.1
 # BatchCreatePartition on a database with this prefix finds its table recreated by another client, and then fails
 RECREATED_PREFIX = "fault_recreated_during_write"
 # BatchCreatePartition on a database with this prefix races another client registering the partitions elsewhere
@@ -112,6 +116,10 @@ def is_slow_partitions(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(SLOW_PARTITIONS_PREFIX)
 
 
+def is_slow_listing(target, database):
+    return target == "AWSGlue.GetTables" and database.startswith(SLOW_LISTING_PREFIX)
+
+
 def is_recreated_during_write(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(RECREATED_PREFIX)
 
@@ -164,6 +172,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if is_slow_partitions(target, database):
             time.sleep(SLOW_PARTITIONS_SECONDS)
+        if is_slow_listing(target, database):
+            time.sleep(SLOW_LISTING_SECONDS)
         if is_recreated_during_write(target, database):
             self.recreate_as_other_client(database, request["TableName"])
             self.reply_error("InternalServiceException")
