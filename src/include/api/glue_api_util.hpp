@@ -48,7 +48,10 @@ template <class OUTCOME>
 	auto &error = outcome.GetError();
 	auto message = Exception::ConstructMessage("Glue %s failed: %s (%s)", operation, ToStdString(error.GetMessage()),
 	                                           ToStdString(error.GetExceptionName()));
-	throw GlueException(message, error.GetErrorType() == Aws::Glue::GlueErrors::ACCESS_DENIED);
+	auto type = error.GetErrorType();
+	// the SDK maps ThrottlingException, SlowDown and HTTP 429 onto these
+	auto throttled = type == Aws::Glue::GlueErrors::THROTTLING || type == Aws::Glue::GlueErrors::SLOW_DOWN;
+	throw GlueException(message, type == Aws::Glue::GlueErrors::ACCESS_DENIED, throttled);
 }
 
 template <class OUTCOME>

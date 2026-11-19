@@ -161,14 +161,18 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   scan reads: the group estimate on a key is exact, but the optimizer can then push aggregates below a join on the
   key and lose that join's run-time partition pruning.
 - A data column of an unpartitioned parquet table of at most `hive_footer_statistics_max_files` (default 16) files
-  gets its minimum, maximum and NULLs merged from the footers of all of them, which DuckDB's parquet reader reads
-  when the scan binds (its `maximum_files_for_stats`), so a `DESCRIBE` of such a table lists the table and reads its
-  footers too. `0` turns them and the count off. A column gets none when a footer cannot be read, or when some file
-  with rows lacks the column, stores it as another type than the table declares, or, in a table of several files,
-  has statistics for it that DuckDB cannot read; so do the data columns of partitioned, csv, json and avro tables. A
-  table of one file whose statistics DuckDB cannot read fails planning, as `read_parquet` of that file does. An empty
-  file is skipped. The optimizer prunes on these statistics and orders joins by them: the minimum and maximum of a
-  dimension's key let it see how much a join on that key keeps.
+  gets its minimum, maximum and NULLs merged from the footers of all of them. They are read the first time the
+  optimizer asks for the scan's statistics, not when it binds: a scan the optimizer removes first (`WHERE false`)
+  and a `DESCRIBE` open no file. The scan then reads each footer a second time when it opens the file (one extra
+  ranged GET per file unless the external file cache has it): the optimizer gets the scan's bind data read-only, so
+  the footers it reads can not be handed to the scan. That is better fixed in DuckDB, by reading the footers only
+  once statistics are asked for, into the scan's own bind data. `0` turns them and the count off. A column gets none
+  when a footer cannot be read, or when some file with rows lacks the column, stores it as another type than the
+  table declares, or, in a table of several files, has statistics for it that DuckDB cannot read; so do the data
+  columns of partitioned, csv, json and avro tables. A table of one file whose statistics DuckDB cannot read fails
+  planning, as `read_parquet` of that file does. An empty file is skipped. The optimizer prunes on these statistics
+  and orders joins by them: the minimum and maximum of a dimension's key let it see how much a join on that key
+  keeps.
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
@@ -183,7 +187,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   `bigint` to `int`, `double` to `int` or `string` to `int` do not. Nested types are not checked.
 - Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
   `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
-  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
+  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too. Filters that depend only on
+  `"$path"` or `filename` are applied to listed paths before files are opened, so nonmatching files are not read; the
+  relevant file locations are still listed.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
@@ -214,8 +220,10 @@ their codec themselves.
   parameters, except other engines' spellings of options this extension spells differently, which would do nothing
   there: `partitioned_by`, `partitioning`, `partition_by`, `partition_columns`, `partition_keys` and `PartitionKeys`
   (use `PARTITIONED BY (...)`), `external_location` (use `location`) and
-  `field_delimiter` (use `delimiter`) are refused. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
-  `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
+  `field_delimiter` (use `delimiter`) are refused. Column types are stored as Hive types. `HUGEINT` (e.g. `sum()` of
+  an integer column) is stored as `decimal(38,0)`, and `CREATE TABLE ... AS` writes it as such, so a value beyond 38
+  digits fails the statement. Other DuckDB types without a Hive type are refused, e.g. `UBIGINT`, `UHUGEINT`,
+  `INTERVAL` and `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
   `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
@@ -272,7 +280,7 @@ their codec themselves.
   USING <expr>` is refused, since the data files can not be rewritten.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`, and avro
-  with `avro.output.codec`. A table without its format's codec parameter is written with `write_compression`, if it
+  with `avro.output.codec` (snappy, deflate, bzip2 or zstandard). A table without its format's codec parameter is written with `write_compression`, if it
   records one. Another codec is an error.
 - `ALTER TABLE ... RENAME COLUMN` is supported for csv tables, whose files are read by position. Parquet, json and
   avro files are matched by name, so a rename would make the existing data read as NULL and is refused (replace the
@@ -338,8 +346,10 @@ this connection's cache: a write through it, a rollback, or DETACH.
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...` and `CREATE SECURE VIEW` create a Glue
   view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB. `OR REPLACE` updates it in place. Unqualified table
-  names in the SELECT refer to the view's own database. The view's columns store their DuckDB types (e.g. `HUGEINT`,
-  `INTEGER`), not Glue types.
+  names in the SELECT refer to the view's own database.
+- A view column's Glue type is its Hive type, or the closest one other engines read (`decimal(38,0)` for `HUGEINT`,
+  `timestamp` for `TIMESTAMP_NS`), or `string` when there is none (e.g. `TIME`, `UUID`). DuckDB uses only the
+  column names and binds the view's SQL for the types. Other engines don't query DuckDB views; Spark refuses them.
 - `CREATE VIEW ... WITH (DEFER_BINDING)` is not supported yet: the tables a view reads must exist when it is created.
 - A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
   `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
@@ -467,7 +477,7 @@ query.
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
-| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`) |
+| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`); with `missing := true` also one per registered partition that is gone, and a `status` column (`added` or `missing`) |
 
 The functions that change Glue are called with `CALL`, outside a `BEGIN` transaction, since Glue has no transactions
 (see [Writing](#writing)).
@@ -510,8 +520,11 @@ WHERE (dt IS NULL) <> (partition_values[1] = '__HIVE_DEFAULT_PARTITION__')
 the partitions Glue does not have yet with `BatchCreatePartition`. A partition is a directory with one `<key>=<value>`
 component per partition key, in partition key order (keys compare case-insensitively); it is registered at that
 directory, with the values unescaped and cast to the key types (`year=07` is `7`). Directories that do not follow this
-scheme, whose values do not cast, that are already the location of a partition, or that hold no file a scan would read
-(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. A table with another
+scheme, whose values are empty or do not cast, that are already the location of a partition, or that hold no file a
+scan would read (only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. With
+`missing := true` it also reports the registered partitions whose location is below the table location but holds no
+file at all, with `status` `missing`, and keeps them (partitions located elsewhere are not listed, so they are not
+checked). A table with another
 engine's InputFormat over a Hive SerDe (one INSERT refuses too) is refused: its files are not laid out the way Hive
 writes them.
 
@@ -527,6 +540,22 @@ descriptor with its columns, which the scan checks the partitions it reads again
 
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
+
+Each scan fetches its table's partitions when it first needs them: at filter pushdown when a filter on a partition
+key is pushed into it, otherwise when join ordering first estimates it. For a statement that scans several
+partitioned tables, that is one table after another. So when the first scan of a statement needs partitions, the
+partitions of every partitioned table its scans read that no cache holds yet are fetched concurrently,
+`glue_partition_load_parallelism` tables at a time (default 8; each with its `glue_get_partitions_segments`
+requests), and the scans take them from the query's cache. Subqueries, `UNION ALL` branches and CTEs are included; a
+scan the optimizer removed before then (e.g. `WHERE 1 = 0`) is not. A table alone in its catalog is left to its scan.
+
+When a request fails, the requests of that catalog not sent yet are not sent (other catalogs still prefetch), and the
+tables not fetched are fetched by their scans as before, which raise the error if it happens again. When Glue throttled
+a request (`ThrottlingException`, `SlowDown`, HTTP 429), no partitions are prefetched from that Glue catalog (account,
+region and endpoint; for `ATTACH ':'` the account Glue reports) for `glue_partition_load_cooldown` seconds (default
+300), in any connection: each connection compares the time of the last throttled prefetch with its own setting. Each prefetch is logged as a `GlueScan` event
+`prefetch`, its `detail` naming how many tables it fetched and why the others were not.
+`SET glue_partition_load_parallelism = 1` turns the prefetch off.
 
 ## Inspecting tables
 
@@ -613,6 +642,8 @@ The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, on
 - `sample`: the cardinality sample listed `files` files and measured one in `duration_ms` (`files` is NULL when
   nothing was listed: avro tables are not sampled). The scan reuses that listing, so a `listing` of the same
   directory then takes next to no time. Every scan of the table in the query shares the one sample.
+- `footers`: the footers of an unpartitioned parquet table's `files` files were read for statistics in
+  `duration_ms`, when the optimizer first asked. Every scan of the table in the query shares them.
 
 ```sql
 CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');
@@ -655,7 +686,9 @@ database with ThrottlingException, letting the SDK's retries through. A table na
 may not describe, as Lake Formation leaves it: GetTable on it fails with AccessDeniedException and GetTables leaves it
 out. Tests that need the proxy are skipped without it. It
 also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
-`link_db` as Glue does through a database resource link whose target is `target_db`.
+`link_db` as Glue does through a database resource link whose target is `target_db`, and `GLUE_ENDPOINT_ALIAS`: moto
+under another URL, which is another Glue catalog to the prefetch cool-down (`glue_partition_load_cooldown`), which
+outlives a test's database.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
@@ -752,7 +785,32 @@ their timings (5 runs each) in two jobs of about three minutes, so it runs only 
 queries. The parquet job runs `benchmark/*.benchmark`, the parquet benchmarks of `benchmark/pushdown/` and
 `benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
 `benchmark/pushdown/` and `benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
-other queries and the json and avro TPC benchmarks only run locally.
+other queries and the json and avro TPC benchmarks only run locally. Six more jobs plan all 99 TPC-DS queries
+(`benchmark/tpcds/planning/local_sf1/`, below), about seven minutes each.
+
+`benchmark/tpcds/planning/local_sf1/` plans (`EXPLAIN`) the 99 TPC-DS queries at SF1 on parquet tables in the local
+Glue whose fact tables have one partition per day, as many as at SF100, so planning makes as many Glue and S3
+requests as on the cloud tables. Its load writes the tables through moto and SeaweedFS; the queries are planned
+through the latency proxies of `scripts/docker-compose.yml` (`scripts/latency_proxy.py`, ports 5558 and 9101), which
+delay each Glue request by 40 ms (at most 10 at a time) and each S3 request by 15 ms. A request that waits for
+another one adds its delay and requests in flight together share it, so a change that makes Glue calls or listings
+serial shows up as time, as it does against AWS. The delays are fitted to the planning times of the cloud tables
+from a GitHub runner (`CloudTPCDSBenchmark.yml`: 109 s for the 99 queries, 123 s locally). The proxies keep the
+answers to reads, as moto takes seconds for a GetPartitions of 1800 partitions: restart them
+(`docker compose -f scripts/docker-compose.yml restart glue-latency-proxy s3-latency-proxy`) after rebuilding the
+fixture. `GLUE_LATENCY_MS`, `GLUE_MAX_CONCURRENCY` and `S3_LATENCY_MS` change the delays.
+
+`benchmark/tpcds/cloud_sf100/partitioned/` runs the 99 TPC-DS queries at SF100 on parquet tables in a live AWS Glue
+catalog (`176760123605`, us-east-1, database `tpcds_sf100_partitioned`), whose fact tables have one partition per day
+of their date key. `scripts/benchmarks/create_tpcds_glue.sh` created them (and `tpcds_sf100_unpartitioned`); the
+benchmarks only read them, with credentials from the AWS credential chain. `benchmark/tpcds/planning/cloud_sf100/`
+only plans the same queries (`EXPLAIN`: the Glue calls, the listings for the row count estimates, binding and the
+optimizer); it reads the text of DuckDB's query files, so both suites follow the pinned `duckdb` submodule. `.github/workflows/CloudTPCDSBenchmark.yml` compares a PR (`gh workflow run CloudTPCDSBenchmark.yml -f
+pr_number=123`), merged into the head of the branch it targets, with that head, or the branch it is started on (`--ref`) with that
+branch a day ago (its newest first-parent commit older than 24 hours), on them; `-f benchmarks=execution` or `-f benchmarks=planning` runs one of
+the two suites (default both, in 8 and 2 parallel jobs). A maintainer starts it.
+`scripts/benchmarks/generate_tpcds_benchmarks.sh` writes the per-query files of the three suites; the regression
+jobs fail when they are out of date.
 
 ## Building
 
