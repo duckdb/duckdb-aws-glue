@@ -696,7 +696,10 @@ out. Tests that need the proxy are skipped without it. It
 also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
 `link_db` as Glue does through a database resource link whose target is `target_db`, and `GLUE_ENDPOINT_ALIAS`: moto
 under another URL, which is another Glue catalog to the prefetch cool-down (`glue_partition_load_cooldown`), which
-outlives a test's database.
+outlives a test's database. It also sets `GLUE_S3_FAULT_ENDPOINT`: `scripts/s3_fault_proxy.py` in front of S3, which fails
+the first listing of a prefix whose last path segment contains `fault_once` with a 500 (a GET of `/_reset` forgets which
+prefixes failed). The local config leaves `skip_error_messages` empty, so a test that fails with an HTTP error fails
+instead of being skipped.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
