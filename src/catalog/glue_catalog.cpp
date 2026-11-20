@@ -300,12 +300,25 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
                                                                      const SchemaScanFilters &filters) {
+	vector<reference<SchemaCatalogEntry>> result;
+	idx_t oid;
+	if (TryGetOidEquality(filters.GetSchemaOid(), "GlueCatalog::GetSchemasForScan", oid)) {
+		// SHOW TABLES FROM filters on the oid of the schema it looked up while binding, which is cached
+		auto entry = schemas.GetCachedEntryByOid(oid);
+		if (!entry) {
+			return Catalog::GetSchemasForScan(context, filters);
+		}
+		auto &schema = entry->Cast<SchemaCatalogEntry>();
+		if (filters.Accepts(context, schema)) {
+			result.push_back(schema);
+		}
+		return result;
+	}
 	string name;
 	if (filters.GetSchemaOid() ||
 	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
 		return Catalog::GetSchemasForScan(context, filters);
 	}
-	vector<reference<SchemaCatalogEntry>> result;
 	auto entry = schemas.GetEntry(context, name);
 	if (entry) {
 		result.push_back(entry->Cast<SchemaCatalogEntry>());
