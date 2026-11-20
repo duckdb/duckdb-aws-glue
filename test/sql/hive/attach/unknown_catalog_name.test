@@ -27,20 +27,19 @@ statement ok
 INSERT INTO my_datalake.default.ucn_orders VALUES (1);
 
 # the Glue catalog is the default: DuckDB reads "x".db.t with an unknown catalog x as the schema path [x, db] in it,
-# which used to resolve to database db (and read the table). DuckDB looks schemas up with RETURN_NULL here and reports
-# its own "does not exist" message.
+# which used to resolve to database db (and read the table). DuckDB refuses the path, Glue databases are not nested.
 statement ok
 USE my_datalake.default;
 
 statement error
 SELECT id FROM "999999999999"."default".ucn_orders;
 ----
-schema "999999999999.default" does not exist
+Catalog "my_datalake" does not support nested schemas: "999999999999"."default"
 
 statement error
 SELECT id FROM not_attached."default".ucn_orders;
 ----
-schema "not_attached.default" does not exist
+Catalog "my_datalake" does not support nested schemas: not_attached."default"
 
 # the names that do resolve still do
 query I

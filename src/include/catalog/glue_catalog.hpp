@@ -60,6 +60,10 @@ public:
 			return CatalogLookupBehavior::STANDARD;
 		}
 	}
+	//! Glue databases are flat
+	bool SupportsNestedSchemas() const override {
+		return false;
+	}
 	bool CheckAmbiguousCatalogOrSchema(ClientContext &context, const Identifier &schema) override {
 		return false;
 	}
@@ -75,7 +79,8 @@ public:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 	void OnDetach(ClientContext &context) override;
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
-	//! Serves a single-name equality on schema_name with one database lookup instead of listing every database
+	//! Serves a single-name equality on schema_name with one database lookup, and a schema_oid equality from the
+	//! cache, instead of listing every database
 	vector<reference<SchemaCatalogEntry>> GetSchemasForScan(ClientContext &context,
 	                                                        const SchemaScanFilters &filters) override;
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
