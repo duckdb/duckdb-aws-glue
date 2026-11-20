@@ -98,7 +98,7 @@ FROM duckdb_logs_parsed('GlueScan') GROUP BY scan_id ORDER BY scan_id;
 2	1	0
 
 # without footer statistics each scan of a query has its own scan_id, numbered from 1 in every query; the second scan
-# of a table reuses its sample
+# of a table to ask reuses the sample of the first
 statement ok
 SET hive_footer_statistics_max_files = 0;
 
@@ -111,11 +111,16 @@ SELECT count(*) FROM glog_cold.{GLUE_TEST_DB}.glog_flat a JOIN glog_cold.{GLUE_T
 5
 
 query III
-SELECT scan_id, count(*) FILTER (event = 'listing'), count(*) FILTER (event = 'sample')
+SELECT scan_id, count(*) FILTER (event = 'listing'), count(*) FILTER (event = 'sample') < 2
 FROM duckdb_logs_parsed('GlueScan') GROUP BY scan_id ORDER BY scan_id;
 ----
-1	1	1
-2	1	0
+1	1	true
+2	1	true
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'sample';
+----
+1
 
 # from hive_partition_listing_threshold partitions on, the table location is listed once
 statement ok
