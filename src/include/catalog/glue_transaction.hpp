@@ -50,7 +50,7 @@ public:
 		shared_ptr<CacheEntry<GlueTableInfo>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(tables, database_name + "\n" + table_name);
+			entry = FindEntry(tables, TableCacheKey(database_name, table_name));
 		}
 		return Resolve(*entry, load);
 	}
@@ -60,7 +60,7 @@ public:
 		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(partitions, database_name + "\n" + table_name);
+			entry = FindEntry(partitions, TableCacheKey(database_name, table_name));
 		}
 		return Resolve(*entry, load);
 	}
@@ -77,6 +77,9 @@ public:
 
 private:
 	static idx_t NextId();
+	static string TableCacheKey(const string &database_name, const string &table_name) {
+		return database_name + "\x1f" + table_name;
+	}
 
 	//! One cached value and the lock that guards loading it. The lock is per entry so the Glue calls for
 	//! different tables do not wait on each other (resolving N tables runs their fetches in parallel).

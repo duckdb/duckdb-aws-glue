@@ -115,6 +115,9 @@ public:
 
 	//! the CatalogId Glue reports in the response of GetDatabases call (during attach probe or first usage)
 	string FetchCatalogId(ClientContext &context);
+	//! Identifies the Glue catalog behind this attach (account, region and endpoint): attaches of the same one share
+	//! Glue's request rate. For ':' the account is asked from Glue (FetchCatalogId) unless already known
+	string GlueCatalogIdentity(ClientContext &context);
 	//! Whether 'catalog' is the one ICEBERG_CATALOG names; throws if it is not an Iceberg catalog over this one
 	bool IsIcebergCatalog(Catalog &catalog);
 	//! Whether Glue registers db.table of this catalog as an Iceberg table, looked up without expanding views
