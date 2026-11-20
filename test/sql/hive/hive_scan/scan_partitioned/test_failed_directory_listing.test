@@ -36,6 +36,10 @@ CREATE SECRET dense_through_proxy (
     SCOPE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/dense'
 );
 
+# a proxy that kept the failure of an earlier run would not fail the first listing
+statement ok
+SELECT * FROM read_text('http://{GLUE_S3_FAULT_ENDPOINT}/_reset');
+
 statement ok
 SET http_retries = 0;
 

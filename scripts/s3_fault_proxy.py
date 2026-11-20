@@ -54,7 +54,8 @@ class Handler(BaseHTTPRequestHandler):
             response = upstream.getresponse()
             data = response.read()
             headers = [(k, v) for k, v in response.getheaders() if k.lower() not in NOT_FORWARDED]
-            self.reply(response.status, headers, data, head=self.command == "HEAD", length=response.getheader("Content-Length"))
+            length = response.getheader("Content-Length")
+            self.reply(response.status, headers, data, head=self.command == "HEAD", length=length)
         finally:
             upstream.close()
 

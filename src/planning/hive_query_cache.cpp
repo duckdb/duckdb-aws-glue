@@ -161,10 +161,15 @@ shared_ptr<HiveFooterEntry> HiveQueryCache::GetFooters(const string &key) {
 	return entry;
 }
 
-shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
-                                                              bool cache_in_connection) {
+static string ListingKey(const string &directory) {
 	auto key = directory;
 	StringUtil::RTrim(key, "/");
+	return key;
+}
+
+shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
+                                                              bool cache_in_connection) {
+	auto key = ListingKey(directory);
 	if (cache_in_connection) {
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
 		return context.GetContext()
@@ -183,8 +188,7 @@ void HiveQueryCache::ReadDirectoryListing(ClientContext &context, const string &
 	} catch (InterruptException &) {
 		throw;
 	} catch (...) {
-		auto key = directory;
-		StringUtil::RTrim(key, "/");
+		auto key = ListingKey(directory);
 		if (cache_in_connection) {
 			auto cache = context.GetContext().GetRegisteredState().Get<HiveListingCache>(HIVE_LISTING_CACHE);
 			if (cache) {

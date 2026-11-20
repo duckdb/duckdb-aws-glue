@@ -87,8 +87,7 @@ public:
 	//! listing is kept beyond the query (glue_cache_listings)
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
 	                                              bool cache_in_connection = false);
-	//! Calls 'read' with the listing of 'directory'. A listing whose reading fails is dropped from the cache, so that
-	//! the next reader lists the directory again
+	//! Calls 'read' with the listing of 'directory'; a listing whose reading fails is dropped from the cache
 	void ReadDirectoryListing(ClientContext &context, const string &directory, bool cache_in_connection,
 	                          const std::function<void(MultiFileList &)> &read);
 	//! The id of the next scan bound in this query, starting at 1
