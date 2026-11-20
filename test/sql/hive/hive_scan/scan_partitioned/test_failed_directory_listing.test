@@ -1,0 +1,93 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_failed_directory_listing.test
+# description: a directory listing that failed is listed again by the next reader of the directory
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_S3_FAULT_ENDPOINT
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_TEST_DB
+
+# 1020 one-row files in two directories: more than one page of keys, so httpfs lists the root directory by directory
+loop i 0 510
+
+statement ok
+COPY (SELECT {i} AS i) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/dense/p=a/f{i}.parquet';
+
+statement ok
+COPY (SELECT {i} AS i) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/dense/p=fault_once/f{i}.parquet';
+
+endloop
+
+# reads under dense/ go through the proxy, which fails the first listing of p=fault_once/ and then forwards it
+statement ok
+CREATE SECRET dense_through_proxy (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT '{GLUE_S3_FAULT_ENDPOINT}',
+    USE_SSL false,
+    URL_STYLE 'path',
+    SCOPE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/dense'
+);
+
+statement ok
+SET http_retries = 0;
+
+statement ok
+SET hive_partition_listing_threshold = 1;
+
+# the optimizer's sample of the table fails and costing must not fail the query: the scan lists the directory again
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/dense', schema := {i: 'BIGINT', p: 'VARCHAR'},
+    partitions := [{p: 'a', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/dense/p=a'},
+                   {p: 'fault_once', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/dense/p=fault_once'}]);
+----
+1020
+
+# a statement that survives the failure does not leave it to the next one of the connection (glue_cache_listings)
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dense_listing;
+
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dense_listing (i BIGINT, p VARCHAR) PARTITIONED BY (p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/dense');
+
+statement ok
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.dense_listing', {p: 'a'});
+
+statement ok
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.dense_listing', {p: 'fault_once'});
+
+statement ok
+SELECT * FROM read_text('http://{GLUE_S3_FAULT_ENDPOINT}/_reset');
+
+statement ok
+SET glue_cache_listings = true;
+
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok
+EXPLAIN SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dense_listing;
+
+query I
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dense_listing;
+----
+1020
+
+statement ok
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dense_listing;

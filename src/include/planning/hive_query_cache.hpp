@@ -5,6 +5,8 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/main/client_context_state.hpp"
 
+#include <functional>
+
 #include "core/glue_info.hpp"
 #include "planning/hive_partition_cache.hpp"
 
@@ -47,6 +49,8 @@ struct HiveDirectoryListingEntry {
 class HiveDirectoryListings {
 public:
 	shared_ptr<MultiFileList> Get(ClientContext &context, const string &directory);
+	//! Forget 'listing' of 'directory' if the cache still holds it
+	void Drop(const string &directory, const shared_ptr<MultiFileList> &listing);
 	void Clear();
 
 private:
@@ -83,6 +87,10 @@ public:
 	//! listing is kept beyond the query (glue_cache_listings)
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
 	                                              bool cache_in_connection = false);
+	//! Calls 'read' with the listing of 'directory'. A listing whose reading fails is dropped from the cache, so that
+	//! the next reader lists the directory again
+	void ReadDirectoryListing(ClientContext &context, const string &directory, bool cache_in_connection,
+	                          const std::function<void(MultiFileList &)> &read);
 	//! The id of the next scan bound in this query, starting at 1
 	idx_t NextScanId();
 

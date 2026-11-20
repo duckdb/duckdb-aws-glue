@@ -30,6 +30,8 @@
 # created again by another client and then fails.
 # 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link
 # link_db whose target is target_db (scripts/resource_link_proxy.py).
+# 's3-fault-proxy' (port 9102, GLUE_S3_FAULT_ENDPOINT) forwards to S3, except the first ListObjectsV2 of a prefix whose
+# last path segment contains fault_once, which fails with a 500 (scripts/s3_fault_proxy.py).
 # 'glue-latency-proxy' (port 5558) and 's3-latency-proxy' (port 9101) forward to moto and S3 after a delay per request
 # (scripts/latency_proxy.py), for the planning benchmarks in benchmark/tpcds/planning/local_sf1: GLUE_LATENCY_MS
 # (default 40), GLUE_MAX_CONCURRENCY (requests delayed at the same time, default 10) and S3_LATENCY_MS (default 15),
@@ -94,6 +96,16 @@ services:
       - ./latency_proxy.py:/latency_proxy.py:ro
     entrypoint: ["python3", "/latency_proxy.py", "--port", "9101", "--upstream", "http://s3:8333", "--cache",
                  "--latency-ms", "${S3_LATENCY_MS:-15}"]
+  s3-fault-proxy:
+    image: motoserver/moto:5.2.3
+    container_name: s3-fault-proxy
+    depends_on:
+      - s3
+    ports:
+      - "127.0.0.1:9102:9102"
+    volumes:
+      - ./s3_fault_proxy.py:/s3_fault_proxy.py:ro
+    entrypoint: ["python3", "/s3_fault_proxy.py", "--port", "9102", "--upstream", "http://s3:8333"]
   s3:
     image: chrislusf/seaweedfs:4.47
     container_name: glue-s3
