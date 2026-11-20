@@ -2,6 +2,7 @@
 
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/string.hpp"
+#include "duckdb/common/typedefs.hpp"
 
 namespace duckdb {
 
@@ -11,5 +12,7 @@ class TableFilter;
 //! Glue stores database and table names lowercased, so a single lookup of 'x' finds every entry either shape can
 //! accept; the caller re-checks the result against the filter. `caller` names the scan in error messages.
 bool TryGetNameEquality(optional_ptr<const TableFilter> filter, const char *caller, string &name);
+//! Extracts the oid from a `<oid column> = <integer>` filter pushed into a catalog scan.
+bool TryGetOidEquality(optional_ptr<const TableFilter> filter, const char *caller, idx_t &oid);
 
 } // namespace duckdb

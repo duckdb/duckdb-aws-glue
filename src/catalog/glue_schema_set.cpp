@@ -68,6 +68,16 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetCachedEntry(const string &name) {
 	return entry->second.get();
 }
 
+optional_ptr<CatalogEntry> GlueSchemaSet::GetCachedEntryByOid(idx_t oid) {
+	lock_guard<mutex> guard(entry_lock);
+	for (auto &entry : entries) {
+		if (entry.second->oid == oid) {
+			return entry.second.get();
+		}
+	}
+	return nullptr;
+}
+
 optional_ptr<CatalogEntry> GlueSchemaSet::AddEntryIfAbsent(unique_ptr<GlueSchemaEntry> entry) {
 	lock_guard<mutex> guard(entry_lock);
 	auto name = entry->name.GetIdentifierName();
