@@ -1352,9 +1352,8 @@ static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo
 			auto filter_copy = filters[filter_index]->Copy();
 			ReplacePartitionColumnRefs(context, filter_copy, table_index, projections, info, partition);
 			Value result;
-			if (!filter_copy->IsScalar() || !filter_copy->IsFoldable() ||
-			    !ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
-				// needs the data columns, can not decide here
+			if (!ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
+				// evaluation failed, e.g. on a cast error: the scan applies this filter instead
 				continue;
 			}
 			if (result.IsNull() || !result.GetValue<bool>()) {

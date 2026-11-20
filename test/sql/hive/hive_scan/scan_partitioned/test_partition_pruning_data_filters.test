@@ -81,3 +81,27 @@ query II
 EXPLAIN SELECT id FROM pdf() WHERE dt = 'x' OR amount > 35
 ----
 physical_plan	<!REGEX>:.*File Filters.*
+
+# an INTEGER partition key with a value that does not cast
+statement ok
+CREATE MACRO pdf_bad() AS TABLE
+SELECT * FROM hive_scan('{TEST_DIR}/pruning_data_filters',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', note: 'VARCHAR', p: 'INTEGER'},
+    partitions := [{p: '1', location: '{TEST_DIR}/pruning_data_filters_x'},
+                   {p: 'abc', location: '{TEST_DIR}/pruning_data_filters_z'}]);
+
+# a filter on the partition key alone casts every partition value while planning
+statement error
+EXPLAIN SELECT id FROM pdf_bad() WHERE p = 1
+----
+Unable to cast 'abc' (from Glue partition column 'P') to: 'INTEGER'
+
+# a filter that also needs a data column plans without casting the partition values
+statement ok
+EXPLAIN SELECT id FROM pdf_bad() WHERE p = 1 OR amount > 35
+
+# and fails once the scan reads the partition whose value does not cast
+statement error
+SELECT id FROM pdf_bad() WHERE p = 1 OR amount > 35
+----
+Unable to cast 'abc'
