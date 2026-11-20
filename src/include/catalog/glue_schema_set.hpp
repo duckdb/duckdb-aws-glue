@@ -25,6 +25,8 @@ public:
 	//! The schema this set already holds, nullptr if it holds none of that name; never asks Glue. A schema found
 	//! through a table lookup is held before its definition is loaded (GlueSchemaEntry::GetSchemaInfo)
 	optional_ptr<CatalogEntry> GetCachedEntry(const string &name);
+	//! The schema with this oid; an oid is only assigned to a schema of this set, so this never asks Glue either
+	optional_ptr<CatalogEntry> GetEntryByOid(ClientContext &context, idx_t oid);
 	//! Insert 'entry' unless a schema of that name was loaded meanwhile; returns nullptr if one was
 	optional_ptr<CatalogEntry> AddEntryIfAbsent(unique_ptr<GlueSchemaEntry> entry);
 	//! The schemas, listed from Glue once per metadata cache

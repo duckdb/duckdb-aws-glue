@@ -339,12 +339,12 @@ private:
 //===--------------------------------------------------------------------===//
 HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p,
                                      vector<idx_t> partition_indexes_p)
-    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)),
+    : LazyMultiFileList(&context.GetContext()), client_context(context), scan_info(std::move(scan_info_p)),
       partition_indexes(make_shared_ptr<const vector<idx_t>>(std::move(partition_indexes_p))) {
 }
 
 HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info_p)
-    : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)) {
+    : LazyMultiFileList(&context.GetContext()), client_context(context), scan_info(std::move(scan_info_p)) {
 }
 
 void HiveMultiFileList::SetPathFilters(vector<shared_ptr<ExpressionFilter>> filters) {
@@ -935,7 +935,7 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 
 //! The description of the scan: CommonSubplanOptimizer compares it to decide whether sub-plans are equal, and a
 //! deserialized plan binds the same scan again from it and, for a partitioned table, the query's partition list
-static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
+static void HiveScanSerialize(Serializer &serializer, const optional_ptr<const FunctionData> bind_data_p,
                               const BoundTableFunction &function) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &list = bind_data.file_list->Cast<HiveMultiFileList>();
@@ -1136,7 +1136,8 @@ static bool HasBinaryColumn(const HiveScanInfo &scan_info) {
 	return false;
 }
 
-static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data,
+static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &get,
+                                          optional_ptr<const FunctionData> bind_data,
                                           vector<unique_ptr<Expression>> &filters) {
 	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
 	auto &scan_info = multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
@@ -1443,31 +1444,51 @@ struct PartitionKeyProjection {
 	idx_t partition_key_index;
 };
 
+//! The value a partition column reference is replaced by
+using PartitionColumnValue = std::function<Value(const PartitionKeyProjection &, const BoundColumnRefExpression &)>;
+
+//! Replace references to partition columns of the scanned table by the value 'value_of' gives for them
+static void ReplacePartitionColumnRefs(unique_ptr<Expression> &expr, TableIndex table_index,
+                                       const vector<PartitionKeyProjection> &projections,
+                                       const PartitionColumnValue &value_of) {
+	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+	    expr, [&](BoundColumnRefExpression &colref, unique_ptr<Expression> &ref) {
+		    if (colref.Binding().table_index != table_index) {
+			    return;
+		    }
+		    auto column_index = colref.Binding().column_index.GetIndex();
+		    for (auto &projection : projections) {
+			    if (projection.projected_column_index == column_index) {
+				    ref = make_uniq<BoundConstantExpression>(value_of(projection, colref));
+				    return;
+			    }
+		    }
+	    });
+}
+
 //! Replace references to partition columns of the scanned table by the partition's values
 static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expression> &expr, TableIndex table_index,
                                        const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info,
                                        const GluePartitionInfo &partition) {
-	if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-		auto &colref = expr->Cast<BoundColumnRefExpression>();
-		if (colref.Binding().table_index != table_index) {
-			return;
-		}
-		auto column_index = colref.Binding().column_index.GetIndex();
-		for (auto &projection : projections) {
-			if (projection.projected_column_index != column_index) {
-				continue;
-			}
-			auto &key = info.partition_keys[projection.partition_key_index];
-			auto &partition_value = partition.values[projection.partition_key_index];
-			auto value = GlueTypes::PartitionValue(context, key, partition_value, colref.GetReturnType());
-			expr = make_uniq<BoundConstantExpression>(std::move(value));
-			return;
-		}
-		return;
-	}
-	ExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<Expression> &child) {
-		ReplacePartitionColumnRefs(context, child, table_index, projections, info, partition);
-	});
+	ReplacePartitionColumnRefs(expr, table_index, projections,
+	                           [&](const PartitionKeyProjection &projection, const BoundColumnRefExpression &colref) {
+		                           auto &key = info.partition_keys[projection.partition_key_index];
+		                           auto &partition_value = partition.values[projection.partition_key_index];
+		                           return GlueTypes::PartitionValue(context, key, partition_value,
+		                                                            colref.GetReturnType());
+	                           });
+}
+
+//! Whether the partition values alone can decide 'filter': with its partition columns replaced, it folds to a
+//! constant. That depends on the shape of the filter, not on the values, so it is asked once per filter.
+static bool DecidableByPartitionValues(const Expression &filter, TableIndex table_index,
+                                       const vector<PartitionKeyProjection> &projections) {
+	auto probe = filter.Copy();
+	ReplacePartitionColumnRefs(probe, table_index, projections,
+	                           [](const PartitionKeyProjection &, const BoundColumnRefExpression &colref) {
+		                           return Value(colref.GetReturnType());
+	                           });
+	return probe->IsScalar() && probe->IsFoldable();
 }
 
 //! The partitions among 'candidates' that no filter rules out, each filter evaluated with the partition's values in
@@ -1480,17 +1501,25 @@ static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo
                                       unordered_set<idx_t> &pruning_filters, unordered_set<idx_t> &decided_filters) {
 	vector<idx_t> kept;
 	vector<idx_t> true_in_kept(filters.size(), 0);
+	vector<idx_t> decidable_filters;
+	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
+		if (DecidableByPartitionValues(*filters[filter_index], table_index, projections)) {
+			decidable_filters.push_back(filter_index);
+		}
+	}
+	if (decidable_filters.empty()) {
+		return candidates;
+	}
 	for (auto partition_index : candidates) {
 		auto &partition = partitions[partition_index];
 		bool keep = true;
 		vector<idx_t> true_here;
-		for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
+		for (auto filter_index : decidable_filters) {
 			auto filter_copy = filters[filter_index]->Copy();
 			ReplacePartitionColumnRefs(context, filter_copy, table_index, projections, info, partition);
 			Value result;
-			if (!filter_copy->IsScalar() || !filter_copy->IsFoldable() ||
-			    !ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
-				// needs the data columns, can not decide here
+			if (!ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
+				// evaluation failed, e.g. on a cast error: the scan applies this filter instead
 				continue;
 			}
 			if (result.IsNull() || !result.GetValue<bool>()) {
@@ -1553,21 +1582,21 @@ static void RetainFileFilter(MultiFilePushdownInfo &pushdown_info, unique_ptr<Ex
 		return;
 	}
 	bool representable = true;
-	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
-	    filter, [&](BoundColumnRefExpression &column, unique_ptr<Expression> &) {
+	filter = ExpressionIterator::PreorderReplace<BoundColumnRefExpression>(
+	    std::move(filter), [&](const BoundColumnRefExpression &column) -> unique_ptr<Expression> {
 		    auto binding = column.Binding();
 		    if (column.Depth() != 0 || binding.table_index != pushdown_info.table_index ||
 		        binding.column_index.GetIndex() >= pushdown_info.column_indexes.size()) {
 			    representable = false;
-			    return;
+			    return nullptr;
 		    }
 		    auto &index = pushdown_info.column_indexes[binding.column_index.GetIndex()];
 		    if (index.IsVirtualColumn() || index.IsPushdownExtract() || index.HasType()) {
 			    representable = false;
-			    return;
+			    return nullptr;
 		    }
-		    column.BindingMutable() = ColumnBinding(TableIndex(ExtraOperatorInfo::FILE_FILTER_TABLE_INDEX),
-		                                            ProjectionIndex(index.GetPrimaryIndex()));
+		    return column.WithBinding(ColumnBinding(TableIndex(ExtraOperatorInfo::FILE_FILTER_TABLE_INDEX),
+		                                            ProjectionIndex(index.GetPrimaryIndex())));
 	    });
 	if (!representable) {
 		retained.reset();

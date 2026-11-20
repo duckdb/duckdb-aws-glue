@@ -109,11 +109,11 @@ UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide WHERE dt = 'd7'
 UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide
 UNION ALL SELECT * FROM my_datalake.{GLUE_TEST_DB}.plancost_wide;
 
-query II
-SELECT count(*), count(*) FILTER (WHERE url_decode(regexp_extract(request.url, 'prefix=([^&]*)', 1)) LIKE '%/plancost_wide/dt=%')
-FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
+# which scan samples (listing its one partition, or the table location) depends on the order the optimizer asks in
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
 ----
-1	1
+1
 
 # Glue is asked for the table and its partitions once per query, not once per scan. Without the optimizer, so the
 # common subplan optimizer can not fold the scans into one: these are four scans, each bound on its own

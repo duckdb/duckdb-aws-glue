@@ -41,7 +41,7 @@ INSERT INTO my_datalake.{GLUE_TEST_DB}.noprune VALUES (1, 'a b'), (2, 'plain'), 
 foreach stats false true
 
 statement ok
-SET glue_enable_partition_key_statistics = ${stats};
+SET glue_enable_partition_key_statistics = {stats};
 
 query IT
 SELECT id, k FROM my_datalake.{GLUE_TEST_DB}.noprune ORDER BY id;

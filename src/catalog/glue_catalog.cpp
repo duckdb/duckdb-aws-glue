@@ -300,13 +300,18 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
                                                                      const SchemaScanFilters &filters) {
+	optional_ptr<CatalogEntry> entry;
 	string name;
-	if (filters.GetSchemaOid() ||
-	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
+	idx_t oid;
+	if (TryGetOidEquality(filters.GetSchemaOid(), "GlueCatalog::GetSchemasForScan", oid)) {
+		entry = schemas.GetEntryByOid(context, oid);
+	} else if (!filters.GetSchemaOid() &&
+	           TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
+		entry = schemas.GetEntry(context, name);
+	} else {
 		return Catalog::GetSchemasForScan(context, filters);
 	}
 	vector<reference<SchemaCatalogEntry>> result;
-	auto entry = schemas.GetEntry(context, name);
 	if (entry) {
 		result.push_back(entry->Cast<SchemaCatalogEntry>());
 	}
