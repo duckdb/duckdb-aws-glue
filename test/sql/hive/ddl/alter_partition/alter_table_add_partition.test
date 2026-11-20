@@ -129,6 +129,34 @@ SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.orders_add');
 ----
 4
 
+# a NULL flag is false
+statement error
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_add', {dt: '2016-05-14', country: 'IN'}, if_not_exists := NULL);
+----
+already exists
+
+#---------------------------------------------------------------------------
+# the location is checked as for ALTER TABLE ADD PARTITION ... LOCATION
+#---------------------------------------------------------------------------
+statement error
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_add', {dt: '2016-07-01', country: 'IN'}, location := '/tmp/orders');
+----
+<REGEX>:Binder Error.*glue_add_partition: the location must be an S3 location \(s3://...\), got '/tmp/orders'.*
+
+statement error
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_add', {dt: '2016-07-01', country: 'IN'}, location := '/');
+----
+<REGEX>:Binder Error.*glue_add_partition: the location must not be empty.*
+
+# a NULL location is the default one, as without LOCATION
+query I
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_add', {dt: '2016-07-01', country: 'IN'}, location := NULL);
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_add/dt=2016-07-01/country=IN
+
+statement ok
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.orders_add', {dt: '2016-07-01', country: 'IN'});
+
 #---------------------------------------------------------------------------
 # the partition spec must name every partition key, and only partition keys
 #---------------------------------------------------------------------------
@@ -162,3 +190,28 @@ SELECT count(*) FROM glue_partitions('verify_datalake.{GLUE_TEST_DB}.orders_add'
 
 statement ok
 DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_add;
+
+#---------------------------------------------------------------------------
+# a table at a local location takes local partition locations, and refuses S3 ones
+#---------------------------------------------------------------------------
+statement ok
+attach '{GLUE_CATALOG_ID}' as local_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_LOCATION '{TEST_DIR}');
+
+statement ok
+DROP TABLE IF EXISTS local_datalake.{GLUE_TEST_DB}.orders_add_local;
+
+statement ok
+CREATE TABLE local_datalake.{GLUE_TEST_DB}.orders_add_local (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+query I
+CALL glue_add_partition('local_datalake.{GLUE_TEST_DB}.orders_add_local', {dt: 'a'}, location := '{TEST_DIR}/elsewhere/dt=a');
+----
+{TEST_DIR}/elsewhere/dt=a
+
+statement error
+CALL glue_add_partition('local_datalake.{GLUE_TEST_DB}.orders_add_local', {dt: 'b'}, location := 's3://bucket/dt=b');
+----
+<REGEX>:Binder Error.*glue_add_partition: the location must be on the file system of the table location '.*', got 's3://bucket/dt=b'.*
+
+statement ok
+DROP TABLE local_datalake.{GLUE_TEST_DB}.orders_add_local;
