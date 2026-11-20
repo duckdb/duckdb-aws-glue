@@ -64,46 +64,39 @@ Value PartitionListingValue(ClientContext &context, const string &key, const str
 	}
 }
 
-vector<string> ParsePartitionSpec(const string &function_name, const GluePartitionTarget &target, const Value &spec) {
+vector<string> ParsePartitionPairs(const string &function_name, const GluePartitionTarget &target,
+                                   const vector<pair<string, Value>> &pairs) {
 	auto &keys = target.table.partition_keys;
 	vector<string> key_names;
 	for (auto &key : keys) {
 		key_names.push_back(key.name);
 	}
 	auto describe_keys = StringUtil::Join(key_names, ", ");
-	if (spec.type().id() != LogicalTypeId::STRUCT || spec.IsNull()) {
-		throw BinderException("%s expects the partition as a struct of the partition keys of table '%s': {%s}",
-		                      function_name, target.TableName(), describe_keys);
-	}
-	auto &spec_types = StructType::GetChildTypes(spec.type());
-	auto &spec_values = StructValue::GetChildren(spec);
 	vector<string> result(keys.size());
 	vector<bool> seen(keys.size(), false);
-	for (idx_t i = 0; i < spec_types.size(); i++) {
-		auto &name = spec_types[i].first.GetIdentifierName();
+	for (auto &pair : pairs) {
 		idx_t key_index = DConstants::INVALID_INDEX;
 		for (idx_t k = 0; k < keys.size(); k++) {
-			if (StringUtil::CIEquals(keys[k].name, name)) {
+			if (StringUtil::CIEquals(keys[k].name, pair.first)) {
 				key_index = k;
 				break;
 			}
 		}
 		if (key_index == DConstants::INVALID_INDEX) {
-			throw BinderException("'%s' is not a partition key of table '%s', the partition keys are: %s", name,
+			throw BinderException("'%s' is not a partition key of table '%s', the partition keys are: %s", pair.first,
 			                      target.TableName(), describe_keys);
 		}
 		if (seen[key_index]) {
 			throw BinderException("Partition key '%s' is given twice", keys[key_index].name);
 		}
 		seen[key_index] = true;
-		auto &value = spec_values[i];
-		if (value.IsNull()) {
+		if (pair.second.IsNull()) {
 			result[key_index] = HivePartitioning::DEFAULT_PARTITION_NAME;
 			continue;
 		}
 		// store the value the way the partition key type would render it
 		auto key_type = GlueTypes::ToLogicalType(keys[key_index].type);
-		result[key_index] = value.DefaultCastAs(key_type).ToString();
+		result[key_index] = pair.second.DefaultCastAs(key_type).ToString();
 	}
 	for (idx_t k = 0; k < keys.size(); k++) {
 		if (!seen[k]) {
@@ -112,6 +105,24 @@ vector<string> ParsePartitionSpec(const string &function_name, const GluePartiti
 		}
 	}
 	return result;
+}
+
+vector<string> ParsePartitionSpec(const string &function_name, const GluePartitionTarget &target, const Value &spec) {
+	if (spec.type().id() != LogicalTypeId::STRUCT || spec.IsNull()) {
+		vector<string> key_names;
+		for (auto &key : target.table.partition_keys) {
+			key_names.push_back(key.name);
+		}
+		throw BinderException("%s expects the partition as a struct of the partition keys of table '%s': {%s}",
+		                      function_name, target.TableName(), StringUtil::Join(key_names, ", "));
+	}
+	auto &spec_types = StructType::GetChildTypes(spec.type());
+	auto &spec_values = StructValue::GetChildren(spec);
+	vector<pair<string, Value>> pairs;
+	for (idx_t i = 0; i < spec_types.size(); i++) {
+		pairs.emplace_back(spec_types[i].first.GetIdentifierName(), spec_values[i]);
+	}
+	return ParsePartitionPairs(function_name, target, pairs);
 }
 
 namespace {

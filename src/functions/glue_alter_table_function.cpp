@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/optional.hpp"
 #include "duckdb/common/set.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -15,50 +16,6 @@
 namespace duckdb {
 
 namespace {
-
-//! Turn (key, value) pairs into the partition values in partition key order; NULL values (empty optional) become
-//! the default partition
-vector<string> ParsePartitionPairs(const string &function_name, const GluePartitionTarget &target,
-                                   const vector<pair<string, optional<string>>> &pairs) {
-	auto &keys = target.table.partition_keys;
-	vector<string> key_names;
-	for (auto &key : keys) {
-		key_names.push_back(key.name);
-	}
-	auto describe_keys = StringUtil::Join(key_names, ", ");
-	vector<string> result(keys.size());
-	vector<bool> seen(keys.size(), false);
-	for (auto &pair : pairs) {
-		idx_t key_index = DConstants::INVALID_INDEX;
-		for (idx_t k = 0; k < keys.size(); k++) {
-			if (StringUtil::CIEquals(keys[k].name, pair.first)) {
-				key_index = k;
-				break;
-			}
-		}
-		if (key_index == DConstants::INVALID_INDEX) {
-			throw BinderException("'%s' is not a partition key of table '%s', the partition keys are: %s", pair.first,
-			                      target.TableName(), describe_keys);
-		}
-		if (seen[key_index]) {
-			throw BinderException("Partition key '%s' is given twice", keys[key_index].name);
-		}
-		seen[key_index] = true;
-		if (!pair.second) {
-			result[key_index] = HivePartitioning::DEFAULT_PARTITION_NAME;
-			continue;
-		}
-		auto key_type = GlueTypes::ToLogicalType(keys[key_index].type);
-		result[key_index] = Value(*pair.second).DefaultCastAs(key_type).ToString();
-	}
-	for (idx_t k = 0; k < keys.size(); k++) {
-		if (!seen[k]) {
-			throw BinderException("%s: the partition must name every partition key of table '%s' (%s), '%s' is missing",
-			                      function_name, target.TableName(), describe_keys, keys[k].name);
-		}
-	}
-	return result;
-}
 
 //! The location a partition gets when none is given: <table location>/<key>=<value>/...
 string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<string> &values) {
@@ -243,21 +200,10 @@ unique_ptr<GlobalTableFunctionState> GlueAlterTableInit(ClientContext &context, 
 	return make_uniq<GlueAlterTableState>();
 }
 
-//! The scheme of a location, lowercased; empty for a local path
-string LocationScheme(const string &location) {
-	auto end = location.find("://");
-	if (end == string::npos) {
-		return string();
-	}
-	return StringUtil::Lower(location.substr(0, end));
-}
-
-bool IsS3Scheme(const string &scheme) {
-	return scheme == "s3" || scheme == "s3a" || scheme == "s3n";
-}
-
-//! A location on the file system of the table's location: S3 for an S3 table (or one without a location in Glue)
-string ParseLocation(const string &function_name, const GluePartitionTarget &target, const Value &location) {
+//! A location on the file system of the table's location: S3 for an S3 table (or one without a location in Glue), else
+//! the table's own file system. The table's own location may also move to S3.
+string ParseLocation(const string &function_name, const GluePartitionTarget &target, const Value &location,
+                     bool is_table_location = false) {
 	if (location.IsNull()) {
 		throw BinderException("%s: the location must not be NULL", function_name);
 	}
@@ -266,16 +212,24 @@ string ParseLocation(const string &function_name, const GluePartitionTarget &tar
 	if (result.empty()) {
 		throw BinderException("%s: the location must not be empty", function_name);
 	}
-	auto table_scheme = LocationScheme(target.table.location);
 	auto scheme = LocationScheme(result);
-	if (target.table.location.empty() || IsS3Scheme(table_scheme)) {
-		if (scheme != "s3" && scheme != "s3a") {
-			throw BinderException("%s: the location must be an S3 location (s3://...), got '%s'", function_name,
-			                      result);
+	if (scheme == "s3" || scheme == "s3a") {
+		if (is_table_location || target.table.location.empty() || IsS3Scheme(LocationScheme(target.table.location))) {
+			return result;
 		}
-	} else if (scheme != table_scheme) {
-		throw BinderException("%s: the location must be on the file system of the table location '%s', got '%s'",
-		                      function_name, target.table.location, result);
+	}
+	if (target.table.location.empty() || IsS3Scheme(LocationScheme(target.table.location))) {
+		throw BinderException("%s: the location must be an S3 location (s3://...), got '%s'", function_name, result);
+	}
+	auto table_path = Path::FromString(target.table.location);
+	auto path = Path::FromString(result);
+	bool same_file_system = table_path.IsLocal()
+	                            ? path.IsLocal()
+	                            : StringUtil::CIEquals(LocationScheme(result), LocationScheme(target.table.location));
+	if (!same_file_system) {
+		throw BinderException("%s: the location must be %son the file system of the table location '%s', got '%s'",
+		                      function_name, is_table_location ? "an S3 location or " : "", target.table.location,
+		                      result);
 	}
 	return result;
 }
@@ -302,7 +256,7 @@ vector<string> ParsePartitionPairsValue(const string &function_name, const GlueP
 	if (pairs.IsNull() || pairs.type().id() != LogicalTypeId::LIST) {
 		throw BinderException("%s: a partition must be given as a list of {key, value} structs", function_name);
 	}
-	vector<pair<string, optional<string>>> result;
+	vector<pair<string, Value>> result;
 	for (auto &entry : ListValue::GetChildren(pairs)) {
 		if (entry.IsNull() || entry.type().id() != LogicalTypeId::STRUCT) {
 			throw BinderException("%s: a partition must be given as a list of {key, value} structs", function_name);
@@ -312,13 +266,41 @@ vector<string> ParsePartitionPairsValue(const string &function_name, const GlueP
 		if (key.IsNull()) {
 			throw BinderException("%s: a partition entry needs a key", function_name);
 		}
-		optional<string> value_string;
-		if (!value.IsNull()) {
-			value_string = value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
-		}
-		result.emplace_back(key.GetValue<string>(), std::move(value_string));
+		// the SQL form gives the value as text, whatever its literal's type
+		auto text = value.IsNull() ? Value(LogicalType::VARCHAR) : Value(value.DefaultCastAs(LogicalType::VARCHAR));
+		result.emplace_back(key.GetValue<string>(), std::move(text));
 	}
 	return ParsePartitionPairs(function_name, target, result);
+}
+
+//! A partition added twice, with no drop, rename or new location of it in between, is registered where its first add
+//! says: a second add at another location would be ignored
+void CheckAddedLocations(const vector<GlueAlterStep> &steps) {
+	map<vector<string>, string> added;
+	for (auto &step : steps) {
+		switch (step.action) {
+		case GlueAlterAction::ADD: {
+			auto found = added.find(step.values);
+			if (found != added.end() && found->second != step.location) {
+				throw BinderException("ALTER TABLE ADD PARTITION: partition [%s] is added twice with different "
+				                      "locations, '%s' and '%s'",
+				                      StringUtil::Join(step.values, ", "), found->second, step.location);
+			}
+			added.emplace(step.values, step.location);
+			break;
+		}
+		case GlueAlterAction::DROP:
+		case GlueAlterAction::SET_PARTITION_LOCATION:
+			added.erase(step.values);
+			break;
+		case GlueAlterAction::RENAME:
+			added.erase(step.values);
+			added.erase(step.new_values);
+			break;
+		case GlueAlterAction::SET_TABLE_LOCATION:
+			break;
+		}
+	}
 }
 
 unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctionBindInput &input,
@@ -372,12 +354,13 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 			step.location = ParseLocation("ALTER TABLE PARTITION SET LOCATION", result->target, location);
 		} else if (name == "set_table_location") {
 			step.action = GlueAlterAction::SET_TABLE_LOCATION;
-			step.location = ParseLocation("ALTER TABLE SET LOCATION", result->target, location);
+			step.location = ParseLocation("ALTER TABLE SET LOCATION", result->target, location, true);
 		} else {
 			throw BinderException("glue_alter_table: unknown action '%s'", name);
 		}
 		result->steps.push_back(std::move(step));
 	}
+	CheckAddedLocations(result->steps);
 	names = {"action", "partition", "location"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
 	return std::move(result);
@@ -624,7 +607,7 @@ unique_ptr<FunctionData> GlueSetTableLocationBind(ClientContext &context, TableF
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result =
 	    BindSingleAction(context, "glue_set_table_location", input.inputs[0], GlueAlterAction::SET_TABLE_LOCATION);
-	result->steps[0].location = ParseLocation("glue_set_table_location", result->target, input.inputs[1]);
+	result->steps[0].location = ParseLocation("glue_set_table_location", result->target, input.inputs[1], true);
 	names = {"location"};
 	return_types = {LogicalType::VARCHAR};
 	return std::move(result);
