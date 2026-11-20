@@ -47,8 +47,9 @@ SELECT dt, country FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.orders_drop'
 # ALTER TABLE orders DROP PARTITION (dt = '2014-05-14', country = 'IN');
 #---------------------------------------------------------------------------
 query I
-statement ok
 CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.orders_drop', {dt: '2014-05-14', country: 'IN'});
+----
+true
 
 query II
 SELECT dt, country FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.orders_drop') ORDER BY dt, country;
@@ -100,7 +101,7 @@ CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.orders_drop', {dt: '2014-05
 does not exist
 
 query I
-CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.orders_drop', {dt: '2014-05-14', country: 'IN'}, if_exists := true);CALL glue_drop_partition('my_datalake.default.orders_drop', {dt: '2014-05-14', country: 'IN'}, if_exists := true);
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.orders_drop', {dt: '2014-05-14', country: 'IN'}, if_exists := true);
 ----
 false
 
