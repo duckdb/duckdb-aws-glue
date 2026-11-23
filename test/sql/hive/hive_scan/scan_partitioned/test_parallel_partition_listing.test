@@ -121,7 +121,7 @@ statement ok
 SET debug_verify_serializer = true;
 
 statement error
-SELECT count(*) FROM my_datalake.default.pl_events WHERE dt = 'shared';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pl_events WHERE dt = 'shared';
 ----
 <REGEX>:.*Partitions \[c0\] and \[shared\] of Hive table .* are registered at the same location.*
 

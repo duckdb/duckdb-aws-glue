@@ -397,45 +397,45 @@ DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_many;
 # with missing := true, registered partitions with no file below their location are reported as missing, and kept
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.orders_repair_missing;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.orders_repair_missing;
 
 statement ok
-CREATE TABLE my_datalake.default.orders_repair_missing (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_missing (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=a/data.parquet';
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_missing/dt=a/data.parquet';
 
 statement ok
-COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=c/data.parquet';
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_missing/dt=c/data.parquet';
 
 # a partition whose files were removed, one with files, and one outside the table location, which the listing of the
 # table location can not tell about
 statement ok
-CALL glue_add_partition('my_datalake.default.orders_repair_missing', {dt: 'b'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_repair_missing', {dt: 'b'});
 
 statement ok
-CALL glue_add_partition('my_datalake.default.orders_repair_missing', {dt: 'c'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_repair_missing', {dt: 'c'});
 
 statement ok
-CALL glue_add_partition('my_datalake.default.orders_repair_missing', {dt: 'x'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere/dt=x');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_repair_missing', {dt: 'x'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere/dt=x');
 
 # without it the result only has the added partitions, as before
 query II
-SELECT dt, location FROM glue_repair_table('my_datalake.default.orders_repair_missing') ORDER BY dt;
+SELECT dt, location FROM glue_repair_table('my_datalake.{GLUE_TEST_DB}.orders_repair_missing') ORDER BY dt;
 ----
-a	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=a
+a	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_missing/dt=a
 
 statement ok
-CALL glue_drop_partition('my_datalake.default.orders_repair_missing', {dt: 'a'});
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.orders_repair_missing', {dt: 'a'});
 
 query III
-SELECT dt, location, status FROM glue_repair_table('my_datalake.default.orders_repair_missing', missing := true) ORDER BY status, dt;
+SELECT dt, location, status FROM glue_repair_table('my_datalake.{GLUE_TEST_DB}.orders_repair_missing', missing := true) ORDER BY status, dt;
 ----
-a	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=a	added
-b	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=b	missing
+a	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_missing/dt=a	added
+b	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_missing/dt=b	missing
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.orders_repair_missing') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.orders_repair_missing') ORDER BY dt;
 ----
 a
 b
@@ -444,80 +444,80 @@ x
 
 # a file anywhere below the location counts, not only data files directly in it
 statement ok
-COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_missing/dt=b/nested/data.parquet';
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_missing/dt=b/nested/data.parquet';
 
 query I
-SELECT count(*) FROM glue_repair_table('my_datalake.default.orders_repair_missing', missing := true);
+SELECT count(*) FROM glue_repair_table('my_datalake.{GLUE_TEST_DB}.orders_repair_missing', missing := true);
 ----
 0
 
 statement ok
-DROP TABLE my_datalake.default.orders_repair_missing;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_missing;
 
 #---------------------------------------------------------------------------
 # partitions registered with an s3a:// location are the same locations as the s3:// table's
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.orders_repair_s3a;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.orders_repair_s3a;
 
 statement ok
-CREATE TABLE my_datalake.default.orders_repair_s3a (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_s3a (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_s3a/dt=f/data.parquet';
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_s3a/dt=f/data.parquet';
 
 statement ok
-COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_s3a/dt=h/data.parquet';
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_s3a/dt=h/data.parquet';
 
 # an empty one, one with files, and one whose directory is also the one a repair would find for other values
 statement ok
-CALL glue_add_partition('my_datalake.default.orders_repair_s3a', {dt: 'b'},
-    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/orders_repair_s3a/dt=b');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_repair_s3a', {dt: 'b'},
+    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_s3a/dt=b');
 
 statement ok
-CALL glue_add_partition('my_datalake.default.orders_repair_s3a', {dt: 'f'},
-    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/orders_repair_s3a/dt=f');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_repair_s3a', {dt: 'f'},
+    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_s3a/dt=f');
 
 statement ok
-CALL glue_add_partition('my_datalake.default.orders_repair_s3a', {dt: 'g'},
-    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/orders_repair_s3a/dt=h');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.orders_repair_s3a', {dt: 'g'},
+    location := replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_s3a/dt=h');
 
 # only the empty one is missing, reported at its registered location, and dt=h is not registered a second time
 query III
-SELECT dt, location = replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/default/orders_repair_s3a/dt=b', status
-FROM glue_repair_table('my_datalake.default.orders_repair_s3a', missing := true) ORDER BY status, dt;
+SELECT dt, location = replace('{DEFAULT_S3_LOCATION}', 's3://', 's3a://') || '/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_s3a/dt=b', status
+FROM glue_repair_table('my_datalake.{GLUE_TEST_DB}.orders_repair_s3a', missing := true) ORDER BY status, dt;
 ----
 b	true	missing
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.orders_repair_s3a') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.orders_repair_s3a') ORDER BY dt;
 ----
 b
 f
 g
 
 statement ok
-DROP TABLE my_datalake.default.orders_repair_s3a;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_s3a;
 
 #---------------------------------------------------------------------------
 # a partition key called status: the status column becomes status_1
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.orders_repair_status;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.orders_repair_status;
 
 statement ok
-CREATE TABLE my_datalake.default.orders_repair_status (id INTEGER, status VARCHAR) PARTITIONED BY (status);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_status (id INTEGER, status VARCHAR) PARTITIONED BY (status);
 
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/orders_repair_status/status=open/data.parquet';
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/orders_repair_status/status=open/data.parquet';
 
 query II
-SELECT status, status_1 FROM glue_repair_table('my_datalake.default.orders_repair_status', missing := true);
+SELECT status, status_1 FROM glue_repair_table('my_datalake.{GLUE_TEST_DB}.orders_repair_status', missing := true);
 ----
 open	added
 
 statement ok
-DROP TABLE my_datalake.default.orders_repair_status;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_repair_status;
 
 statement ok
 DROP TABLE my_datalake.{GLUE_TEST_DB}.orders_repair;

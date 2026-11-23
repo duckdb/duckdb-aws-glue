@@ -8,48 +8,51 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plp_a;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plp_a;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plp_b;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plp_b;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plp_c;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plp_c;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.plp_flat;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.plp_flat;
 
 statement ok
-CREATE TABLE my_datalake.default.plp_a (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plp_a (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.plp_a VALUES (1, 'x'), (2, 'y'), (3, 'z');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.plp_a VALUES (1, 'x'), (2, 'y'), (3, 'z');
 
 statement ok
-CREATE TABLE my_datalake.default.plp_b (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plp_b (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.plp_b VALUES (1, 'x'), (2, 'y'), (3, 'z');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.plp_b VALUES (1, 'x'), (2, 'y'), (3, 'z');
 
 statement ok
-CREATE TABLE my_datalake.default.plp_c (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plp_c (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.plp_c VALUES (1, 'x'), (2, 'y'), (3, 'z');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.plp_c VALUES (1, 'x'), (2, 'y'), (3, 'z');
 
 statement ok
-CREATE TABLE my_datalake.default.plp_flat (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.plp_flat (id INTEGER);
 
 statement ok
-INSERT INTO my_datalake.default.plp_flat VALUES (1), (2), (3);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.plp_flat VALUES (1), (2), (3);
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as plp (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
@@ -67,7 +70,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a;
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a;
 ----
 3
 
@@ -88,7 +91,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -118,7 +121,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -141,7 +144,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) WHERE a.dt = 'x' AND b.dt IN ('x', 'y');
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) WHERE a.dt = 'x' AND b.dt IN ('x', 'y');
 ----
 1
 
@@ -157,7 +160,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a x JOIN plp.default.plp_a y USING (id) JOIN plp.default.plp_flat f USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a x JOIN plp.{GLUE_TEST_DB}.plp_a y USING (id) JOIN plp.{GLUE_TEST_DB}.plp_flat f USING (id);
 ----
 3
 
@@ -173,9 +176,9 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a
-WHERE id IN (SELECT id FROM plp.default.plp_b)
-  AND id <= (SELECT max(id) FROM plp.default.plp_c);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a
+WHERE id IN (SELECT id FROM plp.{GLUE_TEST_DB}.plp_b)
+  AND id <= (SELECT max(id) FROM plp.{GLUE_TEST_DB}.plp_c);
 ----
 3
 
@@ -189,7 +192,7 @@ CALL truncate_duckdb_logs();
 
 query I
 SELECT count(*) FROM (
-    SELECT id FROM plp.default.plp_a UNION ALL SELECT id FROM plp.default.plp_b UNION ALL SELECT id FROM plp.default.plp_c);
+    SELECT id FROM plp.{GLUE_TEST_DB}.plp_a UNION ALL SELECT id FROM plp.{GLUE_TEST_DB}.plp_b UNION ALL SELECT id FROM plp.{GLUE_TEST_DB}.plp_c);
 ----
 9
 
@@ -206,9 +209,9 @@ CALL truncate_duckdb_logs();
 
 query I
 SELECT count(*) FROM (
-    SELECT id FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id)
+    SELECT id FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id)
     UNION ALL
-    SELECT id FROM plp.default.plp_c WHERE 1 = 0);
+    SELECT id FROM plp.{GLUE_TEST_DB}.plp_c WHERE 1 = 0);
 ----
 3
 
@@ -227,9 +230,9 @@ CALL truncate_duckdb_logs();
 
 query I
 SELECT count(*) FROM (
-    SELECT id FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id)
+    SELECT id FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id)
     UNION ALL
-    SELECT id FROM plp.default.plp_c WHERE 1 = 0);
+    SELECT id FROM plp.{GLUE_TEST_DB}.plp_c WHERE 1 = 0);
 ----
 3
 
@@ -249,7 +252,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id);
 ----
 3
 
@@ -265,7 +268,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id);
+EXPLAIN SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id);
 
 query I
 SELECT max(detail) FILTER (event = 'prefetch') FROM duckdb_logs_parsed('GlueScan');
@@ -277,7 +280,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN my_datalake.default.plp_b b USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN my_datalake.{GLUE_TEST_DB}.plp_b b USING (id);
 ----
 3
 
@@ -296,7 +299,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -318,7 +321,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -343,7 +346,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -363,7 +366,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -380,7 +383,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -398,7 +401,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -414,7 +417,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.plp_a a JOIN my_datalake.default.plp_b b USING (id);
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.plp_a a JOIN my_datalake.{GLUE_TEST_DB}.plp_b b USING (id);
 ----
 3
 
@@ -432,7 +435,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -451,7 +454,7 @@ statement ok
 SET glue_metadata_cache_scope = 'connection';
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -459,7 +462,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id) JOIN plp.default.plp_c c USING (id);
+SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id) JOIN plp.{GLUE_TEST_DB}.plp_c c USING (id);
 ----
 3
 
@@ -475,7 +478,7 @@ RESET glue_metadata_cache_scope;
 
 # A prepared statement prefetches when it is bound, and again when it is rebound for a new transaction
 statement ok
-PREPARE plp_join AS SELECT count(*) FROM plp.default.plp_a a JOIN plp.default.plp_b b USING (id);
+PREPARE plp_join AS SELECT count(*) FROM plp.{GLUE_TEST_DB}.plp_a a JOIN plp.{GLUE_TEST_DB}.plp_b b USING (id);
 
 statement ok
 CALL truncate_duckdb_logs();
@@ -494,13 +497,13 @@ statement ok
 CALL disable_logging();
 
 statement ok
-DROP TABLE my_datalake.default.plp_a;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plp_a;
 
 statement ok
-DROP TABLE my_datalake.default.plp_b;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plp_b;
 
 statement ok
-DROP TABLE my_datalake.default.plp_c;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plp_c;
 
 statement ok
-DROP TABLE my_datalake.default.plp_flat;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.plp_flat;
