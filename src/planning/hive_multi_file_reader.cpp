@@ -1491,6 +1491,97 @@ static bool DecidableByPartitionValues(const Expression &filter, TableIndex tabl
 	return probe->IsScalar() && probe->IsFoldable();
 }
 
+//! What a filter says about one partition
+enum class FilterOutcome : uint8_t { IS_TRUE, IS_FALSE, UNKNOWN };
+
+//! The filters partition values decide, rewritten to read those values from the columns of a chunk (one per partition
+//! key they reference), so each filter is evaluated once for a chunk of partitions rather than copied and folded for
+//! each partition
+struct PartitionFilterBatch {
+	//! The rewritten filters, in the order of the decidable filters
+	vector<unique_ptr<Expression>> filters;
+	//! For each chunk column: the partition key it holds, and the type the filters read it as
+	vector<PartitionKeyProjection> columns;
+	vector<LogicalType> types;
+
+	//! False when a partition key is read as two types, which one column can not hold
+	bool Bind(const vector<unique_ptr<Expression>> &all_filters, const vector<idx_t> &decidable_filters,
+	          TableIndex table_index, const vector<PartitionKeyProjection> &projections) {
+		bool bound = true;
+		for (auto filter_index : decidable_filters) {
+			auto filter = all_filters[filter_index]->Copy();
+			ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+			    filter, [&](BoundColumnRefExpression &colref, unique_ptr<Expression> &ref) {
+				    if (colref.Binding().table_index != table_index) {
+					    return;
+				    }
+				    auto column_index = colref.Binding().column_index.GetIndex();
+				    for (auto &projection : projections) {
+					    if (projection.projected_column_index != column_index) {
+						    continue;
+					    }
+					    idx_t column = 0;
+					    while (column < columns.size() &&
+					           columns[column].projected_column_index != projection.projected_column_index) {
+						    column++;
+					    }
+					    if (column == columns.size()) {
+						    columns.push_back(projection);
+						    types.push_back(colref.GetReturnType());
+					    } else if (types[column] != colref.GetReturnType()) {
+						    bound = false;
+					    }
+					    ref =
+					        make_uniq<BoundReferenceExpression>(colref.GetReturnType(), NumericCast<storage_t>(column));
+					    return;
+				    }
+			    });
+			filters.push_back(std::move(filter));
+		}
+		return bound;
+	}
+
+	//! The outcome of each filter for 'count' partitions of 'candidates' from 'start': false when a partition value
+	//! does not convert or a filter fails on one of them, which the caller then decides partition by partition
+	bool Evaluate(ClientContext &context, const HiveScanInfo &info, const vector<GluePartitionInfo> &partitions,
+	              const vector<idx_t> &candidates, idx_t start, idx_t count,
+	              vector<vector<FilterOutcome>> &outcomes) const {
+		try {
+			DataChunk chunk;
+			chunk.Initialize(context, types, count);
+			for (idx_t column = 0; column < columns.size(); column++) {
+				auto key_index = columns[column].partition_key_index;
+				auto &key = info.partition_keys[key_index];
+				for (idx_t row = 0; row < count; row++) {
+					auto &partition = partitions[candidates[start + row]];
+					chunk.data[column].Append(
+					    GlueTypes::PartitionValue(context, key, partition.values[key_index], types[column]));
+				}
+			}
+			chunk.SetCardinality(count);
+			outcomes.resize(filters.size());
+			for (idx_t i = 0; i < filters.size(); i++) {
+				ExpressionExecutor executor(context, *filters[i]);
+				Vector result(LogicalType::BOOLEAN, count);
+				executor.ExecuteExpression(chunk, result);
+				auto values = result.Values<bool>();
+				outcomes[i].resize(count);
+				for (idx_t row = 0; row < count; row++) {
+					auto entry = values[row];
+					outcomes[i][row] =
+					    entry.IsValid() && entry.GetValue() ? FilterOutcome::IS_TRUE : FilterOutcome::IS_FALSE;
+				}
+			}
+		} catch (std::exception &ex) {
+			if (ErrorData(ex).Type() == ExceptionType::INTERRUPT) {
+				throw;
+			}
+			return false;
+		}
+		return true;
+	}
+};
+
 //! The partitions among 'candidates' that no filter rules out, each filter evaluated with the partition's values in
 //! place of its partition columns. A filter that needs data columns is skipped. 'decided_filters' are those true of
 //! every partition kept.
@@ -1510,30 +1601,56 @@ static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo
 	if (decidable_filters.empty()) {
 		return candidates;
 	}
-	for (auto partition_index : candidates) {
-		auto &partition = partitions[partition_index];
-		bool keep = true;
+	// Each filter, in the order of 'decidable_filters', gives TRUE, FALSE (or NULL), or nothing when it could not be
+	// evaluated: the first FALSE drops the partition, and a filter that could not be evaluated is left to the scan
+	auto keep_partition = [&](idx_t partition_index, const std::function<FilterOutcome(idx_t)> &outcome_of) {
 		vector<idx_t> true_here;
-		for (auto filter_index : decidable_filters) {
-			auto filter_copy = filters[filter_index]->Copy();
+		for (idx_t i = 0; i < decidable_filters.size(); i++) {
+			auto outcome = outcome_of(i);
+			if (outcome == FilterOutcome::UNKNOWN) {
+				continue;
+			}
+			if (outcome == FilterOutcome::IS_FALSE) {
+				pruning_filters.insert(decidable_filters[i]);
+				return;
+			}
+			true_here.push_back(decidable_filters[i]);
+		}
+		kept.push_back(partition_index);
+		for (auto filter_index : true_here) {
+			true_in_kept[filter_index]++;
+		}
+	};
+	// one partition at a time, with its values folded into a copy of each filter
+	auto keep_partition_alone = [&](idx_t partition_index) {
+		auto &partition = partitions[partition_index];
+		keep_partition(partition_index, [&](idx_t i) {
+			auto filter_copy = filters[decidable_filters[i]]->Copy();
 			ReplacePartitionColumnRefs(context, filter_copy, table_index, projections, info, partition);
 			Value result;
 			if (!ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
 				// evaluation failed, e.g. on a cast error: the scan applies this filter instead
-				continue;
+				return FilterOutcome::UNKNOWN;
 			}
-			if (result.IsNull() || !result.GetValue<bool>()) {
-				keep = false;
-				pruning_filters.insert(filter_index);
-				break;
+			return result.IsNull() || !result.GetValue<bool>() ? FilterOutcome::IS_FALSE : FilterOutcome::IS_TRUE;
+		});
+	};
+	// a chunk of partitions at a time, each filter evaluated once over their values
+	PartitionFilterBatch batch;
+	auto batched = batch.Bind(filters, decidable_filters, table_index, projections);
+	vector<vector<FilterOutcome>> outcomes;
+	for (idx_t start = 0; start < candidates.size(); start += STANDARD_VECTOR_SIZE) {
+		auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, candidates.size() - start);
+		if (batched && batch.Evaluate(context, info, partitions, candidates, start, count, outcomes)) {
+			for (idx_t row = 0; row < count; row++) {
+				keep_partition(candidates[start + row], [&](idx_t i) { return outcomes[i][row]; });
 			}
-			true_here.push_back(filter_index);
+			continue;
 		}
-		if (keep) {
-			kept.push_back(partition_index);
-			for (auto filter_index : true_here) {
-				true_in_kept[filter_index]++;
-			}
+		// a value or a filter the chunk could not take: decided one partition at a time, which fails or leaves a
+		// filter to the scan exactly where that did
+		for (idx_t row = 0; row < count; row++) {
+			keep_partition_alone(candidates[start + row]);
 		}
 	}
 	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {

@@ -1,0 +1,91 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_pruning_batches.test
+# description: Partition filters are evaluated over chunks of partition values: pruning across several chunks, and a value or filter that fails in a chunk decides that chunk partition by partition as before
+# group: [scan_partitioned]
+
+require parquet
+
+require glue
+
+# hive_scan reads no rows from partitions below the root on Windows, with or without batching: a separate issue
+require linux
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'k1'), (2, 'k2500'), (3, 'k4999'), (4, 'kx')) t(id, dt))
+TO '{TEST_DIR}/pruning_batches' (FORMAT parquet, PARTITION_BY (dt));
+
+# 5,001 partitions, three chunks of partition values; 'kx' is the last one
+statement ok
+SET VARIABLE parts = (
+    SELECT list({dt: dt, location: NULL::VARCHAR} ORDER BY i)
+    FROM (SELECT i, 'k' || i AS dt FROM range(5000) t(i) UNION ALL SELECT 5000, 'kx'));
+
+statement ok
+CREATE MACRO pb() AS TABLE
+SELECT * FROM hive_scan('{TEST_DIR}/pruning_batches', schema := {id: 'INTEGER', dt: 'VARCHAR'},
+    partitions := getvariable('parts'));
+
+# one partition in each chunk
+query I
+SELECT id FROM pb() WHERE dt IN ('k1', 'k2500', 'k4999') ORDER BY id
+----
+1
+2
+3
+
+query II
+EXPLAIN SELECT id FROM pb() WHERE dt IN ('k1', 'k2500', 'k4999')
+----
+physical_plan	<REGEX>:.*File Filters:.*Scanning Files: 3/5001.*
+
+# a function of the partition column next to a filter on a data column
+query I
+SELECT id FROM pb() WHERE upper(dt) = 'K2500' AND id > 0
+----
+2
+
+query II
+EXPLAIN SELECT id FROM pb() WHERE upper(dt) = 'K2500' AND id > 0
+----
+physical_plan	<REGEX>:.*Scanning Files: 1/5001.*
+
+# two partition filters: the first that is false drops a partition, in every chunk
+query I
+SELECT id FROM pb() WHERE dt LIKE 'k4%' AND dt >= 'k4999' ORDER BY id
+----
+3
+
+query II
+EXPLAIN SELECT id FROM pb() WHERE dt LIKE 'k4%' AND dt >= 'k4999'
+----
+physical_plan	<REGEX>:.*Scanning Files: 1/5001.*
+
+# TRY_CAST gives NULL for 'kx', so 'kx' is ruled in by the second filter
+query I
+SELECT id FROM pb() WHERE TRY_CAST(substr(dt, 2) AS INTEGER) < 3 OR TRY_CAST(substr(dt, 2) AS INTEGER) IS NULL ORDER BY id
+----
+1
+4
+
+query II
+EXPLAIN SELECT id FROM pb() WHERE TRY_CAST(substr(dt, 2) AS INTEGER) < 3
+----
+physical_plan	<REGEX>:.*Scanning Files: 3/5001.*
+
+# no partition is kept
+query I
+SELECT count(*) FROM pb() WHERE dt = 'none'
+----
+0
+
+# an INTEGER partition key with a value that does not cast, in the second chunk: that chunk is decided partition by
+# partition, which fails on it as before
+statement ok
+SET VARIABLE bad_parts = (
+    SELECT list({n: CASE WHEN i = 2900 THEN 'abc' ELSE i::VARCHAR END, location: NULL::VARCHAR} ORDER BY i)
+    FROM range(3000) t(i));
+
+statement error
+EXPLAIN SELECT id FROM hive_scan('{TEST_DIR}/pruning_batches', schema := {id: 'INTEGER', n: 'INTEGER'},
+    partitions := getvariable('bad_parts')) WHERE n = 1
+----
+Unable to cast 'abc' (from Glue partition column 'N') to: 'INTEGER'
