@@ -204,6 +204,12 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 		throw BinderException("%s only works on tables of a Glue catalog, '%s' is a %s catalog", function_name,
 		                      qualified.Catalog().GetIdentifierName(), catalog->GetCatalogType());
 	}
+	// a fully qualified name skips the lookup that rejects a nested schema path
+	auto schema_path = qualified.SchemaPath();
+	if (schema_path.size() > 1 && !catalog->SupportsNestedSchemas()) {
+		throw BinderException("Catalog %s does not support nested schemas: %s", catalog->GetName(),
+		                      QualifiedName::FromPath(std::move(schema_path)).ToString());
+	}
 	return qualified;
 }
 

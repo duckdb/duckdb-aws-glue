@@ -8,24 +8,27 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dv_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dv_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.dv_orders (id INTEGER, amount DOUBLE);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dv_orders (id INTEGER, amount DOUBLE);
 
 statement ok
-INSERT INTO my_datalake.default.dv_orders VALUES (1, 10.0), (2, 20.0);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dv_orders VALUES (1, 10.0), (2, 20.0);
 
 query I
-SELECT count(*) FROM my_datalake.default.dv_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dv_orders;
 ----
 2
 
@@ -33,19 +36,19 @@ SELECT count(*) FROM my_datalake.default.dv_orders;
 # DROP VIEW on a table is refused, with DuckDB's own wording
 # ===========================================================================
 statement error
-DROP VIEW my_datalake.default.dv_orders;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.dv_orders;
 ----
 is of type Table, trying to drop type View
 
 # the table survives -- the point of the test
 query I
-SELECT count(*) FROM my_datalake.default.dv_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dv_orders;
 ----
 2
 
 # and Glue still holds it as a table
 query I
-SELECT glue_table_type FROM glue_get_table_response('my_datalake.default.dv_orders');
+SELECT glue_table_type FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.dv_orders');
 ----
 EXTERNAL_TABLE
 
@@ -54,12 +57,12 @@ EXTERNAL_TABLE
 # type, which is what DuckDB does too (test/sql/catalog/test_if_not_exists.test)
 # ===========================================================================
 statement error
-DROP VIEW IF EXISTS my_datalake.default.dv_orders;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.dv_orders;
 ----
 is of type Table, trying to drop type View
 
 query I
-SELECT count(*) FROM my_datalake.default.dv_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dv_orders;
 ----
 2
 
@@ -67,15 +70,15 @@ SELECT count(*) FROM my_datalake.default.dv_orders;
 # IF EXISTS on a genuinely absent name is still a no-op
 # ===========================================================================
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.dv_does_not_exist;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.dv_does_not_exist;
 
 # ===========================================================================
 # DROP TABLE is unaffected
 # ===========================================================================
 statement ok
-DROP TABLE my_datalake.default.dv_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dv_orders;
 
 statement error
-SELECT count(*) FROM my_datalake.default.dv_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.dv_orders;
 ----
 does not exist

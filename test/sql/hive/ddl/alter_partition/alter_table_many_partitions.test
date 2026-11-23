@@ -10,22 +10,25 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 # exactly one chunk
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.many_2048;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.many_2048;
 
 statement ok
-CREATE TABLE my_datalake.default.many_2048 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.many_2048 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 query I
-SELECT count(*) FROM glue_alter_table('my_datalake.default.many_2048',
+SELECT count(*) FROM glue_alter_table('my_datalake.{GLUE_TEST_DB}.many_2048',
     list_transform(range(2048), lambda i: {
         action: 'add', if_not_exists: true, if_exists: NULL::BOOLEAN,
         partition: [{key: 'dt', value: 'p' || i::VARCHAR}],
@@ -34,19 +37,19 @@ SELECT count(*) FROM glue_alter_table('my_datalake.default.many_2048',
 2048
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.many_2048');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.many_2048');
 ----
 2048
 
 # one more than a chunk
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.many_2049;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.many_2049;
 
 statement ok
-CREATE TABLE my_datalake.default.many_2049 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.many_2049 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 query I
-SELECT count(*) FROM glue_alter_table('my_datalake.default.many_2049',
+SELECT count(*) FROM glue_alter_table('my_datalake.{GLUE_TEST_DB}.many_2049',
     list_transform(range(2049), lambda i: {
         action: 'add', if_not_exists: true, if_exists: NULL::BOOLEAN,
         partition: [{key: 'dt', value: 'p' || i::VARCHAR}],
@@ -57,7 +60,7 @@ SELECT count(*) FROM glue_alter_table('my_datalake.default.many_2049',
 # every action is reported exactly once
 query III
 SELECT count(*), count(DISTINCT partition), count(DISTINCT action)
-FROM glue_alter_table('my_datalake.default.many_2049',
+FROM glue_alter_table('my_datalake.{GLUE_TEST_DB}.many_2049',
     list_transform(range(2049), lambda i: {
         action: 'add', if_not_exists: true, if_exists: NULL::BOOLEAN,
         partition: [{key: 'dt', value: 'p' || i::VARCHAR}],
@@ -66,24 +69,24 @@ FROM glue_alter_table('my_datalake.default.many_2049',
 2049	2049	1
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.many_2049');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.many_2049');
 ----
 2049
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.many_2049') WHERE dt IN ('p0', 'p2047', 'p2048');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.many_2049') WHERE dt IN ('p0', 'p2047', 'p2048');
 ----
 3
 
 # three chunks
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.many_4097;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.many_4097;
 
 statement ok
-CREATE TABLE my_datalake.default.many_4097 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.many_4097 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 query II
-SELECT count(*), count(DISTINCT partition) FROM glue_alter_table('my_datalake.default.many_4097',
+SELECT count(*), count(DISTINCT partition) FROM glue_alter_table('my_datalake.{GLUE_TEST_DB}.many_4097',
     list_transform(range(4097), lambda i: {
         action: 'add', if_not_exists: true, if_exists: NULL::BOOLEAN,
         partition: [{key: 'dt', value: 'p' || i::VARCHAR}],
@@ -92,15 +95,15 @@ SELECT count(*), count(DISTINCT partition) FROM glue_alter_table('my_datalake.de
 4097	4097
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.many_4097');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.many_4097');
 ----
 4097
 
 statement ok
-DROP TABLE my_datalake.default.many_2048;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.many_2048;
 
 statement ok
-DROP TABLE my_datalake.default.many_2049;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.many_2049;
 
 statement ok
-DROP TABLE my_datalake.default.many_4097;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.many_4097;

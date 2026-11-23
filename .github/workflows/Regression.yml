@@ -157,8 +157,43 @@ jobs:
       fail-fast: false
       # Two jobs of ~3 minutes each, so only the join-heavy TPC-H and TPC-DS queries: every query costs 10-30s against
       # moto. parquet runs TPC-DS at SF1, csv TPC-H at SF0.1 and TPC-DS at SF0.01.
+      # The planning jobs EXPLAIN all 99 TPC-DS queries at SF1 with one partition per day (benchmark/tpcds/planning/
+      # local_sf1), through the latency proxies of scripts/docker-compose.yml: every Glue and S3 request is delayed as
+      # a round trip from a GitHub runner to us-east-1 is, so a request that waits for another one costs time. The
+      # queries are dealt round-robin over 6 shards of ~7 minutes (a build plans all 99 in ~12 minutes); 4 threads, as
+      # the cloud run of CloudTPCDSBenchmark.yml.
       matrix:
         include:
+          - name: planning 1/6
+            benchmarks: '^benchmark/tpcds/planning/local_sf1/q[0-9]+\.benchmark$'
+            shard: 1
+            shards: 6
+            threads: 4
+          - name: planning 2/6
+            benchmarks: '^benchmark/tpcds/planning/local_sf1/q[0-9]+\.benchmark$'
+            shard: 2
+            shards: 6
+            threads: 4
+          - name: planning 3/6
+            benchmarks: '^benchmark/tpcds/planning/local_sf1/q[0-9]+\.benchmark$'
+            shard: 3
+            shards: 6
+            threads: 4
+          - name: planning 4/6
+            benchmarks: '^benchmark/tpcds/planning/local_sf1/q[0-9]+\.benchmark$'
+            shard: 4
+            shards: 6
+            threads: 4
+          - name: planning 5/6
+            benchmarks: '^benchmark/tpcds/planning/local_sf1/q[0-9]+\.benchmark$'
+            shard: 5
+            shards: 6
+            threads: 4
+          - name: planning 6/6
+            benchmarks: '^benchmark/tpcds/planning/local_sf1/q[0-9]+\.benchmark$'
+            shard: 6
+            shards: 6
+            threads: 4
           - name: parquet
             benchmarks: '^benchmark/([^/]+|pushdown/join_filter_partition_pruning(_two_keys)?|optimizer/(common_subplan|estimate_cardinality_for_join_order_optimizer)|tpcds/sf1/parquet/q64)\.benchmark$'
           - name: csv/json
@@ -167,6 +202,9 @@ jobs:
       # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
       AWS_EC2_METADATA_DISABLED: "true"
       BENCHMARKS: ${{ matrix.benchmarks }}
+      SHARD: ${{ matrix.shard || 1 }}
+      SHARDS: ${{ matrix.shards || 1 }}
+      THREADS: ${{ matrix.threads || 2 }}
 
     steps:
       - uses: actions/checkout@v5
@@ -186,6 +224,15 @@ jobs:
       - name: Restore permissions
         run: chmod +x build/release/benchmark/benchmark_runner base/build/release/benchmark/benchmark_runner
 
+      - name: Check the generated TPC-DS benchmark files
+        run: |
+          scripts/benchmarks/generate_tpcds_benchmarks.sh
+          if [ -n "$(git status --porcelain -- benchmark/tpcds)" ]; then
+            git status --short -- benchmark/tpcds
+            echo "::error::The TPC-DS benchmark files are out of date: run scripts/benchmarks/generate_tpcds_benchmarks.sh"
+            exit 1
+          fi
+
       - name: Set up Docker Compose
         uses: docker/setup-compose-action@v1
 
@@ -202,8 +249,9 @@ jobs:
       - name: Regression Test benchmarks
         run: |
           mkdir -p .github/regression
-          find benchmark -name '*.benchmark' | sort | grep -E "${BENCHMARKS}" > .github/regression/benchmarks.csv
-          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/benchmarks.csv --verbose --threads 2 --samples 5
+          find benchmark -name '*.benchmark' | sort | grep -E "${BENCHMARKS}" \
+            | awk -v shard="$SHARD" -v shards="$SHARDS" '(NR - 1) % shards == shard - 1' > .github/regression/benchmarks.csv
+          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/benchmarks.csv --verbose --threads "$THREADS" --samples 5
 
       - name: Server logs
         if: always()

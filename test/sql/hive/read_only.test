@@ -8,76 +8,80 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 ATTACH '{GLUE_CATALOG_ID}' AS rw_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS rw_datalake.default.ro_orders;
+DROP TABLE IF EXISTS rw_datalake.{GLUE_TEST_DB}.ro_orders;
 
 statement ok
-CREATE TABLE rw_datalake.default.ro_orders (id INTEGER, amount DOUBLE);
+CREATE TABLE rw_datalake.{GLUE_TEST_DB}.ro_orders (id INTEGER, amount DOUBLE);
 
 statement ok
-INSERT INTO rw_datalake.default.ro_orders VALUES (1, 10.0);
+INSERT INTO rw_datalake.{GLUE_TEST_DB}.ro_orders VALUES (1, 10.0);
 
 statement ok
-DROP TABLE IF EXISTS rw_datalake.default.ro_parts;
+DROP TABLE IF EXISTS rw_datalake.{GLUE_TEST_DB}.ro_parts;
 
 statement ok
-CREATE TABLE rw_datalake.default.ro_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE rw_datalake.{GLUE_TEST_DB}.ro_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO rw_datalake.default.ro_parts VALUES (1, 'keep');
+INSERT INTO rw_datalake.{GLUE_TEST_DB}.ro_parts VALUES (1, 'keep');
 
 statement ok
 ATTACH '{GLUE_CATALOG_ID}' AS ro_datalake (
     TYPE glue,
     READ_ONLY,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
-SELECT id, amount FROM ro_datalake.default.ro_orders;
+SELECT id, amount FROM ro_datalake.{GLUE_TEST_DB}.ro_orders;
 ----
 1	10.0
 
 query I
-SELECT count(*) FROM glue_partitions('ro_datalake.default.ro_parts');
+SELECT count(*) FROM glue_partitions('ro_datalake.{GLUE_TEST_DB}.ro_parts');
 ----
 1
 
 query I
-SELECT count(*) FROM glue_get_table_response('ro_datalake.default.ro_parts');
+SELECT count(*) FROM glue_get_table_response('ro_datalake.{GLUE_TEST_DB}.ro_parts');
 ----
 1
 
 statement error
-INSERT INTO ro_datalake.default.ro_orders VALUES (2, 20.0);
+INSERT INTO ro_datalake.{GLUE_TEST_DB}.ro_orders VALUES (2, 20.0);
 ----
 read-only mode
 
 statement error
-CREATE TABLE ro_datalake.default.ro_new (id INTEGER);
+CREATE TABLE ro_datalake.{GLUE_TEST_DB}.ro_new (id INTEGER);
 ----
 read-only mode
 
 statement error
-ALTER TABLE ro_datalake.default.ro_orders ADD COLUMN extra INTEGER;
+ALTER TABLE ro_datalake.{GLUE_TEST_DB}.ro_orders ADD COLUMN extra INTEGER;
 ----
 read-only mode
 
 statement error
-ALTER TABLE ro_datalake.default.ro_orders SET (owner = 'analytics');
+ALTER TABLE ro_datalake.{GLUE_TEST_DB}.ro_orders SET (owner = 'analytics');
 ----
 read-only mode
 
 statement error
-ALTER TABLE ro_datalake.default.ro_orders RESET (owner);
+ALTER TABLE ro_datalake.{GLUE_TEST_DB}.ro_orders RESET (owner);
 ----
 read-only mode
 
@@ -87,42 +91,42 @@ CREATE SCHEMA ro_datalake.ro_schema;
 read-only mode
 
 statement error
-DROP TABLE ro_datalake.default.ro_orders;
+DROP TABLE ro_datalake.{GLUE_TEST_DB}.ro_orders;
 ----
 read-only mode
 
 query I
-SELECT count(*) FROM rw_datalake.default.ro_orders;
+SELECT count(*) FROM rw_datalake.{GLUE_TEST_DB}.ro_orders;
 ----
 1
 
 query I
-SELECT count(*) FROM (DESCRIBE rw_datalake.default.ro_orders);
+SELECT count(*) FROM (DESCRIBE rw_datalake.{GLUE_TEST_DB}.ro_orders);
 ----
 2
 
 statement error
-CALL glue_add_partition('ro_datalake.default.ro_parts', {dt: 'injected'});
+CALL glue_add_partition('ro_datalake.{GLUE_TEST_DB}.ro_parts', {dt: 'injected'});
 ----
-Cannot execute Glue CreatePartition on database "ro_datalake" which is attached in read-only mode!
+Cannot execute Glue BatchCreatePartition on database "ro_datalake" which is attached in read-only mode!
 
 statement error
-CALL glue_set_table_location('ro_datalake.default.ro_parts', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hijacked');
+CALL glue_set_table_location('ro_datalake.{GLUE_TEST_DB}.ro_parts', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hijacked');
 ----
 Cannot execute Glue UpdateTable on database "ro_datalake" which is attached in read-only mode!
 
 statement error
-CALL glue_set_partition_location('ro_datalake.default.ro_parts', {dt: 'keep'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved');
+CALL glue_set_partition_location('ro_datalake.{GLUE_TEST_DB}.ro_parts', {dt: 'keep'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved');
 ----
 Cannot execute Glue UpdatePartition on database "ro_datalake" which is attached in read-only mode!
 
 statement error
-CALL glue_rename_partition('ro_datalake.default.ro_parts', {dt: 'keep'}, {dt: 'renamed'});
+CALL glue_rename_partition('ro_datalake.{GLUE_TEST_DB}.ro_parts', {dt: 'keep'}, {dt: 'renamed'});
 ----
 Cannot execute Glue UpdatePartition on database "ro_datalake" which is attached in read-only mode!
 
 statement error
-CALL glue_alter_table('ro_datalake.default.ro_parts',
+CALL glue_alter_table('ro_datalake.{GLUE_TEST_DB}.ro_parts',
     [{action: 'add', if_not_exists: true, if_exists: NULL::BOOLEAN,
       partition: [{key: 'dt', value: 'via_alter'}],
       new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: NULL::VARCHAR}]);
@@ -130,40 +134,40 @@ CALL glue_alter_table('ro_datalake.default.ro_parts',
 Cannot execute Glue BatchCreatePartition on database "ro_datalake" which is attached in read-only mode!
 
 statement error
-CALL glue_drop_partition('ro_datalake.default.ro_parts', {dt: 'keep'});
+CALL glue_drop_partition('ro_datalake.{GLUE_TEST_DB}.ro_parts', {dt: 'keep'});
 ----
-Cannot execute Glue DeletePartition on database "ro_datalake" which is attached in read-only mode!
+Cannot execute Glue BatchDeletePartition on database "ro_datalake" which is attached in read-only mode!
 
 statement error
-CALL glue_repair_table('ro_datalake.default.ro_parts');
+CALL glue_repair_table('ro_datalake.{GLUE_TEST_DB}.ro_parts');
 ----
 Cannot execute Glue BatchCreatePartition on database "ro_datalake" which is attached in read-only mode!
 
 query II
-SELECT dt, location LIKE '%/moved' FROM glue_partitions('rw_datalake.default.ro_parts');
+SELECT dt, location LIKE '%/moved' FROM glue_partitions('rw_datalake.{GLUE_TEST_DB}.ro_parts');
 ----
 keep	false
 
 query I
-SELECT location LIKE '%/hijacked' FROM glue_get_table_response('rw_datalake.default.ro_parts');
+SELECT location LIKE '%/hijacked' FROM glue_get_table_response('rw_datalake.{GLUE_TEST_DB}.ro_parts');
 ----
 false
 
 query I
-SELECT count(*) FROM rw_datalake.default.ro_parts;
+SELECT count(*) FROM rw_datalake.{GLUE_TEST_DB}.ro_parts;
 ----
 1
 
 statement ok
-CALL glue_add_partition('rw_datalake.default.ro_parts', {dt: 'added'});
+CALL glue_add_partition('rw_datalake.{GLUE_TEST_DB}.ro_parts', {dt: 'added'});
 
 query I
-SELECT count(*) FROM glue_partitions('rw_datalake.default.ro_parts');
+SELECT count(*) FROM glue_partitions('rw_datalake.{GLUE_TEST_DB}.ro_parts');
 ----
 2
 
 statement ok
-DROP TABLE rw_datalake.default.ro_orders;
+DROP TABLE rw_datalake.{GLUE_TEST_DB}.ro_orders;
 
 statement ok
-DROP TABLE rw_datalake.default.ro_parts;
+DROP TABLE rw_datalake.{GLUE_TEST_DB}.ro_parts;

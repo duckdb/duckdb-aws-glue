@@ -1,0 +1,25 @@
+# name: benchmark/union_partitioned_tables.benchmark
+# description: UNION ALL over 20 partitioned Hive tables of 100 partitions of 30 rows each in the local Glue (moto) + S3, whose partitions load concurrently (glue_partition_load_parallelism)
+# group: [partition_loading_benchmarks]
+
+name UNION ALL of 20 partitioned hive tables
+group partition_loading_benchmarks
+subgroup partition_prefetch
+
+include benchmark/union_partitioned_tables_load.benchmark.in
+
+run
+SELECT count(*) FROM (
+    SELECT v FROM my_datalake.default.union_partitioned_t01 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t02 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t03 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t04 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t05 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t06 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t07 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t08 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t09 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t10 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t11 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t12 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t13 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t14 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t15 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t16 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t17 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t18 UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t19 UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t20);
+
+result I
+60000

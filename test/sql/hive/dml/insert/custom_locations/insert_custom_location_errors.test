@@ -8,78 +8,81 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.custom_loc_errors;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.custom_loc_errors;
 
 statement ok
-CREATE TABLE my_datalake.default.custom_loc_errors (id INTEGER, part VARCHAR) PARTITIONED BY (part);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.custom_loc_errors (id INTEGER, part VARCHAR) PARTITIONED BY (part);
 
 # outside the table location
 statement ok
-CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'outside'},
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.custom_loc_errors', {part: 'outside'},
     location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere/outside');
 
 # a sibling directory sharing the table location as a name prefix
 statement ok
-CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'sibling'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_errors_sibling');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.custom_loc_errors', {part: 'sibling'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_errors_sibling');
 
 # the table location itself
 statement ok
-CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'root'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_errors');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.custom_loc_errors', {part: 'root'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_errors');
 
 statement error
-INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'outside');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'outside');
 ----
 <REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/elsewhere/outside".*
 
 statement error
-INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'sibling');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'sibling');
 ----
-<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/default/custom_loc_errors_sibling".*
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/\w+/custom_loc_errors_sibling".*
 
 statement error
-INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'root');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'root');
 ----
-<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/default/custom_loc_errors".*
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/\w+/custom_loc_errors".*
 
 # only rows of those partitions fail, the other partitions can be written
 statement ok
-INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'a'), (2, 'b');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'a'), (2, 'b');
 
 query II
-SELECT id, part FROM my_datalake.default.custom_loc_errors WHERE part IN ('a', 'b') ORDER BY id;
+SELECT id, part FROM my_datalake.{GLUE_TEST_DB}.custom_loc_errors WHERE part IN ('a', 'b') ORDER BY id;
 ----
 1	a
 2	b
 
 # a partition registered at the <key>=<value> directory of another partition: rows of both cannot share it
 statement ok
-CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'x'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_errors/part=y');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.custom_loc_errors', {part: 'x'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/custom_loc_errors/part=y');
 
 statement error
-INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'x'), (2, 'y');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'x'), (2, 'y');
 ----
 <REGEX>:.*rows would be written to 'part=y', the location of partition \[x\], and read back as that partition.*
 
 # also when only the new partition is written
 statement error
-INSERT INTO my_datalake.default.custom_loc_errors VALUES (2, 'y');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (2, 'y');
 ----
 <REGEX>:.*rows would be written to 'part=y', the location of partition \[x\].*
 
 # the existing partition can still be written
 statement ok
-INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'x');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.custom_loc_errors VALUES (1, 'x');
 
 statement ok
-DROP TABLE my_datalake.default.custom_loc_errors;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.custom_loc_errors;

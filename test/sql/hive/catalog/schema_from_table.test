@@ -8,21 +8,24 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.sft_table;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.sft_table;
 
 statement ok
-CREATE TABLE my_datalake.default.sft_table (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.sft_table (id INTEGER);
 
 statement ok
-INSERT INTO my_datalake.default.sft_table SELECT i FROM generate_series(1, 10) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.sft_table SELECT i FROM generate_series(1, 10) t(i);
 
 # the Glue operation is a request header, which HTTP logs redact by default
 statement ok
@@ -33,13 +36,13 @@ CALL enable_logging('HTTP', storage := 'memory');
 
 # a new attach has no database loaded: the table is the only thing asked for
 statement ok
-attach '{GLUE_CATALOG_ID}' as sft_one (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+attach '{GLUE_CATALOG_ID}' as sft_one (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA '{GLUE_TEST_DB}');
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM sft_one.default.sft_table;
+SELECT count(*) FROM sft_one.{GLUE_TEST_DB}.sft_table;
 ----
 10
 
@@ -54,7 +57,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM sft_one.default.sft_table;
+SELECT count(*) FROM sft_one.{GLUE_TEST_DB}.sft_table;
 ----
 10
 
@@ -66,13 +69,13 @@ SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-tar
 # a missing table and a missing database fail as before: GetDatabase tells them apart. The binder looks the table up
 # twice; the second lookup is answered by the memoized miss, for a missing database too
 statement ok
-attach '{GLUE_CATALOG_ID}' as sft_two (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+attach '{GLUE_CATALOG_ID}' as sft_two (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA '{GLUE_TEST_DB}');
 
 statement ok
 CALL truncate_duckdb_logs();
 
 statement error
-SELECT * FROM sft_two.default.sft_missing;
+SELECT * FROM sft_two.{GLUE_TEST_DB}.sft_missing;
 ----
 <REGEX>:Catalog Error: Table with name sft_missing does not exist.*
 
@@ -118,7 +121,7 @@ statement ok
 CREATE TABLE my_datalake.sft_located.sft_first (id INTEGER);
 
 statement ok
-attach '{GLUE_CATALOG_ID}' as sft_three (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+attach '{GLUE_CATALOG_ID}' as sft_three (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA '{GLUE_TEST_DB}');
 
 query I
 SELECT count(*) FROM sft_three.sft_located.sft_first;
@@ -143,7 +146,7 @@ true
 
 # a listing of the databases fills in a database made a schema from its name alone
 statement ok
-attach '{GLUE_CATALOG_ID}' as sft_four (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+attach '{GLUE_CATALOG_ID}' as sft_four (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA '{GLUE_TEST_DB}');
 
 query I
 SELECT count(*) FROM sft_four.sft_located.sft_first;
@@ -187,4 +190,4 @@ statement ok
 DROP SCHEMA my_datalake.sft_located;
 
 statement ok
-DROP TABLE my_datalake.default.sft_table;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.sft_table;

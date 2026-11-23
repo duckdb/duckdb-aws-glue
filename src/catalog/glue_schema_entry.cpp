@@ -6,6 +6,8 @@
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/catalog/entry_scan_filters.hpp"
+#include "duckdb/catalog/similar_catalog_entry.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -633,7 +635,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		GlueColumn column;
 		auto aliased = i < info.aliases.size() && !info.aliases[i].GetIdentifierName().empty();
 		column.name = (aliased ? info.aliases[i] : info.names[i]).GetIdentifierName();
-		column.type = info.types[i].ToString();
+		column.type = GlueTypes::FromLogicalTypeForView(info.types[i]);
 		view.columns.push_back(std::move(column));
 	}
 	// re-fetch so the entry reflects what Glue stored
@@ -682,10 +684,6 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateCopyFunction(CatalogTransactio
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreatePragmaFunction(CatalogTransaction transaction,
                                                                  CreatePragmaFunctionInfo &info) {
 	throw BinderException("Glue databases do not support creating pragma functions");
-}
-
-optional_ptr<CatalogEntry> GlueSchemaEntry::CreateCollation(CatalogTransaction transaction, CreateCollationInfo &info) {
-	throw BinderException("Glue databases do not support creating collations");
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
@@ -1083,6 +1081,22 @@ void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
 	if (entry) {
 		info.callback(*entry);
 	}
+}
+
+SimilarCatalogEntry GlueSchemaEntry::GetSimilarEntry(CatalogTransaction transaction,
+                                                     const EntryLookupInfo &lookup_info) {
+	SimilarCatalogEntry result;
+	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
+		return result;
+	}
+	tables.ScanLoaded([&](CatalogEntry &entry) {
+		auto score = StringUtil::SimilarityRating(entry.name.GetIdentifierName(), lookup_info.GetEntryName());
+		if (score > result.score) {
+			result.score = score;
+			result.name = Identifier(entry.name.GetIdentifierName());
+		}
+	});
+	return result;
 }
 
 const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {

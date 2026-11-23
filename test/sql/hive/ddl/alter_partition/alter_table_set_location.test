@@ -11,22 +11,25 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.customers_location;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.customers_location;
 
 # a customers table, partitioned by zip and state
 statement ok
-CREATE TABLE my_datalake.default.customers_location (id INTEGER, name VARCHAR, zip VARCHAR, state VARCHAR) PARTITIONED BY (zip, state);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.customers_location (id INTEGER, name VARCHAR, zip VARCHAR, state VARCHAR) PARTITIONED BY (zip, state);
 
 statement ok
-INSERT INTO my_datalake.default.customers_location VALUES (1, 'mercer island', '98040', 'WA'), (2, 'boise', '83702', 'ID');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.customers_location VALUES (1, 'mercer island', '98040', 'WA'), (2, 'boise', '83702', 'ID');
 
 # customer data for zip 98040 that lives outside the table location
 statement ok
@@ -36,66 +39,66 @@ COPY (SELECT 3 AS id, 'mercer island 2' AS name) TO '{DEFAULT_S3_LOCATION}/{TEST
 # ALTER TABLE customers PARTITION (zip='98040', state='WA') SET LOCATION 's3://.../custdata/';
 #---------------------------------------------------------------------------
 statement ok
-CALL glue_set_partition_location('my_datalake.default.customers_location', {zip: '98040', state: 'WA'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/');
+CALL glue_set_partition_location('my_datalake.{GLUE_TEST_DB}.customers_location', {zip: '98040', state: 'WA'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/');
 
 query I
-SELECT location LIKE '%/custdata%' FROM glue_partitions('my_datalake.default.customers_location') WHERE zip = '98040';
+SELECT location LIKE '%/custdata%' FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.customers_location') WHERE zip = '98040';
 ----
 true
 
 # the other partition is untouched
 query I
-SELECT location FROM glue_partitions('my_datalake.default.customers_location') WHERE zip = '83702';
+SELECT location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.customers_location') WHERE zip = '83702';
 ----
-{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/customers_location/zip=83702/state=ID
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/customers_location/zip=83702/state=ID
 
 # the partition is now read from its new location, with its partition values from Glue
 query IIII
-SELECT id, name, zip, state FROM my_datalake.default.customers_location ORDER BY id;
+SELECT id, name, zip, state FROM my_datalake.{GLUE_TEST_DB}.customers_location ORDER BY id;
 ----
 2	boise	83702	ID
 3	mercer island 2	98040	WA
 
 # the partition must exist
 statement error
-CALL glue_set_partition_location('my_datalake.default.customers_location', {zip: '00000', state: 'WA'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/');
+CALL glue_set_partition_location('my_datalake.{GLUE_TEST_DB}.customers_location', {zip: '00000', state: 'WA'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata/');
 ----
 does not exist
 
 # the location must be an S3 location
 statement error
-CALL glue_set_partition_location('my_datalake.default.customers_location', {zip: '98040', state: 'WA'}, '/tmp/custdata/');
+CALL glue_set_partition_location('my_datalake.{GLUE_TEST_DB}.customers_location', {zip: '98040', state: 'WA'}, '/tmp/custdata/');
 ----
 
 #---------------------------------------------------------------------------
 # ALTER TABLE customers SET LOCATION 's3://.../customers_v2/';
 #---------------------------------------------------------------------------
 statement ok
-CALL glue_set_table_location('my_datalake.default.customers_location', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/customers_v2/');
+CALL glue_set_table_location('my_datalake.{GLUE_TEST_DB}.customers_location', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/customers_v2/');
 
 query I
-SELECT location LIKE '%/customers_v2%' FROM glue_get_table_response('my_datalake.default.customers_location');
+SELECT location LIKE '%/customers_v2%' FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.customers_location');
 ----
 true
 
 # existing partitions keep their own locations
 query II
-SELECT zip, location FROM glue_partitions('my_datalake.default.customers_location') ORDER BY zip;
+SELECT zip, location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.customers_location') ORDER BY zip;
 ----
-83702	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/customers_location/zip=83702/state=ID
+83702	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/customers_location/zip=83702/state=ID
 98040	{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata
 
 # new partitions are placed under the new table location
 statement ok
-INSERT INTO my_datalake.default.customers_location VALUES (4, 'portland', '97201', 'OR');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.customers_location VALUES (4, 'portland', '97201', 'OR');
 
 query I
-SELECT location LIKE '%/customers_v2/zip=97201/state=OR%' FROM glue_partitions('my_datalake.default.customers_location') WHERE zip = '97201';
+SELECT location LIKE '%/customers_v2/zip=97201/state=OR%' FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.customers_location') WHERE zip = '97201';
 ----
 true
 
 query I
-SELECT id FROM my_datalake.default.customers_location ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.customers_location ORDER BY id;
 ----
 2
 3
@@ -103,7 +106,7 @@ SELECT id FROM my_datalake.default.customers_location ORDER BY id;
 
 # two table-level steps in one call are applied in order
 statement ok
-CALL glue_alter_table('my_datalake.default.customers_location',
+CALL glue_alter_table('my_datalake.{GLUE_TEST_DB}.customers_location',
     [{action: 'set_table_location', if_not_exists: NULL::BOOLEAN, if_exists: NULL::BOOLEAN,
       partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[],
       new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/customers_v3/'},
@@ -112,7 +115,7 @@ CALL glue_alter_table('my_datalake.default.customers_location',
       new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/customers_v4/'}]);
 
 query I
-SELECT location LIKE '%/customers_v4%' FROM glue_get_table_response('my_datalake.default.customers_location');
+SELECT location LIKE '%/customers_v4%' FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.customers_location');
 ----
 true
 
@@ -121,13 +124,14 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as verify_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query I
-SELECT location LIKE '%/customers_v4%' FROM glue_get_table_response('verify_datalake.default.customers_location');
+SELECT location LIKE '%/customers_v4%' FROM glue_get_table_response('verify_datalake.{GLUE_TEST_DB}.customers_location');
 ----
 true
 
 statement ok
-DROP TABLE my_datalake.default.customers_location;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.customers_location;

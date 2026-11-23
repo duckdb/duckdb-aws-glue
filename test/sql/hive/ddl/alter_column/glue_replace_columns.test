@@ -10,31 +10,34 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 foreach table replace_cols replace_cols_csv replace_cols_json replace_cols_sorted
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.{table};
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.{table};
 
 endloop
 
 statement ok
-CREATE TABLE my_datalake.default.replace_cols (id INTEGER, name VARCHAR, extra DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.replace_cols (id INTEGER, name VARCHAR, extra DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.replace_cols VALUES (1, 'a', 1.5, '2024-01-01'), (2, 'b', 2.5, '2024-01-02');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.replace_cols VALUES (1, 'a', 1.5, '2024-01-01'), (2, 'b', 2.5, '2024-01-02');
 
 #---------------------------------------------------------------------------
 # the data columns are replaced as a whole, with comments; the partition keys stay
 #---------------------------------------------------------------------------
 query I
-SELECT len(columns) FROM glue_replace_columns('my_datalake.default.replace_cols', {
+SELECT len(columns) FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {
     id: 'BIGINT',
     name: 'VARCHAR',
     tags: 'VARCHAR[]',
@@ -47,7 +50,7 @@ SELECT len(columns) FROM glue_replace_columns('my_datalake.default.replace_cols'
 7
 
 query III
-SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.default.replace_cols');
+SELECT unnest(columns, recursive := true) FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.replace_cols');
 ----
 id	bigint	the id
 name	string	NULL
@@ -58,7 +61,7 @@ price	decimal(10,2)	NULL
 Mixed Case	date	NULL
 
 query II
-SELECT partition_keys[1].name, len(partition_keys) FROM glue_get_table_response('my_datalake.default.replace_cols');
+SELECT partition_keys[1].name, len(partition_keys) FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.replace_cols');
 ----
 dt	1
 
@@ -78,22 +81,22 @@ dt	VARCHAR
 
 # parquet columns are matched by name: 'id' is widened, the dropped 'extra' is gone, the new columns are NULL
 query IIIII
-SELECT id, name, tags, nested, dt FROM my_datalake.default.replace_cols ORDER BY id;
+SELECT id, name, tags, nested, dt FROM my_datalake.{GLUE_TEST_DB}.replace_cols ORDER BY id;
 ----
 1	a	NULL	NULL	2024-01-01
 2	b	NULL	NULL	2024-01-02
 
 statement ok
-INSERT INTO my_datalake.default.replace_cols (id, name, tags, dt) VALUES (3, 'c', ['x'], '2024-01-03');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.replace_cols (id, name, tags, dt) VALUES (3, 'c', ['x'], '2024-01-03');
 
 query III
-SELECT id, tags, dt FROM my_datalake.default.replace_cols WHERE id = 3;
+SELECT id, tags, dt FROM my_datalake.{GLUE_TEST_DB}.replace_cols WHERE id = 3;
 ----
 3	[x]	2024-01-03
 
 # a partially qualified name is resolved like in a query
 statement ok
-USE my_datalake.default;
+USE my_datalake.{GLUE_TEST_DB};
 
 query I
 SELECT len(columns) FROM glue_replace_columns('replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
@@ -115,126 +118,126 @@ dt	VARCHAR
 # errors: nothing is changed
 #---------------------------------------------------------------------------
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', dt: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', dt: 'VARCHAR'});
 ----
 'dt' is a partition key
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', DT: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', DT: 'VARCHAR'});
 ----
 'DT' is a partition key
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'frobnicate'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'frobnicate'});
 ----
 Type with name frobnicate does not exist
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'HUGEINT'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'INTERVAL'});
 ----
 can not be converted to a Glue type
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: NULL});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: NULL});
 ----
 no type given for column 'id'
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', 'id INTEGER');
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', 'id INTEGER');
 ----
 must be a struct of column name to type
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT'}, comments := {nope: 'x'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT'}, comments := {nope: 'x'});
 ----
 'comments' names 'nope', which is not one of the columns
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT'}, comments := 'x');
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT'}, comments := 'x');
 ----
 'comments' must be a struct
 
 statement error
-CALL glue_replace_columns('my_datalake.default.missing', {id: 'INTEGER'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.missing', {id: 'INTEGER'});
 ----
 does not exist
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'INTEGER', name: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'INTEGER', name: 'VARCHAR'});
 ----
-can not change column 'id' of table 'default.replace_cols' from BIGINT to INTEGER
+can not change column 'id' of table '{GLUE_TEST_DB}.replace_cols' from BIGINT to INTEGER
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'INTEGER'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', name: 'INTEGER'});
 ----
-can not change column 'name' of table 'default.replace_cols' from VARCHAR to INTEGER
+can not change column 'name' of table '{GLUE_TEST_DB}.replace_cols' from VARCHAR to INTEGER
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 42});
-----
-must be a struct of column name to type
-
-statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 42});
 ----
 must be a struct of column name to type
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT'}, comments := {id: 42});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {});
+----
+must be a struct of column name to type
+
+statement error
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT'}, comments := {id: 42});
 ----
 'comments' must be a struct of column name to comment
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT'}, comments := {nope: NULL});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT'}, comments := {nope: NULL});
 ----
 'comments' names 'nope', which is not one of the columns
 
 query I
-SELECT len(columns) FROM glue_get_table_response('my_datalake.default.replace_cols');
+SELECT len(columns) FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.replace_cols');
 ----
 2
 
 # it returns the columns as stored, with Glue type names; comment keys are matched case-insensitively
 query I
-SELECT columns FROM glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR', note: 'VARCHAR'},
+SELECT columns FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', name: 'VARCHAR', note: 'VARCHAR'},
     comments := {ID: 'the id', note: NULL});
 ----
 [{'name': id, 'type': bigint, 'comment': the id}, {'name': name, 'type': string, 'comment': NULL}, {'name': note, 'type': string, 'comment': NULL}]
 
 # with keep_comments a column that stays keeps its comment; it keeps its stored name either way
 query I
-SELECT columns FROM glue_replace_columns('my_datalake.default.replace_cols', {ID: 'BIGINT', name: 'VARCHAR'}, keep_comments := true);
+SELECT columns FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {ID: 'BIGINT', name: 'VARCHAR'}, keep_comments := true);
 ----
 [{'name': id, 'type': bigint, 'comment': the id}, {'name': name, 'type': string, 'comment': NULL}]
 
 # a NULL in comments removes a kept comment
 query I
-SELECT columns FROM glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR'},
+SELECT columns FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', name: 'VARCHAR'},
     comments := {id: NULL, name: 'the name'}, keep_comments := true);
 ----
 [{'name': id, 'type': bigint, 'comment': NULL}, {'name': name, 'type': string, 'comment': the name}]
 
 # without keep_comments the comments are dropped, as in Hive
 query I
-SELECT columns FROM glue_replace_columns('my_datalake.default.replace_cols', {ID: 'BIGINT', name: 'VARCHAR'});
+SELECT columns FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {ID: 'BIGINT', name: 'VARCHAR'});
 ----
 [{'name': id, 'type': bigint, 'comment': NULL}, {'name': name, 'type': string, 'comment': NULL}]
 
 # the cached entry is replaced while the statement still uses it
 statement ok
-INSERT INTO my_datalake.default.replace_cols (id, dt) SELECT 4, '2024-01-04' FROM glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
+INSERT INTO my_datalake.{GLUE_TEST_DB}.replace_cols (id, dt) SELECT 4, '2024-01-04' FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
 
 query II
-SELECT id, dt FROM my_datalake.default.replace_cols WHERE id = 4;
+SELECT id, dt FROM my_datalake.{GLUE_TEST_DB}.replace_cols WHERE id = 4;
 ----
 4	2024-01-04
 
 # EXPLAIN does not run it
 statement ok
-EXPLAIN SELECT * FROM glue_replace_columns('my_datalake.default.replace_cols', {explained: 'INTEGER'});
+EXPLAIN SELECT * FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {explained: 'INTEGER'});
 
 query I
-SELECT len(columns) FROM glue_get_table_response('my_datalake.default.replace_cols');
+SELECT len(columns) FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.replace_cols');
 ----
 2
 
@@ -249,7 +252,7 @@ statement ok
 BEGIN;
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
 ----
 <REGEX>:TransactionContext Error.*glue_replace_columns changes Glue, which has no transactions.*CALL glue_replace_columns\(\.\.\.\), outside BEGIN.*
 
@@ -261,7 +264,7 @@ statement ok
 BEGIN;
 
 statement error
-SELECT * FROM glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
+SELECT * FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
 ----
 <REGEX>:TransactionContext Error.*glue_replace_columns changes Glue, which has no transactions.*CALL glue_replace_columns\(\.\.\.\), outside BEGIN.*
 
@@ -270,7 +273,7 @@ ROLLBACK;
 
 # a prepared call checks again on every execution
 statement ok
-PREPARE replace_in_transaction AS SELECT * FROM glue_replace_columns('my_datalake.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
+PREPARE replace_in_transaction AS SELECT * FROM glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
 
 statement ok
 BEGIN;
@@ -288,24 +291,24 @@ DEALLOCATE replace_in_transaction;
 
 # views and read-only catalogs are refused
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.replace_cols_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.replace_cols_view;
 
 statement ok
-CREATE VIEW my_datalake.default.replace_cols_view AS SELECT 1 AS one;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.replace_cols_view AS SELECT 1 AS one;
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols_view', {one: 'INTEGER'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_view', {one: 'INTEGER'});
 ----
 is a Glue view, not a table
 
 statement ok
-DROP VIEW my_datalake.default.replace_cols_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.replace_cols_view;
 
 statement ok
-attach '{GLUE_CATALOG_ID}' as my_datalake_ro (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', READ_ONLY);
+attach '{GLUE_CATALOG_ID}' as my_datalake_ro (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', READ_ONLY, DEFAULT_SCHEMA '{GLUE_TEST_DB}');
 
 statement error
-CALL glue_replace_columns('my_datalake_ro.default.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake_ro.{GLUE_TEST_DB}.replace_cols', {id: 'BIGINT', name: 'VARCHAR'});
 ----
 read-only mode
 
@@ -319,34 +322,34 @@ statement ok
 SET glue_create_bucketed_tables = true;
 
 statement ok
-CREATE TABLE my_datalake.default.replace_cols_sorted (id INTEGER, name VARCHAR, extra VARCHAR) WITH (
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.replace_cols_sorted (id INTEGER, name VARCHAR, extra VARCHAR) WITH (
     BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'name', 'SortOrder': 1}]);
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols_sorted', {name: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_sorted', {name: 'VARCHAR'});
 ----
 the columns must keep 'id'
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols_sorted', {id: 'INTEGER'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_sorted', {id: 'INTEGER'});
 ----
 the columns must keep 'name'
 
 # the widening check uses the type Glue stores: USMALLINT is stored as int
 statement ok
-CALL glue_replace_columns('my_datalake.default.replace_cols_sorted', {id: 'USMALLINT', name: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_sorted', {id: 'USMALLINT', name: 'VARCHAR'});
 
 statement ok
-CALL glue_replace_columns('my_datalake.default.replace_cols_sorted', {id: 'BIGINT', name: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_sorted', {id: 'BIGINT', name: 'VARCHAR'});
 
 # a type Glue can not read back is refused before the table is changed
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols_sorted', {id: 'BIGINT', name: 'VARCHAR', s: 'STRUCT("a,b" INTEGER)'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_sorted', {id: 'BIGINT', name: 'VARCHAR', s: 'STRUCT("a,b" INTEGER)'});
 ----
 Glue type
 
 query II
-SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.replace_cols_sorted);
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.{GLUE_TEST_DB}.replace_cols_sorted);
 ----
 id	BIGINT
 name	VARCHAR
@@ -355,32 +358,32 @@ name	VARCHAR
 # a csv table: columns are positional, so replacing them renames them
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.replace_cols_csv (col1 VARCHAR, col2 VARCHAR, col3 VARCHAR) WITH (format = 'csv');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.replace_cols_csv (col1 VARCHAR, col2 VARCHAR, col3 VARCHAR) WITH (format = 'csv');
 
 statement ok
-INSERT INTO my_datalake.default.replace_cols_csv VALUES ('Ada', 'Lovelace', 'London');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.replace_cols_csv VALUES ('Ada', 'Lovelace', 'London');
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols_csv', {first_name: 'VARCHAR', last_name: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_csv', {first_name: 'VARCHAR', last_name: 'VARCHAR'});
 ----
 must keep its 3 columns
 
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols_csv', {first_name: 'VARCHAR', last_name: 'VARCHAR', city: 'VARCHAR', country: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_csv', {first_name: 'VARCHAR', last_name: 'VARCHAR', city: 'VARCHAR', country: 'VARCHAR'});
 ----
 must keep its 3 columns
 
 # the type check goes by position too: col1 is VARCHAR
 statement error
-CALL glue_replace_columns('my_datalake.default.replace_cols_csv', {first_name: 'INTEGER', last_name: 'VARCHAR', city: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_csv', {first_name: 'INTEGER', last_name: 'VARCHAR', city: 'VARCHAR'});
 ----
 can not change column 'col1'
 
 statement ok
-CALL glue_replace_columns('my_datalake.default.replace_cols_csv', {first_name: 'VARCHAR', last_name: 'VARCHAR', city: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_csv', {first_name: 'VARCHAR', last_name: 'VARCHAR', city: 'VARCHAR'});
 
 query III
-SELECT first_name, last_name, city FROM my_datalake.default.replace_cols_csv;
+SELECT first_name, last_name, city FROM my_datalake.{GLUE_TEST_DB}.replace_cols_csv;
 ----
 Ada	Lovelace	London
 
@@ -388,22 +391,22 @@ Ada	Lovelace	London
 # a json table: field names are matched case-sensitively, so a column that stays keeps its stored name
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.replace_cols_json (id INTEGER, name VARCHAR) WITH (format = 'json');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.replace_cols_json (id INTEGER, name VARCHAR) WITH (format = 'json');
 
 statement ok
-INSERT INTO my_datalake.default.replace_cols_json VALUES (1, 'Ada');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.replace_cols_json VALUES (1, 'Ada');
 
 statement ok
-CALL glue_replace_columns('my_datalake.default.replace_cols_json', {ID: 'BIGINT', Name: 'VARCHAR'});
+CALL glue_replace_columns('my_datalake.{GLUE_TEST_DB}.replace_cols_json', {ID: 'BIGINT', Name: 'VARCHAR'});
 
 query II
-SELECT id, name FROM my_datalake.default.replace_cols_json;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.replace_cols_json;
 ----
 1	Ada
 
 foreach table replace_cols replace_cols_csv replace_cols_json replace_cols_sorted
 
 statement ok
-DROP TABLE my_datalake.default.{table};
+DROP TABLE my_datalake.{GLUE_TEST_DB}.{table};
 
 endloop

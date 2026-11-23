@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -26,10 +27,25 @@ class Value;
 
 class GlueException : public IOException {
 public:
-	GlueException(const string &message, bool access_denied) : IOException(message), access_denied(access_denied) {
+	GlueException(const string &message, bool access_denied, bool throttled = false)
+	    : IOException(message), access_denied(access_denied), throttled(throttled) {
 	}
 
 	bool access_denied;
+	//! Glue refused the request for the request rate (the SDK's throttling errors)
+	bool throttled;
+};
+
+//! One table of GlueAPI::GetPartitionsOfTables
+struct GluePartitionLoad {
+	string database_name;
+	string table_name;
+	//! Null unless every request for the table's partitions succeeded
+	shared_ptr<const vector<GluePartitionInfo>> partitions;
+	//! The error of the table's first failed request. Unset with no partitions when another table failed first
+	ErrorData error;
+	//! Whether Glue refused that request for the request rate
+	bool throttled = false;
 };
 
 //! How a create call ended: the object exists afterwards either way, another client may have created it first
@@ -104,26 +120,16 @@ public:
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const GluePartitionDetails &partition,
 	                                 const string &location);
-	//! Fetch a single partition by its values, returns false if it does not exist
-	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result);
-	//! GetPartition with the partition's storage descriptor and parameters, and the Partition itself in
-	//! 'result.fetched'. 'raw_json' (optional) receives the Glue Partition object of the response as JSON.
+	//! Fetch a single partition by its values, returns false if it does not exist. 'result.fetched' holds the Partition
+	//! itself; 'raw_json' (optional) receives the Glue Partition object of the response as JSON.
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                         const string &table_name, const vector<string> &values, GluePartitionDetails &result,
 	                         string *raw_json = nullptr);
-	//! Register one partition of a Hive table; its StorageDescriptor is the one of 'table', as fetched, with the
-	//! partition's location. Returns false if it already exists and 'if_not_exists' is set, throws a
-	//! CatalogException if it already exists otherwise.
-	static bool CreatePartition(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
-	                            const GluePartitionInput &partition, bool if_not_exists);
-	//! Unregister a partition (the data files are left in place), returns false if it does not exist
-	static bool DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                            const string &table_name, const vector<string> &values);
-	//! Unregister partitions (BatchDeletePartition, the data files are left in place). Partitions that do not exist
-	//! are skipped; throws for the first partition Glue refuses, after retrying the errors that may pass.
-	static void BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                  const string &table_name, const vector<vector<string>> &partitions);
+	//! Unregister partitions (BatchDeletePartition, the data files are left in place) and return those that do not
+	//! exist; throws for the first partition Glue refuses, after retrying the errors that may pass.
+	static set<vector<string>> BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog,
+	                                                 const string &database_name, const string &table_name,
+	                                                 const vector<vector<string>> &partitions);
 	//! Which of 'partitions' exist (BatchGetPartition)
 	static set<vector<string>> ExistingPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                              const string &database_name, const string &table_name,
@@ -141,6 +147,9 @@ public:
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
+	//! GetPartitions of several tables, their requests run as tasks on DuckDB's threads. The first failed request
+	//! stops the requests not yet sent and is kept on its table; only an interrupt is thrown
+	static void GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog, vector<GluePartitionLoad> &tables);
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
 	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
 	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.

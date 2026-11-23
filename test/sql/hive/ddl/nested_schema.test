@@ -1,0 +1,89 @@
+# name: test/sql/hive/ddl/nested_schema.test
+# description: Glue databases do not nest: CREATE SCHEMA and DROP SCHEMA with a nested path are refused and leave the database of the last name alone; a quoted name with a dot is one database
+# group: [ddl]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_TEST_DB
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.ddl_nested_child CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake."ddl_nested_parent.ddl_nested_child" CASCADE;
+
+statement error
+CREATE SCHEMA my_datalake.ddl_nested_parent.ddl_nested_child;
+----
+does not support nested schemas
+
+# under a database that exists too
+statement error
+CREATE SCHEMA my_datalake.{GLUE_TEST_DB}.ddl_nested_child;
+----
+does not support nested schemas
+
+statement error
+CREATE SCHEMA IF NOT EXISTS my_datalake.ddl_nested_parent.ddl_nested_child;
+----
+does not support nested schemas
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name LIKE 'ddl_nested%';
+----
+
+statement ok
+CREATE SCHEMA my_datalake.ddl_nested_child;
+
+statement error
+DROP SCHEMA my_datalake.zz.ddl_nested_child;
+----
+does not support nested schemas
+
+statement error
+DROP SCHEMA IF EXISTS my_datalake.zz.ddl_nested_child CASCADE;
+----
+does not support nested schemas
+
+statement error
+DROP SCHEMA my_datalake.{GLUE_TEST_DB}.ddl_nested_child;
+----
+does not support nested schemas
+
+query I
+SELECT database_name FROM glue_get_database_response('my_datalake.ddl_nested_child');
+----
+ddl_nested_child
+
+# a quoted name with a dot is one database
+statement ok
+CREATE SCHEMA my_datalake."ddl_nested_parent.ddl_nested_child";
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name LIKE 'ddl_nested%' ORDER BY ALL;
+----
+ddl_nested_child
+ddl_nested_parent.ddl_nested_child
+
+statement ok
+DROP SCHEMA my_datalake."ddl_nested_parent.ddl_nested_child";
+
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name LIKE 'ddl_nested%';
+----
+ddl_nested_child
+
+statement ok
+DROP SCHEMA my_datalake.ddl_nested_child;

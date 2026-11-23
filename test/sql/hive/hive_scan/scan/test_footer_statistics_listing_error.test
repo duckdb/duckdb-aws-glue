@@ -1,0 +1,35 @@
+# name: test/sql/hive/hive_scan/scan/test_footer_statistics_listing_error.test
+# description: A location that can not be listed while planning gives a parquet scan no footer statistics rather than failing the bind; a scan the optimizer removes never needs the files, and one that reads them fails on the listing
+# group: [scan]
+
+require parquet
+
+require httpfs
+
+require glue
+
+statement ok
+SET disabled_filesystems = 'S3FileSystem';
+
+statement ok
+PREPARE p AS SELECT * FROM hive_scan('s3://synthetic-bucket/prefix', schema := {id: 'INTEGER'}) WHERE false;
+
+query I
+EXECUTE p;
+----
+
+query II
+EXPLAIN SELECT * FROM hive_scan('s3://synthetic-bucket/prefix', schema := {id: 'INTEGER'}) WHERE false;
+----
+physical_plan	<REGEX>:(?s).*Empty Result.*
+
+# a scan that is kept lists the location again when it runs, and fails there
+statement error
+SELECT * FROM hive_scan('s3://synthetic-bucket/prefix', schema := {id: 'INTEGER'});
+----
+<REGEX>:.*File system S3FileSystem has been disabled by configuration.*
+
+statement error
+SELECT count(*) FROM hive_scan('s3://synthetic-bucket/prefix', schema := {id: 'INTEGER'}) WHERE id > 0;
+----
+<REGEX>:.*File system S3FileSystem has been disabled by configuration.*
