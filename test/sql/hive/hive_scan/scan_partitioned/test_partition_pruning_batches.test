@@ -77,8 +77,8 @@ SELECT count(*) FROM pb() WHERE dt = 'none'
 ----
 0
 
-# an INTEGER partition key with a value that does not cast, in the second chunk: that chunk is decided partition by
-# partition, which fails on it as before
+# an INTEGER partition key with a value that does not cast, in the second chunk: the cast inside the filter throws,
+# the chunk is split in halves down to that partition, which fails with the error pruning always gave
 statement ok
 SET VARIABLE bad_parts = (
     SELECT list({n: CASE WHEN i = 2900 THEN 'abc' ELSE i::VARCHAR END, location: NULL::VARCHAR} ORDER BY i)
@@ -89,3 +89,47 @@ EXPLAIN SELECT id FROM hive_scan('{TEST_DIR}/pruning_batches', schema := {id: 'I
     partitions := getvariable('bad_parts')) WHERE n = 1
 ----
 Unable to cast 'abc' (from Glue partition column 'N') to: 'INTEGER'
+
+# an INTEGER key whose values load as strings and are cast inside the filter; Hive's default partition name is NULL
+statement ok
+SET VARIABLE int_parts = (
+    SELECT list({n: CASE WHEN i = 4000 THEN '__HIVE_DEFAULT_PARTITION__' ELSE i::VARCHAR END, location: NULL::VARCHAR}
+        ORDER BY i)
+    FROM range(5000) t(i));
+
+statement ok
+CREATE MACRO pi() AS TABLE
+SELECT * FROM hive_scan('{TEST_DIR}/pruning_batches', schema := {id: 'INTEGER', n: 'INTEGER'},
+    partitions := getvariable('int_parts'));
+
+query II
+EXPLAIN SELECT id FROM pi() WHERE n BETWEEN 10 AND 12
+----
+physical_plan	<REGEX>:.*Scanning Files: 3/5000.*
+
+query II
+EXPLAIN SELECT id FROM pi() WHERE n IS NULL
+----
+physical_plan	<REGEX>:.*Scanning Files: 1/5000.*
+
+query II
+EXPLAIN SELECT id FROM pi() WHERE coalesce(n, -1) = -1
+----
+physical_plan	<REGEX>:.*Scanning Files: 1/5000.*
+
+# a filter that can throw stays above the scan and prunes nothing: the scan applies it to every row
+query II
+EXPLAIN SELECT id FROM pb() WHERE CAST(substr(dt, 2) AS INTEGER) = 1
+----
+physical_plan	<!REGEX>:.*File Filters.*
+
+statement error
+SELECT id FROM pb() WHERE CAST(substr(dt, 2) AS INTEGER) = 1
+----
+Could not convert string 'x' to INT32
+
+query I
+SELECT id FROM pb() WHERE CASE WHEN dt = 'kx' THEN true ELSE CAST(substr(dt, 2) AS INTEGER) = 2500 END ORDER BY id
+----
+2
+4
