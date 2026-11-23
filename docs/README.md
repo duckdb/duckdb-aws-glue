@@ -187,7 +187,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   `bigint` to `int`, `double` to `int` or `string` to `int` do not. Nested types are not checked.
 - Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
   `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
-  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
+  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too. Filters that depend only on
+  `"$path"` or `filename` are applied to listed paths before files are opened, so nonmatching files are not read; the
+  relevant file locations are still listed.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
@@ -340,6 +342,14 @@ With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the co
 per connection — two connections never share one — so another connection's write stays unseen until something clears
 this connection's cache: a write through it, a rollback, or DETACH.
 
+Listings follow the same rule. `SHOW TABLES`, `SHOW SCHEMAS`, `duckdb_tables()`, `duckdb_schemas()` and the other
+catalog functions list a database's tables, or the catalog's databases, from Glue once per transaction — once per
+connection under `'connection'` scope — and reuse that listing until the cache is cleared. A table another client
+created, replaced or dropped, or a database it created or dropped, shows up in the next transaction's listing. The cost
+is one `GetTables` per listed database per statement: an unfiltered `duckdb_tables()`, `duckdb_columns()` or
+`SHOW ALL TABLES` lists every database of the catalog on every statement. `SET glue_metadata_cache_scope = 'connection'`
+keeps the listing for the connection, as before.
+
 ## Views
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...` and `CREATE SECURE VIEW` create a Glue
@@ -475,7 +485,7 @@ query.
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
-| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`) |
+| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`); with `missing := true` also one per registered partition that is gone, and a `status` column (`added` or `missing`) |
 
 The functions that change Glue are called with `CALL`, outside a `BEGIN` transaction, since Glue has no transactions
 (see [Writing](#writing)).
@@ -518,8 +528,11 @@ WHERE (dt IS NULL) <> (partition_values[1] = '__HIVE_DEFAULT_PARTITION__')
 the partitions Glue does not have yet with `BatchCreatePartition`. A partition is a directory with one `<key>=<value>`
 component per partition key, in partition key order (keys compare case-insensitively); it is registered at that
 directory, with the values unescaped and cast to the key types (`year=07` is `7`). Directories that do not follow this
-scheme, whose values do not cast, that are already the location of a partition, or that hold no file a scan would read
-(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. A table with another
+scheme, whose values are empty or do not cast, that are already the location of a partition, or that hold no file a
+scan would read (only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. With
+`missing := true` it also reports the registered partitions whose location is below the table location but holds no
+file at all, with `status` `missing`, and keeps them (partitions located elsewhere are not listed, so they are not
+checked). A table with another
 engine's InputFormat over a Hive SerDe (one INSERT refuses too) is refused: its files are not laid out the way Hive
 writes them.
 

@@ -331,12 +331,16 @@ vector<shared_ptr<BaseUnionData>> HiveScanInfo::ReadFooters(ClientContext &conte
 	return std::move(reading->union_readers);
 }
 
-string HiveScanInfo::FootersCacheKey() const {
+string HiveScanInfo::FootersCacheKey(bool path_filtered) const {
 	// the footers are read with the scan's binary_as_string, which follows its schema
 	auto key = CacheKey();
 	auto binary_as_string = reader_parameters.find("binary_as_string");
 	if (binary_as_string != reader_parameters.end()) {
 		key += "\x1f" + binary_as_string->second.ToString();
+	}
+	// Different path filters read different files, whose footer bounds cannot be shared between scans.
+	if (path_filtered) {
+		key += StringUtil::Format("\x1fpath_filters\x1f%llu", scan_id);
 	}
 	return key;
 }
@@ -346,7 +350,8 @@ unique_ptr<MultiFileBindData> HiveScanInfo::FooterStatisticsBindData(ClientConte
 	if (!ReadsFooterStatistics()) {
 		return nullptr;
 	}
-	auto entry = HiveQueryCache::Get(context)->GetFooters(FootersCacheKey());
+	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
+	auto entry = HiveQueryCache::Get(context)->GetFooters(FootersCacheKey(hive_list.HasPathFilters()));
 	vector<shared_ptr<BaseUnionData>> footers;
 	{
 		annotated_lock_guard<annotated_mutex> guard(entry->lock);
