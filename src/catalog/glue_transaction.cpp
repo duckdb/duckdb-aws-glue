@@ -147,6 +147,20 @@ bool GlueTransactionCache::IsTableResolved(const string &database_name, const st
 	return slot != tables.end() && slot->second->IsResolved(query);
 }
 
+bool GlueTransactionCache::NeedsTablePage(const string &database_name, const string &table_name, transaction_t query) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	if (paged_databases.count(StringUtil::Lower(database_name))) {
+		return false;
+	}
+	auto slot = tables.find(Key(database_name, table_name));
+	return slot == tables.end() || !slot->second->IsResolved(query);
+}
+
+void GlueTransactionCache::MarkTablePaged(const string &database_name) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	paged_databases.insert(StringUtil::Lower(database_name));
+}
+
 optional_ptr<GlueTransactionCache> GlueTransactionCache::Of(ClientContext &context, Catalog &catalog) {
 	auto transaction = Transaction::TryGet(context, catalog.GetAttached());
 	if (!transaction) {

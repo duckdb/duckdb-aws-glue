@@ -67,16 +67,17 @@ public:
 	void PutTable(const string &database_name, const string &table_name, shared_ptr<const GlueTableInfo> table);
 	//! Whether GetTable answers from the cache, a miss of the same query included, without calling Glue
 	bool IsTableResolved(const string &database_name, const string &table_name, transaction_t query = MAXIMUM_QUERY_ID);
+	//! Whether a first GetTables page of the database would help the lookup: none warmed this cache yet and the
+	//! table is not answered already
+	bool NeedsTablePage(const string &database_name, const string &table_name, transaction_t query);
+	//! Records that a GetTables page of the database warmed this cache; the record ends with the cache's contents
+	void MarkTablePaged(const string &database_name);
 	void Clear() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
 		listed_sets.clear();
-	}
-	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
-	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
-	idx_t Id() const {
-		return id;
+		paged_databases.clear();
 	}
 	//! Whether the entry set with this id was listed from Glue under this cache; the listing holds until the cache is
 	//! cleared
@@ -88,7 +89,7 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		listed_sets.insert(set_id);
 	}
-	//! Monotonic ids, never reused: for cache instances and for the entry sets they track
+	//! Monotonic ids, never reused: for the entry sets a cache tracks
 	static idx_t NextId();
 	static string TableCacheKey(const string &database_name, const string &table_name) {
 		return database_name + "\x1f" + table_name;
@@ -147,7 +148,8 @@ private:
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
 	unordered_set<glue_entry_set_id_t> listed_sets DUCKDB_GUARDED_BY(lock);
-	const idx_t id = NextId();
+	//! The databases whose first GetTables page warmed 'tables'
+	unordered_set<string> paged_databases DUCKDB_GUARDED_BY(lock);
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in

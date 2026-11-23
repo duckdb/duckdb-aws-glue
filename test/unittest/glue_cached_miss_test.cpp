@@ -154,4 +154,25 @@ TEST_CASE("A table miss is not kept from one API lookup to the next in an explic
 	}
 }
 
+TEST_CASE("A table page is needed once per database and only for a name the cache cannot answer", "[glue_catalog]") {
+	GlueTransactionCache cache;
+	auto none = []() -> shared_ptr<const GlueTableInfo> {
+		return nullptr;
+	};
+	REQUIRE(cache.NeedsTablePage("db", "t", 1));
+	REQUIRE(!cache.GetTable("db", "m", none, 1));
+	REQUIRE(!cache.NeedsTablePage("db", "m", 1));
+	REQUIRE(cache.NeedsTablePage("db", "m", 2));
+
+	cache.MarkTablePaged("DB");
+	REQUIRE(!cache.NeedsTablePage("db", "m", 2));
+	REQUIRE(cache.NeedsTablePage("other", "t", 1));
+
+	// a name the cache holds needs no page even before one is fetched
+	cache.Clear();
+	REQUIRE(cache.NeedsTablePage("db", "m", 2));
+	cache.PutTable("db", "m", make_shared_ptr<const GlueTableInfo>());
+	REQUIRE(!cache.NeedsTablePage("db", "m", 2));
+}
+
 } // namespace duckdb
