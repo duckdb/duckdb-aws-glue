@@ -193,11 +193,16 @@ struct GlueBasicStatistics {
 	}
 };
 
+//! Whether numRows, numFiles and totalSize are all set to a count
+bool TryGetBasicStatistics(const unordered_map<string, string> &parameters, GlueBasicStatistics &result);
+void SetBasicStatistics(unordered_map<string, string> &parameters, const GlueBasicStatistics &statistics);
+void RemoveBasicStatistics(unordered_map<string, string> &parameters);
+
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location
 struct GluePartitionInput {
 	vector<string> values;
 	string location;
-	//! The statistics of the files written to it: set on a new partition, added to an existing one's
+	//! The statistics of the files written to it, recorded once the partition is registered
 	optional<GlueBasicStatistics> statistics;
 };
 

@@ -16,7 +16,9 @@
 #include <aws/glue/model/SerDeInfo.h>
 #include <aws/glue/model/UpdateTableRequest.h>
 
+#include <chrono>
 #include <functional>
+#include <thread>
 
 namespace duckdb {
 
@@ -421,37 +423,72 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 	});
 }
 
+//! Fetch the table and send it back with the parameters 'modify' changes (nothing is sent when it returns false);
+//! fetched again when another client changed the table in between. False when every attempt lost to such a change.
+static bool UpdateTableParametersWithRetry(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                           const string &table_name,
+                                           const std::function<bool(unordered_map<string, string> &)> &modify) {
+	constexpr idx_t MAX_ATTEMPTS = 4;
+	for (idx_t attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+		if (attempt > 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(100 << (2 * (attempt - 1))));
+		}
+		GlueTableInfo current;
+		if (!GlueAPI::GetTable(context, catalog, database_name, table_name, current)) {
+			return true;
+		}
+		auto parameters = ToStdMap(FetchedTable(current).GetParameters());
+		if (!modify(parameters)) {
+			return true;
+		}
+		GlueCallScope call_scope(context);
+		auto client = GlueAPI::GetClient(context, catalog);
+		try {
+			UpdateGlueTable(client, catalog, current, [&](Aws::Glue::Model::TableInput &table_input) {
+				table_input.SetParameters(ToAwsMap(parameters));
+			});
+			return true;
+		} catch (TransactionException &) {
+			// another client changed the table since it was fetched
+		}
+	}
+	return false;
+}
+
 void GlueAPI::AddTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                  const string &table_name, const GlueBasicStatistics &statistics) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateTable");
-	// another writer changing the table in between makes UpdateTable fail: read it again and add to its statistics
-	constexpr idx_t MAX_ATTEMPTS = 5;
-	for (idx_t attempt = 0;; attempt++) {
-		GlueTableInfo current;
-		if (!GetTable(context, catalog, database_name, table_name, current)) {
-			return;
-		}
-		GlueBasicStatistics total;
-		if (!TryGetBasicStatistics(current.parameters, total)) {
-			// unknown statistics stay unknown
-			return;
-		}
-		total.Add(statistics);
-		GlueCallScope call_scope(context);
-		auto client = GetClient(context, catalog);
-		try {
-			UpdateGlueTable(client, catalog, current, [&](Aws::Glue::Model::TableInput &table_input) {
-				auto parameters = ToStdMap(table_input.GetParameters());
-				SetBasicStatistics(parameters, total);
-				table_input.SetParameters(ToAwsMap(parameters));
-			});
-			return;
-		} catch (TransactionException &) {
-			if (attempt + 1 == MAX_ATTEMPTS) {
-				throw;
-			}
-		}
+	auto added = UpdateTableParametersWithRetry(context, catalog, database_name, table_name,
+	                                            [&](unordered_map<string, string> &parameters) {
+		                                            GlueBasicStatistics total;
+		                                            if (!TryGetBasicStatistics(parameters, total)) {
+			                                            // unknown statistics stay unknown
+			                                            return false;
+		                                            }
+		                                            total.Add(statistics);
+		                                            SetBasicStatistics(parameters, total);
+		                                            return true;
+	                                            });
+	if (!added) {
+		RemoveTableStatistics(context, catalog, database_name, table_name);
+	}
+}
+
+void GlueAPI::RemoveTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                    const string &table_name) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdateTable");
+	auto removed = UpdateTableParametersWithRetry(context, catalog, database_name, table_name,
+	                                              [&](unordered_map<string, string> &parameters) {
+		                                              auto count = parameters.size();
+		                                              RemoveBasicStatistics(parameters);
+		                                              return parameters.size() != count;
+	                                              });
+	if (!removed) {
+		throw TransactionException("Glue table \"%s.%s\" kept being changed by another client, so its numRows, "
+		                           "numFiles and totalSize could not be removed",
+		                           database_name, table_name);
 	}
 }
 

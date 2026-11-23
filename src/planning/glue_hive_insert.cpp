@@ -10,6 +10,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -849,7 +850,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 			for (auto &statistics : state.file_statistics) {
 				written.Add(statistics);
 			}
-			AddStatistics(context, written, {});
+			AddStatistics(context, written, {}, {}, state.written_files);
 		}
 		return SinkFinalizeType::READY;
 	}
@@ -946,30 +947,121 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	}
 	transaction.CompleteHiveWrite(write_id);
 	RecordWrittenFiles(context, state.written_files);
-	AddStatistics(context, GlueBasicStatistics(), already_existing);
+	AddStatistics(context, GlueBasicStatistics(), to_register, already_existing, state.written_files);
 	return SinkFinalizeType::READY;
 }
 
+namespace {
+
+//! Lists one partition directory an INSERT registered, to tell whether it held data files before
+class ListPartitionDirectoryTask : public BaseExecutorTask {
+public:
+	ListPartitionDirectoryTask(TaskExecutor &executor, FileSystem &fs, GluePartitionInput &partition,
+	                           const unordered_set<string> &written)
+	    : BaseExecutorTask(executor), fs(fs), partition(partition), written(written) {
+	}
+
+	void ExecuteTask() override {
+		bool other_files = true;
+		try {
+			other_files = LocationHasDataFiles(fs, partition.location, written);
+		} catch (std::exception &) {
+			// not known, so neither are the statistics
+		}
+		if (other_files) {
+			partition.statistics.reset();
+		}
+	}
+	string TaskType() const override {
+		return "ListPartitionDirectoryTask";
+	}
+
+private:
+	FileSystem &fs;
+	GluePartitionInput &partition;
+	const unordered_set<string> &written;
+};
+
+} // namespace
+
 void GlueHiveInsert::AddStatistics(ClientContext &context, const GlueBasicStatistics &table_statistics,
-                                   const vector<GluePartitionInput> &already_existing) const {
+                                   const vector<GluePartitionInput> &registered,
+                                   const vector<GluePartitionInput> &already_existing,
+                                   const vector<string> &written_files) const {
 	if (!collect_statistics) {
 		return;
 	}
 	auto &database_name = table_info.schema_name;
 	auto &table_name = table_info.name;
-	try {
-		if (!table_info.partition_keys.empty()) {
-			GlueAPI::AddPartitionStatistics(context, catalog, database_name, table_name, already_existing);
-			return;
-		}
+	if (table_info.partition_keys.empty()) {
 		GlueBasicStatistics bound;
 		// a table bound without statistics has none to add to; one CREATE TABLE AS created was not fetched
 		if (table_info.fetched && !TryGetBasicStatistics(table_info.parameters, bound)) {
 			return;
 		}
-		GlueAPI::AddTableStatistics(context, catalog, database_name, table_name, table_statistics);
+		try {
+			GlueAPI::AddTableStatistics(context, catalog, database_name, table_name, table_statistics);
+		} catch (std::exception &ex) {
+			DUCKDB_LOG_WARNING(context, "Could not add the statistics of the files written to Hive table '%s.%s': %s",
+			                   database_name, table_name, ErrorData(ex).RawMessage());
+			RemoveStatistics(context, {});
+		}
+		return;
+	}
+
+	set<vector<string>> existed;
+	for (auto &partition : already_existing) {
+		existed.insert(partition.values);
+	}
+	auto partitions = registered;
+	set<vector<string>> created;
+	unordered_set<string> written;
+	for (auto &file : written_files) {
+		written.insert(ComparableLocation(file));
+	}
+	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+	vector<unique_ptr<BaseExecutorTask>> tasks;
+	auto &fs = FileSystem::GetFileSystem(context);
+	for (auto &partition : partitions) {
+		if (!partition.statistics || existed.find(partition.values) != existed.end()) {
+			continue;
+		}
+		created.insert(partition.values);
+		// a directory CREATE TABLE AS writes to held no data files; one an INSERT writes to may hold those of a
+		// dropped partition, which its count would miss
+		if (table_info.fetched) {
+			tasks.push_back(make_uniq<ListPartitionDirectoryTask>(executor, fs, partition, written));
+		}
+	}
+	vector<vector<string>> values;
+	for (auto &partition : partitions) {
+		values.push_back(partition.values);
+	}
+	try {
+		if (!tasks.empty()) {
+			executor.ScheduleTasks(std::move(tasks));
+			executor.WorkOnTasks();
+		}
+		GlueAPI::AddPartitionStatistics(context, catalog, database_name, table_name, partitions, created);
 	} catch (std::exception &ex) {
 		DUCKDB_LOG_WARNING(context, "Could not add the statistics of the files written to Hive table '%s.%s': %s",
+		                   database_name, table_name, ErrorData(ex).RawMessage());
+		RemoveStatistics(context, values);
+	}
+}
+
+void GlueHiveInsert::RemoveStatistics(ClientContext &context, const vector<vector<string>> &partitions) const {
+	auto &database_name = table_info.schema_name;
+	auto &table_name = table_info.name;
+	try {
+		if (table_info.partition_keys.empty()) {
+			GlueAPI::RemoveTableStatistics(context, catalog, database_name, table_name);
+		} else {
+			GlueAPI::RemovePartitionStatistics(context, catalog, database_name, table_name, partitions);
+		}
+	} catch (std::exception &ex) {
+		DUCKDB_LOG_WARNING(context,
+		                   "Could not remove the statistics of Hive table '%s.%s', which miss the files written: %s",
 		                   database_name, table_name, ErrorData(ex).RawMessage());
 	}
 }

@@ -7,7 +7,8 @@ the description 'created by another client', a table one more column 'created_by
 'SELECT 2 AS one'. An UpdateTable on a fault_concurrent_update* database is preceded by another client's update,
 which sets the table parameter 'changed_by_another_client', and is then refused with ConcurrentModificationException
 if its VersionId is not the table's current one, as Glue does (moto ignores VersionId); without a VersionId it is
-forwarded and overwrites the other client's change. A BatchCreatePartition on a fault_partition_elsewhere* database is
+forwarded and overwrites the other client's change. On a fault_statistics_race* database only an UpdateTable that sets
+numRows to a count races so, one that removes it is forwarded. A BatchCreatePartition on a fault_partition_elsewhere* database is
 preceded by another client's registration of the same partitions at '<location>_by_another_client', so that each is
 refused with AlreadyExistsException while its files are not where Glue points. A BatchCreatePartition on a
 fault_noncanonical_values* database registers each value with a leading '0', as another engine may spell an integer
@@ -36,6 +37,8 @@ DENIED_TABLE_PREFIX = "fault_denied_"
 RACED_CREATE_PREFIX = "fault_already_exists"
 # UpdateTable on a database with this prefix races another client's update of the same table
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
+# UpdateTable on a database with this prefix races another client's update when it sets numRows to a count
+RACED_STATISTICS_PREFIX = "fault_statistics_race"
 # the first attempt of a request on a database with this prefix is throttled, its retries are not
 THROTTLED_PREFIX = "fault_throttled"
 # BatchCreatePartition on a database with this prefix is forwarded after a delay
@@ -107,8 +110,12 @@ def is_throttled(database, sdk_request):
     return database.startswith(THROTTLED_PREFIX) and "attempt=1" in attempts
 
 
-def is_raced_update(target, database):
-    return target == "AWSGlue.UpdateTable" and database.startswith(RACED_UPDATE_PREFIX)
+def is_raced_update(target, database, request):
+    if target != "AWSGlue.UpdateTable":
+        return False
+    if database.startswith(RACED_STATISTICS_PREFIX):
+        return request.get("TableInput", {}).get("Parameters", {}).get("numRows", "").isdigit()
+    return database.startswith(RACED_UPDATE_PREFIX)
 
 
 def is_slow_partitions(target, database):
@@ -175,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
             self.recreate_as_other_client(database, request["TableName"])
             self.reply_error("InternalServiceException")
             return
-        if is_raced_update(target, database):
+        if is_raced_update(target, database, request):
             current_version = self.update_as_other_client(database, request["TableInput"]["Name"])
             if "VersionId" in request and request["VersionId"] != current_version:
                 self.reply_error("ConcurrentModificationException")

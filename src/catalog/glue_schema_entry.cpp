@@ -26,7 +26,9 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 
 #include "core/glue_types.hpp"
+#include "core/hive_location.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -541,13 +543,13 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
 	D_ASSERT(table.schema_name == database_info.name);
-	// inserts keep these current; a partitioned table keeps them per partition. CREATE TABLE AS has checked its
-	// location holds no data files, a LOCATION given to CREATE TABLE may hold some.
-	auto starts_empty = resolved_table_info || ParseCreateTableOptions(context, base).location.empty();
-	if (table.file_format == HiveFileFormat::PARQUET && table.partition_keys.empty() && starts_empty) {
-		table.parameters.emplace("numRows", "0");
-		table.parameters.emplace("numFiles", "0");
-		table.parameters.emplace("totalSize", "0");
+	// writes keep these current; a partitioned table keeps them per partition
+	auto given =
+	    table.parameters.count("numRows") + table.parameters.count("numFiles") + table.parameters.count("totalSize");
+	// CREATE TABLE AS has checked its location holds no data files; files a dropped table left would not be counted
+	if (table.file_format == HiveFileFormat::PARQUET && table.partition_keys.empty() && given == 0 &&
+	    (resolved_table_info || !LocationHasDataFiles(FileSystem::GetFileSystem(context), table.location))) {
+		SetBasicStatistics(table.parameters, GlueBasicStatistics());
 	}
 	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {
 		// another client created the table since the lookup above: take its entry

@@ -95,10 +95,13 @@ CALL truncate_duckdb_logs();
 statement ok
 CREATE TABLE my_datalake.{GLUE_TEST_DB}.calls_ctas PARTITIONED BY (p) AS SELECT range AS id, range % 2 AS p FROM range(10);
 
+# the numRows, numFiles and totalSize of the new partitions are set once they are registered
 query II
 FROM glue_calls();
 ----
 BatchCreatePartition	1
+BatchGetPartition	1
+BatchUpdatePartition	1
 CreateTable	1
 GetTable	4
 GetTables	1
@@ -284,6 +287,8 @@ query II
 FROM glue_calls();
 ----
 BatchCreatePartition	1
+BatchGetPartition	1
+BatchUpdatePartition	1
 GetPartitions	1
 GetTable	1
 

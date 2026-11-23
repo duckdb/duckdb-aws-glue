@@ -65,10 +65,15 @@ private:
 	//! Throws when a partition registration skipped as existing is registered at another location than its files
 	void CheckExistingPartitionLocations(ClientContext &context,
 	                                     const vector<GluePartitionInput> &already_existing) const;
-	//! Adds the statistics of the written files to those of the table, or of the partitions that already existed
-	//! (new partitions were registered with theirs). The rows are in the table by now, so a failure is logged.
+	//! Records the statistics of the written files: adds them to the table's, sets them on the partitions this write
+	//! 'registered' that are not 'already_existing' (unless their directory held other data files), adds them to
+	//! those that are. The rows are in the table by now, so a failure is logged, and the statistics it leaves
+	//! behind are removed.
 	void AddStatistics(ClientContext &context, const GlueBasicStatistics &table_statistics,
-	                   const vector<GluePartitionInput> &already_existing) const;
+	                   const vector<GluePartitionInput> &registered, const vector<GluePartitionInput> &already_existing,
+	                   const vector<string> &written_files) const;
+	//! Removes numRows, numFiles and totalSize from the table, or from 'partitions'; a failure is logged
+	void RemoveStatistics(ClientContext &context, const vector<vector<string>> &partitions) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).

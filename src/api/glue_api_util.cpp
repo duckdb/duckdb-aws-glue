@@ -1,6 +1,5 @@
 #include "api/glue_api_util.hpp"
 
-#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
@@ -112,42 +111,6 @@ string PartitionValuesToString(const vector<string> &values) {
 
 Aws::Vector<Aws::String> ToAwsValues(const vector<string> &values) {
 	return Aws::Vector<Aws::String>(values.begin(), values.end());
-}
-
-static constexpr const char *NUM_ROWS_PARAMETER = "numRows";
-static constexpr const char *NUM_FILES_PARAMETER = "numFiles";
-static constexpr const char *TOTAL_SIZE_PARAMETER = "totalSize";
-
-static bool TryGetCount(const unordered_map<string, string> &parameters, const char *key, idx_t &result) {
-	auto entry = parameters.find(key);
-	if (entry == parameters.end()) {
-		return false;
-	}
-	// -1 is the usual spelling of unknown, and does not cast
-	uint64_t count;
-	if (!TryCast::Operation(string_t(entry->second), count, true)) {
-		return false;
-	}
-	result = count;
-	return true;
-}
-
-bool TryGetBasicStatistics(const unordered_map<string, string> &parameters, GlueBasicStatistics &result) {
-	return TryGetCount(parameters, NUM_ROWS_PARAMETER, result.num_rows) &&
-	       TryGetCount(parameters, NUM_FILES_PARAMETER, result.num_files) &&
-	       TryGetCount(parameters, TOTAL_SIZE_PARAMETER, result.total_size);
-}
-
-void SetBasicStatistics(unordered_map<string, string> &parameters, const GlueBasicStatistics &statistics) {
-	parameters[NUM_ROWS_PARAMETER] = to_string(statistics.num_rows);
-	parameters[NUM_FILES_PARAMETER] = to_string(statistics.num_files);
-	parameters[TOTAL_SIZE_PARAMETER] = to_string(statistics.total_size);
-}
-
-void RemoveBasicStatistics(unordered_map<string, string> &parameters) {
-	parameters.erase(NUM_ROWS_PARAMETER);
-	parameters.erase(NUM_FILES_PARAMETER);
-	parameters.erase(TOTAL_SIZE_PARAMETER);
 }
 
 void CheckWritable(const GlueCatalog &catalog, const string &operation) {

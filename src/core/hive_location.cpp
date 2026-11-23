@@ -43,6 +43,21 @@ unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location) {
 	return fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
 }
 
+bool LocationHasDataFiles(FileSystem &fs, const string &location, const unordered_set<string> &except) {
+	if (LocationHasGlob(location)) {
+		return true;
+	}
+	auto prefix = location;
+	StringUtil::RTrim(prefix, "/");
+	auto listing = ListLocation(fs, prefix);
+	for (auto &file : listing->Files()) {
+		if (IsDataFile(file, prefix + "/") && except.find(ComparableLocation(file.path)) == except.end()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 Path HivePartitionDirectory(const vector<string> &keys, const vector<string> &values) {
 	D_ASSERT(keys.size() == values.size());
 	Path result;
