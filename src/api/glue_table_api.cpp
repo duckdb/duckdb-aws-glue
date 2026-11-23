@@ -414,7 +414,45 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetLocation(location);
 		table_input.SetStorageDescriptor(storage_descriptor);
+		// the statistics count the files at the old location
+		auto parameters = ToStdMap(table_input.GetParameters());
+		RemoveBasicStatistics(parameters);
+		table_input.SetParameters(ToAwsMap(parameters));
 	});
+}
+
+void GlueAPI::AddTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                 const string &table_name, const GlueBasicStatistics &statistics) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdateTable");
+	// another writer changing the table in between makes UpdateTable fail: read it again and add to its statistics
+	constexpr idx_t MAX_ATTEMPTS = 5;
+	for (idx_t attempt = 0;; attempt++) {
+		GlueTableInfo current;
+		if (!GetTable(context, catalog, database_name, table_name, current)) {
+			return;
+		}
+		GlueBasicStatistics total;
+		if (!TryGetBasicStatistics(current.parameters, total)) {
+			// unknown statistics stay unknown
+			return;
+		}
+		total.Add(statistics);
+		GlueCallScope call_scope(context);
+		auto client = GetClient(context, catalog);
+		try {
+			UpdateGlueTable(client, catalog, current, [&](Aws::Glue::Model::TableInput &table_input) {
+				auto parameters = ToStdMap(table_input.GetParameters());
+				SetBasicStatistics(parameters, total);
+				table_input.SetParameters(ToAwsMap(parameters));
+			});
+			return;
+		} catch (TransactionException &) {
+			if (attempt + 1 == MAX_ATTEMPTS) {
+				throw;
+			}
+		}
+	}
 }
 
 void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,

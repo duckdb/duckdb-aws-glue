@@ -41,6 +41,10 @@ Aws::Map<Aws::String, Aws::String> ToAwsMap(const unordered_map<string, string> 
 Aws::Vector<Aws::Glue::Model::Column> ToAwsColumns(const vector<GlueColumn> &input);
 Aws::Vector<Aws::String> ToAwsValues(const vector<string> &values);
 string PartitionValuesToString(const vector<string> &values);
+//! Whether numRows, numFiles and totalSize are all set to a count
+bool TryGetBasicStatistics(const unordered_map<string, string> &parameters, GlueBasicStatistics &result);
+void SetBasicStatistics(unordered_map<string, string> &parameters, const GlueBasicStatistics &statistics);
+void RemoveBasicStatistics(unordered_map<string, string> &parameters);
 void CheckWritable(const GlueCatalog &catalog, const string &operation);
 
 template <class OUTCOME>

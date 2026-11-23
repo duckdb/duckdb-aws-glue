@@ -65,6 +65,10 @@ private:
 	//! Throws when a partition registration skipped as existing is registered at another location than its files
 	void CheckExistingPartitionLocations(ClientContext &context,
 	                                     const vector<GluePartitionInput> &already_existing) const;
+	//! Adds the statistics of the written files to those of the table, or of the partitions that already existed
+	//! (new partitions were registered with theirs). The rows are in the table by now, so a failure is logged.
+	void AddStatistics(ClientContext &context, const GlueBasicStatistics &table_statistics,
+	                   const vector<GluePartitionInput> &already_existing) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).
@@ -77,6 +81,9 @@ public:
 	unordered_map<string, vector<string>> partition_directories;
 	//! Names the files of this write, and its entry in the Glue transaction
 	string write_id;
+	//! Whether the copy reports the rows and size of each file it wrote (parquet), kept as numRows, numFiles and
+	//! totalSize
+	bool collect_statistics = false;
 };
 
 } // namespace duckdb

@@ -1,0 +1,276 @@
+# name: test/sql/hive/dml/insert/insert_statistics.test
+# description: INSERT and CREATE TABLE AS into parquet tables keep numRows, numFiles and totalSize current in Glue
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_TEST_DB
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
+);
+
+foreach table stats_plain stats_parts stats_located stats_unknown stats_csv stats_ctas stats_ctas_parts
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.{table};
+
+endloop
+
+# the statistics of a table, and of one partition of stats_parts
+statement ok
+CREATE MACRO table_stats(t) AS TABLE
+SELECT parameters['numRows'] AS num_rows, parameters['numFiles'] AS num_files, parameters['totalSize'] AS total_size
+FROM glue_get_table_response(t);
+
+statement ok
+CREATE MACRO partition_stats(y) AS TABLE
+SELECT parameters['numRows'] AS num_rows, parameters['numFiles'] AS num_files, parameters['totalSize'] AS total_size
+FROM glue_get_partition_response('my_datalake.{GLUE_TEST_DB}.stats_parts', {year: y});
+
+# what is at a location: the parquet files, and their total size
+statement ok
+CREATE MACRO files_at(location) AS TABLE
+SELECT count(*) AS num_files, sum(size) AS total_size FROM read_blob(location || '/*.parquet');
+
+#---------------------------------------------------------------------------
+# unpartitioned: a new table starts at 0, every insert adds its files
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_plain (id INTEGER, name VARCHAR);
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_plain');
+----
+0	0	0
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_plain SELECT i, 'name_' || i FROM range(5) t(i);
+
+query III
+SELECT s.num_rows, s.num_files::BIGINT = f.num_files, s.total_size::BIGINT = f.total_size
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_plain') s,
+     files_at('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_plain') f;
+----
+5	true	true
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_plain VALUES (10, 'ten'), (11, 'eleven'), (12, 'twelve');
+
+query III
+SELECT s.num_rows, s.num_files::BIGINT = f.num_files, s.total_size::BIGINT = f.total_size
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_plain') s,
+     files_at('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_plain') f;
+----
+8	true	true
+
+query I
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.stats_plain;
+----
+8
+
+# an insert of no rows adds no rows; whatever file it leaves is counted
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_plain SELECT i, 'x' FROM range(5) t(i) WHERE i > 100;
+
+query III
+SELECT s.num_rows, s.num_files::BIGINT = f.num_files, s.total_size::BIGINT = f.total_size
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_plain') s,
+     files_at('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_plain') f;
+----
+8	true	true
+
+# moving the table removes them: they count the files at the old location
+statement ok
+CALL glue_set_table_location('my_datalake.{GLUE_TEST_DB}.stats_plain',
+    '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_plain_moved');
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_plain');
+----
+NULL	NULL	NULL
+
+# and once unknown they stay unknown
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_plain VALUES (1, 'one');
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_plain');
+----
+NULL	NULL	NULL
+
+#---------------------------------------------------------------------------
+# unpartitioned tables without statistics to add to
+#---------------------------------------------------------------------------
+# a LOCATION given to CREATE TABLE may already hold files
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_located (id INTEGER)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_located_dir');
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_located VALUES (1), (2);
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_located');
+----
+NULL	NULL	NULL
+
+# statistics given as table properties are kept, -1 is unknown
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_unknown (id INTEGER) WITH (numRows = '-1');
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_unknown');
+----
+-1	0	0
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_unknown VALUES (1), (2);
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_unknown');
+----
+-1	0	0
+
+# csv writes report no statistics, and leave the table's as they are
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_csv (id INTEGER, name VARCHAR)
+WITH (format = 'csv', numRows = '7', numFiles = '1', totalSize = '70');
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_csv VALUES (1, 'one');
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_csv');
+----
+7	1	70
+
+query I
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.stats_csv;
+----
+1
+
+#---------------------------------------------------------------------------
+# partitioned: statistics per partition
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_parts (id INTEGER, year INTEGER) PARTITIONED BY (year);
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_parts SELECT i, 2020 + i % 2 FROM range(7) t(i);
+
+# the table itself has none
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_parts');
+----
+NULL	NULL	NULL
+
+query III
+SELECT s.num_rows, s.num_files, s.total_size::BIGINT = f.total_size
+FROM partition_stats(2020) s, files_at('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_parts/year=2020') f;
+----
+4	1	true
+
+query III
+SELECT s.num_rows, s.num_files, s.total_size::BIGINT = f.total_size
+FROM partition_stats(2021) s, files_at('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_parts/year=2021') f;
+----
+3	1	true
+
+# appending adds to an existing partition, a new partition gets its own
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_parts VALUES (100, 2021), (101, 2021), (102, 2022);
+
+query III
+SELECT s.num_rows, s.num_files, s.total_size::BIGINT = f.total_size
+FROM partition_stats(2021) s, files_at('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_parts/year=2021') f;
+----
+5	2	true
+
+query III
+SELECT s.num_rows, s.num_files, s.total_size::BIGINT = f.total_size
+FROM partition_stats(2022) s, files_at('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_parts/year=2022') f;
+----
+1	1	true
+
+query III
+SELECT num_rows, num_files, total_size::BIGINT > 0 FROM partition_stats(2020);
+----
+4	1	true
+
+query II
+SELECT year, count(*) FROM my_datalake.{GLUE_TEST_DB}.stats_parts GROUP BY year ORDER BY year;
+----
+2020	4
+2021	5
+2022	1
+
+# a partition registered without statistics keeps having none
+statement ok
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.stats_parts', {year: 2023});
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_parts VALUES (200, 2023), (201, 2020);
+
+query III
+FROM partition_stats(2023);
+----
+NULL	NULL	NULL
+
+query II
+SELECT num_rows, num_files FROM partition_stats(2020);
+----
+5	2
+
+# moving a partition removes its statistics
+statement ok
+CALL glue_set_partition_location('my_datalake.{GLUE_TEST_DB}.stats_parts', {year: 2022},
+    '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_parts_moved/year=2022');
+
+query III
+FROM partition_stats(2022);
+----
+NULL	NULL	NULL
+
+#---------------------------------------------------------------------------
+# CREATE TABLE AS
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_ctas AS SELECT i AS id FROM range(42) t(i);
+
+query III
+SELECT s.num_rows, s.num_files::BIGINT = f.num_files, s.total_size::BIGINT = f.total_size
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_ctas') s,
+     files_at('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/stats_ctas') f;
+----
+42	true	true
+
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_ctas_parts PARTITIONED BY (bucket) AS
+SELECT i AS id, i % 3 AS bucket FROM range(10) t(i);
+
+query III
+SELECT partition_values[1], parameters['numRows'], parameters['numFiles']
+FROM (SELECT * FROM glue_get_partition_response('my_datalake.{GLUE_TEST_DB}.stats_ctas_parts', {bucket: 0})
+      UNION ALL SELECT * FROM glue_get_partition_response('my_datalake.{GLUE_TEST_DB}.stats_ctas_parts', {bucket: 1})
+      UNION ALL SELECT * FROM glue_get_partition_response('my_datalake.{GLUE_TEST_DB}.stats_ctas_parts', {bucket: 2}))
+ORDER BY 1;
+----
+0	4	1
+1	3	1
+2	3	1
+
+foreach table stats_plain stats_parts stats_located stats_unknown stats_csv stats_ctas stats_ctas_parts
+
+statement ok
+DROP TABLE my_datalake.{GLUE_TEST_DB}.{table};
+
+endloop

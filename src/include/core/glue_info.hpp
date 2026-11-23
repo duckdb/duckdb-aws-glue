@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/optional.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
@@ -179,10 +180,25 @@ struct GlueViewInfo {
 	bool has_column_alias_list = false;
 };
 
+//! The numRows, numFiles and totalSize parameters of a table or partition
+struct GlueBasicStatistics {
+	idx_t num_rows = 0;
+	idx_t num_files = 0;
+	idx_t total_size = 0;
+
+	void Add(const GlueBasicStatistics &other) {
+		num_rows += other.num_rows;
+		num_files += other.num_files;
+		total_size += other.total_size;
+	}
+};
+
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location
 struct GluePartitionInput {
 	vector<string> values;
 	string location;
+	//! The statistics of the files written to it: set on a new partition, added to an existing one's
+	optional<GlueBasicStatistics> statistics;
 };
 
 //! A partition of a Hive table as registered in Glue: the partition values (in partition key order, as strings)

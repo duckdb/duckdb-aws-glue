@@ -261,6 +261,18 @@ their codec themselves.
   be one Hive uses for its file format (`MapredParquetInputFormat`, `TextInputFormat` or `CombineTextInputFormat` for
   csv and json, `AvroContainerInputFormat`) or empty: another engine's InputFormat means a layout DuckDB does not
   know, and files written into it could corrupt the table.
+- Parquet writes keep the `numRows`, `numFiles` and `totalSize` parameters (the basic statistics planners read)
+  current. A partition an `INSERT` or `CREATE TABLE ... AS` registers gets those of its files; an existing partition at
+  the directory written to gets them added (BatchUpdatePartition). An unpartitioned table keeps them as table
+  parameters: `CREATE TABLE ... AS`, and `CREATE TABLE` without `location`, start them at `0`, and every write adds
+  to them (UpdateTable, read again and retried when another client changed the table in between). Tables and
+  partitions without all three set to a count (created by another client without them, added with
+  `glue_add_partition` or `glue_repair_table`, or `-1` for unknown) are left as they are, and
+  `glue_set_table_location` / `glue_set_partition_location` remove them. They are updated after the files are
+  registered: a failure is logged as a warning, not an error, since the rows are in the table. Two clients appending
+  to the same existing partition at the same time can lose one update, and files a dropped table left at a new
+  table's default location are not counted. csv, json and avro writes record no statistics and leave existing ones
+  as they are.
 - The files of one `INSERT` or `CREATE TABLE ... AS` are named `<write id>_<file id>.<extension>`, with a new write
   id (a UUIDv7) per statement. The write is registered with the Glue transaction when it starts and completed when
   its partitions are registered; a write that is still registered when the transaction ends belongs to a statement
