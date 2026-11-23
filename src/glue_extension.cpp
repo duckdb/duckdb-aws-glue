@@ -16,6 +16,7 @@
 #include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_request_metrics.hpp"
 #include "core/glue_log_types.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
@@ -80,6 +81,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_partition_load_parallelism",
+	                          "The number of partitioned Glue tables a statement scans whose partitions are loaded "
+	                          "concurrently, when the first of its scans needs partitions. 1 loads each table's "
+	                          "partitions on its own, when its scan first needs them. Default 8.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(8));
+	config.AddExtensionOption("glue_partition_load_cooldown",
+	                          "After Glue throttles a concurrent partition load (glue_partition_load_parallelism), the "
+	                          "number of seconds every connection loads that Glue catalog's tables one at a time. "
+	                          "Default 300.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(300));
 	config.AddExtensionOption("glue_max_retries",
 	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
 	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "
@@ -166,11 +177,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "InternalServiceException, ...) fails the first attempt only. Empty, the default, injects "
 	    "nothing.",
 	    LogicalType::VARCHAR, Value(""), GlueAPI::CheckDebugFailPartitionRegistration, SetScope::SESSION, true);
+	config.AddExtensionOption("glue_debug_fail_partition_loads",
+	                          "For tests: an AWS error name (ThrottlingException, InternalServiceException, ...) that "
+	                          "every GetPartitions request of a concurrent partition load fails with, before it is "
+	                          "sent. A scan loading its own table's partitions is not affected. Empty, the default, "
+	                          "injects nothing.",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::SESSION, true);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory(instance);
 	RegisterGlueLogTypes(instance);
+	GlueRequestMetrics::Register(loader);
 
 	// Hive tables are read with read_parquet. A linked parquet is loaded as linked: autoloading would install it first
 	if (!instance.ExtensionIsLoaded("parquet")) {

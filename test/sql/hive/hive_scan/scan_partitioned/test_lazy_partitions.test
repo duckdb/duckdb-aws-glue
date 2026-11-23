@@ -10,24 +10,27 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.lp_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.lp_orders;
 
 statement ok
 SET enable_external_file_cache=false;
 
 statement ok
-CREATE TABLE my_datalake.default.lp_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.lp_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.lp_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15'), (3, 30.0, '2016-05-16');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.lp_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15'), (3, 30.0, '2016-05-16');
 
 # The Glue API calls since the last truncate_duckdb_logs(), by operation
 statement ok
@@ -50,7 +53,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-DESCRIBE my_datalake.default.lp_orders;
+DESCRIBE my_datalake.{GLUE_TEST_DB}.lp_orders;
 
 query II
 FROM glue_calls();
@@ -61,7 +64,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-CREATE VIEW lp_view AS SELECT * FROM my_datalake.default.lp_orders;
+CREATE VIEW lp_view AS SELECT * FROM my_datalake.{GLUE_TEST_DB}.lp_orders;
 
 query II
 FROM glue_calls();
@@ -72,7 +75,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-PREPARE lp_count AS SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = ?;
+PREPARE lp_count AS SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.lp_orders WHERE dt = ?;
 
 query II
 FROM glue_calls();
@@ -83,7 +86,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement error
-SELECT no_such_column FROM my_datalake.default.lp_orders;
+SELECT no_such_column FROM my_datalake.{GLUE_TEST_DB}.lp_orders;
 ----
 Binder Error
 
@@ -98,7 +101,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-EXPLAIN SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = '2016-05-15';
+EXPLAIN SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.lp_orders WHERE dt = '2016-05-15';
 
 query II
 FROM glue_calls();
@@ -111,7 +114,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query IIR
-SELECT a.dt, b.dt, a.amount + b.amount FROM my_datalake.default.lp_orders a JOIN my_datalake.default.lp_orders b ON a.id + 1 = b.id WHERE a.dt = '2016-05-14' AND b.dt >= '2016-05-15';
+SELECT a.dt, b.dt, a.amount + b.amount FROM my_datalake.{GLUE_TEST_DB}.lp_orders a JOIN my_datalake.{GLUE_TEST_DB}.lp_orders b ON a.id + 1 = b.id WHERE a.dt = '2016-05-14' AND b.dt >= '2016-05-15';
 ----
 2016-05-14	2016-05-15	30.0
 
@@ -126,7 +129,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query IR
-SELECT dt, sum(amount) FROM my_datalake.default.lp_orders WHERE dt >= '2016-05-15' GROUP BY dt ORDER BY dt;
+SELECT dt, sum(amount) FROM my_datalake.{GLUE_TEST_DB}.lp_orders WHERE dt >= '2016-05-15' GROUP BY dt ORDER BY dt;
 ----
 2016-05-15	20.0
 2016-05-16	30.0
@@ -150,7 +153,7 @@ SELECT count(*) FROM lp_view;
 # EXPLAIN shows the table location until the partitions are known; the counts of partitions kept and pruned are
 # reported once the filter has been applied
 query II
-EXPLAIN SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = '2016-05-15';
+EXPLAIN SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.lp_orders WHERE dt = '2016-05-15';
 ----
 physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
 
@@ -159,7 +162,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lp_orders', schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'}, partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/lp_orders', schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'}, partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
 ----
 2
 
@@ -173,7 +176,7 @@ DROP VIEW lp_view;
 # A prepared statement outlives the catalog it was bound against: the partitions are fetched through the catalog's
 # name, so executing it after a DETACH is a catalog error, not a read of a freed catalog
 statement ok
-PREPARE lp_detached AS SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = '2016-05-14';
+PREPARE lp_detached AS SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.lp_orders WHERE dt = '2016-05-14';
 
 statement ok
 DETACH my_datalake;
@@ -187,8 +190,9 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE my_datalake.default.lp_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.lp_orders;

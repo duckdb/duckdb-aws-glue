@@ -8,19 +8,22 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_partitioned_with_options;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options;
 
 # Hive partitions are columns, so the year is a column of the query rather than a year(ts) transform
 statement ok
-CREATE TABLE my_datalake.default.ctas_partitioned_with_options
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options
 PARTITIONED BY (category, year)
 WITH (
     'foo' = 'buzz'
@@ -33,7 +36,7 @@ FROM range(40);
 
 # partition columns come last, the rest keeps the query order
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ctas_partitioned_with_options' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ctas_partitioned_with_options' ORDER BY column_index;
 ----
 id	BIGINT
 ts	TIMESTAMP
@@ -41,13 +44,13 @@ category	VARCHAR
 year	BIGINT
 
 query I
-SELECT count(*) FROM my_datalake.default.ctas_partitioned_with_options;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options;
 ----
 40
 
 # partition values come from the directory names (range % 2 and range % 4 are correlated: 4 partitions of 10)
 query III
-SELECT category, year, count(*) FROM my_datalake.default.ctas_partitioned_with_options GROUP BY ALL ORDER BY ALL;
+SELECT category, year, count(*) FROM my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options GROUP BY ALL ORDER BY ALL;
 ----
 even	2020	10
 even	2022	10
@@ -55,29 +58,29 @@ odd	2021	10
 odd	2023	10
 
 query II
-SELECT id, ts FROM my_datalake.default.ctas_partitioned_with_options WHERE category = 'odd' AND year = 2023 ORDER BY id LIMIT 2;
+SELECT id, ts FROM my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options WHERE category = 'odd' AND year = 2023 ORDER BY id LIMIT 2;
 ----
 3	2023-06-15 12:00:00
 7	2023-06-15 12:00:00
 
 # the property landed in Glue
 query I
-SELECT parameters['foo'] FROM glue_get_table_response('my_datalake.default.ctas_partitioned_with_options');
+SELECT parameters['foo'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options');
 ----
 buzz
 
 # the table location in Glue
 query I
-SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ctas_partitioned_with_options' FROM glue_get_table_response('my_datalake.default.ctas_partitioned_with_options');
+SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/ctas_partitioned_with_options' FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options');
 ----
 true
 
 # appending into existing and new partitions (the table's column order puts the partition keys last)
 statement ok
-INSERT INTO my_datalake.default.ctas_partitioned_with_options (id, category, ts, year) VALUES (100, 'odd', '2023-06-15 12:00:00', 2023), (101, 'even', '2024-06-15 12:00:00', 2024);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options (id, category, ts, year) VALUES (100, 'odd', '2023-06-15 12:00:00', 2023), (101, 'even', '2024-06-15 12:00:00', 2024);
 
 query III
-SELECT category, year, count(*) FROM my_datalake.default.ctas_partitioned_with_options GROUP BY ALL ORDER BY ALL;
+SELECT category, year, count(*) FROM my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options GROUP BY ALL ORDER BY ALL;
 ----
 even	2020	10
 even	2022	10
@@ -87,18 +90,18 @@ odd	2023	11
 
 # an unpartitioned CTAS
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ctas_plain;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_plain;
 
 statement ok
-CREATE TABLE my_datalake.default.ctas_plain AS SELECT range AS id, range * 2 AS twice FROM range(10);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_plain AS SELECT range AS id, range * 2 AS twice FROM range(10);
 
 query II
-SELECT count(*), sum(twice) FROM my_datalake.default.ctas_plain;
+SELECT count(*), sum(twice) FROM my_datalake.{GLUE_TEST_DB}.ctas_plain;
 ----
 10	90
 
 statement ok
-DROP TABLE my_datalake.default.ctas_partitioned_with_options;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_partitioned_with_options;
 
 statement ok
-DROP TABLE my_datalake.default.ctas_plain;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_plain;

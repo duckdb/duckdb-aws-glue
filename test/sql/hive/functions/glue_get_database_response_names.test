@@ -8,11 +8,14 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
@@ -27,7 +30,7 @@ SELECT database_name FROM glue_get_database_response('my_datalake.db_response_na
 db_response_names
 
 statement ok
-USE my_datalake.default;
+USE my_datalake.{GLUE_TEST_DB};
 
 query I
 SELECT database_name FROM glue_get_database_response('db_response_names');
@@ -35,9 +38,9 @@ SELECT database_name FROM glue_get_database_response('db_response_names');
 db_response_names
 
 query I
-SELECT database_name FROM glue_get_database_response('default');
+SELECT database_name FROM glue_get_database_response('{GLUE_TEST_DB}');
 ----
-default
+{GLUE_TEST_DB}
 
 statement error
 SELECT * FROM glue_get_database_response('db_response_missing');

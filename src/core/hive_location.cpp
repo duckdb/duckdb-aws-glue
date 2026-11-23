@@ -23,6 +23,18 @@ bool LocationsOverlap(const string &a, const string &b) {
 	return a == b || StringUtil::StartsWith(a, b + "/") || StringUtil::StartsWith(b, a + "/");
 }
 
+string LocationScheme(const string &location) {
+	auto end = location.find("://");
+	if (end == string::npos) {
+		return string();
+	}
+	return StringUtil::Lower(location.substr(0, end));
+}
+
+bool IsS3Scheme(const string &scheme) {
+	return scheme == "s3" || scheme == "s3a" || scheme == "s3n";
+}
+
 bool LocationHasGlob(const string &location) {
 	return FileSystem::HasGlob(location);
 }

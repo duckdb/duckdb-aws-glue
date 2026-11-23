@@ -114,7 +114,7 @@ public:
 	}
 	//! Read 'column' as 'type', as the optimizer's type pushdown leaves a scan whose column a cast was pushed into
 	void Retype(const string &column, const LogicalType &type) {
-		auto &bind_data = get->bind_data->Cast<MultiFileBindData>();
+		auto &bind_data = get->bind_data.write().Cast<MultiFileBindData>();
 		for (idx_t i = 0; i < bind_data.names.size(); i++) {
 			if (bind_data.names[i].GetIdentifierName() == column) {
 				bind_data.types[i] = type;

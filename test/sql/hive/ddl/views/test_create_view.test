@@ -10,75 +10,80 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
+require-env GLUE_TEST_DB_SQL
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_simple;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_simple;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_aliased;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_aliased;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_nested;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_nested;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_mixed;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_mixed;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_defer;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_defer;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_secure;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_secure;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_recursive;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_recursive;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_star;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_star;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.cv_union;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_union;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.cv_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_orders;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.cv_later;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.cv_later;
 
 statement ok
-CREATE TABLE my_datalake.default.cv_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.cv_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.cv_orders VALUES (1, 10.0, '2024-01-01'), (2, 20.0, '2024-01-01'), (3, 30.0, '2024-01-02');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.cv_orders VALUES (1, 10.0, '2024-01-01'), (2, 20.0, '2024-01-01'), (3, 30.0, '2024-01-02');
 
 statement ok
-CREATE VIEW my_datalake.default.cv_simple AS SELECT id, amount FROM cv_orders WHERE id > 1;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_simple AS SELECT id, amount FROM cv_orders WHERE id > 1;
 
 query II
-SELECT * FROM my_datalake.default.cv_simple ORDER BY id;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_simple ORDER BY id;
 ----
 2	20.0
 3	30.0
 
 query IIII
 SELECT view_name, is_bound, column_count, tags['duckdb_view'] FROM duckdb_views()
-WHERE database_name = 'my_datalake' AND view_name = 'cv_simple';
+WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_simple';
 ----
 cv_simple	true	2	true
 
 # the stored SQL is the query as DuckDB prints it; its unqualified names belong to the view's database
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_simple';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_simple';
 ----
-CREATE VIEW "default".cv_simple AS SELECT id, amount FROM cv_orders WHERE (id > 1);
+CREATE VIEW {GLUE_TEST_DB_SQL}.cv_simple AS SELECT id, amount FROM cv_orders WHERE (id > 1);
 
 query II
-SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.cv_simple);
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.{GLUE_TEST_DB}.cv_simple);
 ----
 id	INTEGER
 amount	DOUBLE
@@ -89,12 +94,12 @@ statement ok
 CREATE SCHEMA my_datalake.cv_schema;
 
 statement ok
-CREATE VIEW my_datalake.cv_schema.cv_in_schema AS SELECT id FROM my_datalake.default.cv_orders;
+CREATE VIEW my_datalake.cv_schema.cv_in_schema AS SELECT id FROM my_datalake.{GLUE_TEST_DB}.cv_orders;
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_in_schema';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = 'cv_schema' AND view_name = 'cv_in_schema';
 ----
-CREATE VIEW cv_schema.cv_in_schema AS SELECT id FROM "default".cv_orders;
+CREATE VIEW cv_schema.cv_in_schema AS SELECT id FROM {GLUE_TEST_DB_SQL}.cv_orders;
 
 statement ok
 DROP VIEW my_datalake.cv_schema.cv_in_schema;
@@ -103,93 +108,93 @@ statement ok
 DROP SCHEMA my_datalake.cv_schema;
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'cv_simple';
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'cv_simple';
 ----
 0
 
 statement error
-CREATE VIEW my_datalake.default.cv_simple AS SELECT 1 AS x;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_simple AS SELECT 1 AS x;
 ----
-View with name "cv_simple" already exists in Glue database "default"
+View with name "cv_simple" already exists in Glue database "{GLUE_TEST_DB}"
 
 statement ok
-CREATE VIEW IF NOT EXISTS my_datalake.default.cv_simple AS SELECT 1 AS x;
+CREATE VIEW IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.cv_simple AS SELECT 1 AS x;
 
 query I
-SELECT count(*) FROM my_datalake.default.cv_simple;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.cv_simple;
 ----
 2
 
 statement ok
-CREATE OR REPLACE VIEW my_datalake.default.cv_simple AS SELECT id FROM cv_orders WHERE id = 3;
+CREATE OR REPLACE VIEW my_datalake.{GLUE_TEST_DB}.cv_simple AS SELECT id FROM cv_orders WHERE id = 3;
 
 query I
-SELECT * FROM my_datalake.default.cv_simple;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_simple;
 ----
 3
 
 statement error
-CREATE VIEW my_datalake.default.cv_orders AS SELECT 1 AS x;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_orders AS SELECT 1 AS x;
 ----
 Existing object cv_orders is of type Table, trying to create type View
 
 statement error
-CREATE TABLE IF NOT EXISTS my_datalake.default.cv_simple (x INTEGER);
+CREATE TABLE IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.cv_simple (x INTEGER);
 ----
 Existing object cv_simple is of type View, trying to create type Table
 
 statement error
-CREATE TABLE IF NOT EXISTS my_datalake.default.cv_simple AS SELECT 1 AS x;
+CREATE TABLE IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.cv_simple AS SELECT 1 AS x;
 ----
 Existing object cv_simple is of type View, trying to create type Table
 
 # a column alias list reaches both the stored columns and the SQL (via the duckdb_view_column_alias_list parameter),
 # so re-running the SQL creates a view with the same column names
 statement ok
-CREATE VIEW my_datalake.default.cv_aliased(k, a) AS SELECT id, amount FROM cv_orders;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_aliased(k, a) AS SELECT id, amount FROM cv_orders;
 
 query II
-SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.cv_aliased);
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.{GLUE_TEST_DB}.cv_aliased);
 ----
 k	INTEGER
 a	DOUBLE
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_aliased';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_aliased';
 ----
-CREATE VIEW "default".cv_aliased (k, a) AS SELECT id, amount FROM cv_orders;
+CREATE VIEW {GLUE_TEST_DB_SQL}.cv_aliased (k, a) AS SELECT id, amount FROM cv_orders;
 
 # an alias list over * or a set operation works the same way
 statement ok
-CREATE VIEW my_datalake.default.cv_star(x, y) AS SELECT * FROM cv_orders;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_star(x, y) AS SELECT * FROM cv_orders;
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_star';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_star';
 ----
-CREATE VIEW "default".cv_star (x, y, dt) AS SELECT * FROM cv_orders;
+CREATE VIEW {GLUE_TEST_DB_SQL}.cv_star (x, y, dt) AS SELECT * FROM cv_orders;
 
 query II
-SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.cv_star);
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.{GLUE_TEST_DB}.cv_star);
 ----
 x	INTEGER
 y	DOUBLE
 dt	VARCHAR
 
 query III
-SELECT * FROM my_datalake.default.cv_star WHERE x = 3;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_star WHERE x = 3;
 ----
 3	30.0	2024-01-02
 
 statement ok
-CREATE VIEW my_datalake.default.cv_union(n) AS SELECT id FROM cv_orders UNION ALL SELECT id + 10 FROM cv_orders;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_union(n) AS SELECT id FROM cv_orders UNION ALL SELECT id + 10 FROM cv_orders;
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_union';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_union';
 ----
-CREATE VIEW "default".cv_union (n) AS (SELECT id FROM cv_orders) UNION ALL (SELECT (id + 10) FROM cv_orders);
+CREATE VIEW {GLUE_TEST_DB_SQL}.cv_union (n) AS (SELECT id FROM cv_orders) UNION ALL (SELECT (id + 10) FROM cv_orders);
 
 query I
-SELECT count(*) FROM my_datalake.default.cv_union WHERE n > 5;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.cv_union WHERE n > 5;
 ----
 3
 
@@ -201,128 +206,128 @@ statement ok
 INSERT INTO names VALUES (1, 'one'), (2, 'two');
 
 statement ok
-CREATE VIEW my_datalake.default.cv_nested AS SELECT k, a FROM cv_aliased WHERE k < 3;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_nested AS SELECT k, a FROM cv_aliased WHERE k < 3;
 
 query III
-SELECT n.name, v.k, v.a FROM my_datalake.default.cv_nested v JOIN names n USING (k) ORDER BY k;
+SELECT n.name, v.k, v.a FROM my_datalake.{GLUE_TEST_DB}.cv_nested v JOIN names n USING (k) ORDER BY k;
 ----
 one	1	10.0
 two	2	20.0
 
 # names are stored as written (a table written with the catalog keeps its database, not the catalog name)
 statement ok
-CREATE VIEW my_datalake.default.cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM t JOIN my_datalake.default.cv_orders o ON t.id = o.id WHERE o.dt = '2024-01-02';
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM t JOIN my_datalake.{GLUE_TEST_DB}.cv_orders o ON t.id = o.id WHERE o.dt = '2024-01-02';
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_mixed';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_mixed';
 ----
-CREATE VIEW "default".cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM (t INNER JOIN "default".cv_orders AS o ON ((t.id = o.id))) WHERE (o.dt = '2024-01-02');
+CREATE VIEW {GLUE_TEST_DB_SQL}.cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM (t INNER JOIN {GLUE_TEST_DB_SQL}.cv_orders AS o ON ((t.id = o.id))) WHERE (o.dt = '2024-01-02');
 
 query I
-SELECT * FROM my_datalake.default.cv_mixed;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_mixed;
 ----
 3
 
 statement error
-CREATE VIEW my_datalake.default.cv_defer WITH (DEFER_BINDING) AS SELECT id FROM cv_later;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_defer WITH (DEFER_BINDING) AS SELECT id FROM cv_later;
 ----
 Glue views can not be created WITH (DEFER_BINDING) yet
 
 statement error
-CREATE OR REPLACE VIEW my_datalake.default.cv_simple WITH (DEFER_BINDING) AS SELECT id FROM cv_orders;
+CREATE OR REPLACE VIEW my_datalake.{GLUE_TEST_DB}.cv_simple WITH (DEFER_BINDING) AS SELECT id FROM cv_orders;
 ----
 Glue views can not be created WITH (DEFER_BINDING) yet
 
 # DuckDB does not bind IF NOT EXISTS of an existing view
 statement ok
-CREATE VIEW IF NOT EXISTS my_datalake.default.cv_simple WITH (DEFER_BINDING) AS SELECT id FROM cv_later;
+CREATE VIEW IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.cv_simple WITH (DEFER_BINDING) AS SELECT id FROM cv_later;
 
 query I
-SELECT * FROM my_datalake.default.cv_simple;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_simple;
 ----
 3
 
 # bound on use: the view reads its table as it is then
 statement ok
-CREATE TABLE my_datalake.default.cv_later (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.cv_later (id INTEGER);
 
 statement ok
-CREATE VIEW my_datalake.default.cv_defer AS SELECT id FROM cv_later;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_defer AS SELECT id FROM cv_later;
 
 statement ok
-DROP TABLE my_datalake.default.cv_later;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.cv_later;
 
 statement error
-SELECT * FROM my_datalake.default.cv_defer;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_defer;
 ----
 Table with name cv_later does not exist
 
 statement ok
-CREATE TABLE my_datalake.default.cv_later (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.cv_later (id INTEGER);
 
 statement ok
-INSERT INTO my_datalake.default.cv_later VALUES (7);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.cv_later VALUES (7);
 
 query I
-SELECT * FROM my_datalake.default.cv_defer;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_defer;
 ----
 7
 
 statement ok
-CREATE SECURE VIEW my_datalake.default.cv_secure AS SELECT id FROM cv_orders;
+CREATE SECURE VIEW my_datalake.{GLUE_TEST_DB}.cv_secure AS SELECT id FROM cv_orders;
 
 query I
-SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_secure';
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name = 'cv_secure';
 ----
-CREATE SECURE VIEW "default".cv_secure AS SELECT id FROM cv_orders;
+CREATE SECURE VIEW {GLUE_TEST_DB_SQL}.cv_secure AS SELECT id FROM cv_orders;
 
 statement ok
-CREATE VIEW my_datalake.default.cv_recursive AS SELECT 1 AS x;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.cv_recursive AS SELECT 1 AS x;
 
 statement error
-CREATE OR REPLACE VIEW my_datalake.default.cv_recursive AS SELECT x FROM cv_recursive;
+CREATE OR REPLACE VIEW my_datalake.{GLUE_TEST_DB}.cv_recursive AS SELECT x FROM cv_recursive;
 ----
-Glue view "default.cv_recursive" can not be created: its query reads the view itself
+Glue view "{GLUE_TEST_DB}.cv_recursive" can not be created: its query reads the view itself
 
 query I
-SELECT * FROM my_datalake.default.cv_recursive;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.cv_recursive;
 ----
 1
 
 query I
-SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'cv_%';
+SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND view_name LIKE 'cv_%';
 ----
 9
 
 statement ok
-DROP VIEW my_datalake.default.cv_union;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_union;
 
 statement ok
-DROP VIEW my_datalake.default.cv_star;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_star;
 
 statement ok
-DROP VIEW my_datalake.default.cv_recursive;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_recursive;
 
 statement ok
-DROP VIEW my_datalake.default.cv_secure;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_secure;
 
 statement ok
-DROP VIEW my_datalake.default.cv_defer;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_defer;
 
 statement ok
-DROP VIEW my_datalake.default.cv_mixed;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_mixed;
 
 statement ok
-DROP VIEW my_datalake.default.cv_nested;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_nested;
 
 statement ok
-DROP VIEW my_datalake.default.cv_aliased;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_aliased;
 
 statement ok
-DROP VIEW my_datalake.default.cv_simple;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.cv_simple;
 
 statement ok
-DROP TABLE my_datalake.default.cv_later;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.cv_later;
 
 statement ok
-DROP TABLE my_datalake.default.cv_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.cv_orders;

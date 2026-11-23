@@ -20,30 +20,53 @@ static bool IsNameOperand(const Expression &expr) {
 	       ExpressionFilter::IsSimpleFilterColumnRef(*function.GetChildren()[0]);
 }
 
-bool TryGetNameEquality(optional_ptr<const TableFilter> filter, const char *caller, string &name) {
+//! The constant 'filter' compares its column (as 'is_operand' accepts it) to for equality, nullptr if it does not
+static optional_ptr<const Value> GetEqualityConstant(optional_ptr<const TableFilter> filter, const char *caller,
+                                                     bool (*is_operand)(const Expression &)) {
 	if (!filter) {
-		return false;
+		return nullptr;
 	}
 	auto &expr = *ExpressionFilter::GetExpressionFilter(*filter, caller).expr;
 	if (!BoundComparisonExpression::IsComparison(expr) || expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
-		return false;
+		return nullptr;
 	}
 	auto &comparison = expr.Cast<BoundFunctionExpression>();
 	auto &left = BoundComparisonExpression::Left(comparison);
 	auto &right = BoundComparisonExpression::Right(comparison);
 	optional_ptr<const Expression> constant;
-	if (IsNameOperand(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+	if (is_operand(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 		constant = right;
-	} else if (IsNameOperand(right) && left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+	} else if (is_operand(right) && left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
 		constant = left;
 	} else {
-		return false;
+		return nullptr;
 	}
 	auto &value = constant->Cast<BoundConstantExpression>().GetValue();
-	if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
+	if (value.IsNull()) {
+		return nullptr;
+	}
+	return &value;
+}
+
+bool TryGetNameEquality(optional_ptr<const TableFilter> filter, const char *caller, string &name) {
+	auto value = GetEqualityConstant(filter, caller, IsNameOperand);
+	if (!value || value->type().id() != LogicalTypeId::VARCHAR) {
 		return false;
 	}
-	name = StringValue::Get(value);
+	name = StringValue::Get(*value);
+	return true;
+}
+
+bool TryGetOidEquality(optional_ptr<const TableFilter> filter, const char *caller, idx_t &oid) {
+	auto value = GetEqualityConstant(filter, caller, ExpressionFilter::IsSimpleFilterColumnRef);
+	if (!value || !value->type().IsIntegral()) {
+		return false;
+	}
+	auto converted = value->DefaultTryCastAs(LogicalType::UBIGINT);
+	if (!converted) {
+		return false;
+	}
+	oid = converted->GetValue<uint64_t>();
 	return true;
 }
 

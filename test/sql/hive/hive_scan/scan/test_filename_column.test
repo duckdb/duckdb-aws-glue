@@ -10,36 +10,39 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.path_flat;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.path_flat;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.path_flat_csv;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.path_flat_csv;
 
 statement ok
-CREATE TABLE my_datalake.default.path_flat (id INTEGER, name VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.path_flat (id INTEGER, name VARCHAR);
 
 # every insert writes its own data file below the table location
 statement ok
-INSERT INTO my_datalake.default.path_flat VALUES (1, 'one'), (2, 'two');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_flat VALUES (1, 'one'), (2, 'two');
 
 statement ok
-INSERT INTO my_datalake.default.path_flat VALUES (3, 'three');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_flat VALUES (3, 'three');
 
 statement ok
-INSERT INTO my_datalake.default.path_flat VALUES (4, 'four'), (5, 'five'), (6, 'six');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_flat VALUES (4, 'four'), (5, 'five'), (6, 'six');
 
 # The data files, read directly: every row with the file it is in
 statement ok
 CREATE TEMP TABLE flat_files AS
-SELECT id, filename AS path FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*');
+SELECT id, filename AS path FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat/*');
 
 query II
 SELECT count(*), count(DISTINCT path) FROM flat_files;
@@ -50,12 +53,12 @@ SELECT count(*), count(DISTINCT path) FROM flat_files;
 # filename is not one of the table's columns
 #---------------------------------------------------------------------------
 query II
-SELECT * FROM my_datalake.default.path_flat ORDER BY id LIMIT 1;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.path_flat ORDER BY id LIMIT 1;
 ----
 1	one
 
 query I
-SELECT count(*) FROM (DESCRIBE my_datalake.default.path_flat);
+SELECT count(*) FROM (DESCRIBE my_datalake.{GLUE_TEST_DB}.path_flat);
 ----
 2
 
@@ -63,13 +66,13 @@ SELECT count(*) FROM (DESCRIBE my_datalake.default.path_flat);
 # every row names the file it is in
 #---------------------------------------------------------------------------
 query I
-SELECT count(*) FROM my_datalake.default.path_flat t JOIN flat_files f ON t.id = f.id AND t.filename = f.path;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.path_flat t JOIN flat_files f ON t.id = f.id AND t.filename = f.path;
 ----
 6
 
 query III
-SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/%.parquet'
-FROM my_datalake.default.path_flat ORDER BY id;
+SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat/%.parquet'
+FROM my_datalake.{GLUE_TEST_DB}.path_flat ORDER BY id;
 ----
 1	one	true
 2	two	true
@@ -80,12 +83,12 @@ FROM my_datalake.default.path_flat ORDER BY id;
 
 # the rows of one insert share a file
 query II
-SELECT count(DISTINCT filename), count(*) FROM my_datalake.default.path_flat;
+SELECT count(DISTINCT filename), count(*) FROM my_datalake.{GLUE_TEST_DB}.path_flat;
 ----
 3	6
 
 query I
-SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat GROUP BY filename ORDER BY ids;
+SELECT list(id ORDER BY id) AS ids FROM my_datalake.{GLUE_TEST_DB}.path_flat GROUP BY filename ORDER BY ids;
 ----
 [1, 2]
 [3]
@@ -93,13 +96,13 @@ SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat GROUP BY f
 
 # only filename, no data column
 query I
-SELECT count(DISTINCT filename) FROM my_datalake.default.path_flat;
+SELECT count(DISTINCT filename) FROM my_datalake.{GLUE_TEST_DB}.path_flat;
 ----
 3
 
 # a table alias and a quoted, qualified name
 query I
-SELECT count(*) FROM my_datalake.default.path_flat AS t WHERE t.filename IS NOT NULL;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.path_flat AS t WHERE t.filename IS NOT NULL;
 ----
 6
 
@@ -107,7 +110,7 @@ SELECT count(*) FROM my_datalake.default.path_flat AS t WHERE t.filename IS NOT 
 # filters on filename
 #---------------------------------------------------------------------------
 query I
-SELECT id FROM my_datalake.default.path_flat
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.path_flat
 WHERE filename = (SELECT path FROM flat_files WHERE id = 5)
 ORDER BY id;
 ----
@@ -116,7 +119,7 @@ ORDER BY id;
 6
 
 query I
-SELECT id FROM my_datalake.default.path_flat
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.path_flat
 WHERE filename IN (SELECT path FROM flat_files WHERE id IN (1, 3)) AND id > 1
 ORDER BY id;
 ----
@@ -124,12 +127,12 @@ ORDER BY id;
 3
 
 query I
-SELECT count(*) FROM my_datalake.default.path_flat WHERE filename = 'no such file';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.path_flat WHERE filename = 'no such file';
 ----
 0
 
 query I
-SELECT count(*) FROM my_datalake.default.path_flat WHERE filename LIKE '%/default/path_flat/%';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.path_flat WHERE filename LIKE '%/{GLUE_TEST_DB}/path_flat/%';
 ----
 6
 
@@ -137,14 +140,14 @@ SELECT count(*) FROM my_datalake.default.path_flat WHERE filename LIKE '%/defaul
 # ORDER BY ... LIMIT (late materialization joins the scan to a copy of itself)
 #---------------------------------------------------------------------------
 query II
-SELECT t.id, t.filename = f.path FROM my_datalake.default.path_flat t JOIN flat_files f USING (id)
+SELECT t.id, t.filename = f.path FROM my_datalake.{GLUE_TEST_DB}.path_flat t JOIN flat_files f USING (id)
 ORDER BY id DESC LIMIT 2;
 ----
 6	true
 5	true
 
 query I
-SELECT id FROM my_datalake.default.path_flat ORDER BY filename = (SELECT path FROM flat_files WHERE id = 3) DESC, id LIMIT 2;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.path_flat ORDER BY filename = (SELECT path FROM flat_files WHERE id = 3) DESC, id LIMIT 2;
 ----
 3
 1
@@ -153,34 +156,34 @@ SELECT id FROM my_datalake.default.path_flat ORDER BY filename = (SELECT path FR
 # files that are not data (_SUCCESS, .crc) are not read, so never show up as a filename
 #---------------------------------------------------------------------------
 statement ok
-COPY (SELECT 99 AS id, 'hidden' AS name) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/_hidden.parquet';
+COPY (SELECT 99 AS id, 'hidden' AS name) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat/_hidden.parquet';
 
 query II
-SELECT count(*), count(*) FILTER (filename LIKE '%/_hidden.parquet') FROM my_datalake.default.path_flat;
+SELECT count(*), count(*) FILTER (filename LIKE '%/_hidden.parquet') FROM my_datalake.{GLUE_TEST_DB}.path_flat;
 ----
 6	0
 
 # nor are an EMR directory marker (<name>_$folder$; given content here so that its name, not its size, is what skips
 # it) and a zero-byte object, neither of which is a parquet file
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/sub_$folder$' (FORMAT csv, HEADER false);
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat/sub_$folder$' (FORMAT csv, HEADER false);
 
 statement ok
-COPY (SELECT 1 AS id WHERE false) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/part-00007' (FORMAT csv, HEADER false);
+COPY (SELECT 1 AS id WHERE false) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat/part-00007' (FORMAT csv, HEADER false);
 
 query I
-SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*') WHERE file LIKE '%_$folder$' OR file LIKE '%part-00007';
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat/*') WHERE file LIKE '%_$folder$' OR file LIKE '%part-00007';
 ----
 2
 
 # the marker has content and the placeholder has none, so each is skipped by its own rule
 query II
-SELECT size > 0, (SELECT size FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/part-00007')) FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/sub_$folder$');
+SELECT size > 0, (SELECT size FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat/part-00007')) FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat/sub_$folder$');
 ----
 true	0
 
 query II
-SELECT count(*), count(*) FILTER (filename LIKE '%_$folder$' OR filename LIKE '%part-00007') FROM my_datalake.default.path_flat;
+SELECT count(*), count(*) FILTER (filename LIKE '%_$folder$' OR filename LIKE '%part-00007') FROM my_datalake.{GLUE_TEST_DB}.path_flat;
 ----
 6	0
 
@@ -188,17 +191,17 @@ SELECT count(*), count(*) FILTER (filename LIKE '%_$folder$' OR filename LIKE '%
 # the same for a csv table
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.path_flat_csv (id INTEGER, name VARCHAR) WITH (format = 'csv');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.path_flat_csv (id INTEGER, name VARCHAR) WITH (format = 'csv');
 
 statement ok
-INSERT INTO my_datalake.default.path_flat_csv VALUES (1, 'one'), (2, 'two');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_flat_csv VALUES (1, 'one'), (2, 'two');
 
 statement ok
-INSERT INTO my_datalake.default.path_flat_csv VALUES (3, 'three');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_flat_csv VALUES (3, 'three');
 
 query II
-SELECT id, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat_csv/%.csv'
-FROM my_datalake.default.path_flat_csv ORDER BY id;
+SELECT id, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat_csv/%.csv'
+FROM my_datalake.{GLUE_TEST_DB}.path_flat_csv ORDER BY id;
 ----
 1	true
 2	true
@@ -206,14 +209,14 @@ FROM my_datalake.default.path_flat_csv ORDER BY id;
 
 # the csv files, read directly
 query I
-SELECT count(*) FROM my_datalake.default.path_flat_csv t
-JOIN read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat_csv/*', columns = {id: 'INTEGER', name: 'VARCHAR'}, header = false) f
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.path_flat_csv t
+JOIN read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat_csv/*', columns = {id: 'INTEGER', name: 'VARCHAR'}, header = false) f
 ON t.id = f.id AND t.filename = f.filename;
 ----
 3
 
 query I
-SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat_csv GROUP BY filename ORDER BY ids;
+SELECT list(id ORDER BY id) AS ids FROM my_datalake.{GLUE_TEST_DB}.path_flat_csv GROUP BY filename ORDER BY ids;
 ----
 [1, 2]
 [3]
@@ -222,13 +225,13 @@ SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat_csv GROUP 
 # hive_scan() over the same files
 #---------------------------------------------------------------------------
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat', schema := {id: 'INTEGER', name: 'VARCHAR'}) t
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_flat', schema := {id: 'INTEGER', name: 'VARCHAR'}) t
 JOIN flat_files f ON t.id = f.id AND t.filename = f.path;
 ----
 6
 
 statement ok
-DROP TABLE my_datalake.default.path_flat;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.path_flat;
 
 statement ok
-DROP TABLE my_datalake.default.path_flat_csv;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.path_flat_csv;

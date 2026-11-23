@@ -1,0 +1,16 @@
+# Tests that list or count what the whole Glue account holds, so they must not run while another shard creates databases.
+# scripts/shard_tests.py --serial prints them; the cloud workflow runs them after the shards, on the default database.
+test/sql/hive/catalog/columns_table_lookup.test
+test/sql/hive/catalog/schema_from_table.test
+test/sql/hive/catalog/show_tables_pruning.test
+test/sql/hive/ddl/create_table/location_in_attach/test_create_hive_table.test
+test/sql/hive/ddl/create_table/location_in_attach/test_create_hive_table_partitioned.test
+test/sql/hive/ddl/create_table/location_in_create_table/test_create_hive_table.test
+test/sql/hive/ddl/create_table/location_in_create_table/test_create_hive_table_partitioned.test
+test/sql/hive/ddl/ddl_in_transaction.test
+test/sql/hive/ddl/drop_schema/drop_schema_restrict.test
+test/sql/hive/ddl/drop_schema/list_tables_of_dropped_database.test
+test/sql/hive/ddl/nested_schema.test
+test/sql/hive/ddl/views/test_view_external_read_rules.test
+test/sql/hive/ddl/views/test_view_listing.test
+test/sql/hive/hive_scan/scan/test_footer_statistics_dotted_names.test

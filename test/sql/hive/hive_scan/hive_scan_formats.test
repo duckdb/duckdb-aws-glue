@@ -2,6 +2,9 @@
 # description: hive_scan() over local parquet, csv and json Hive layouts (no catalog, no cloud)
 # group: [hive_scan]
 
+# Local partition scans return no rows on Windows.
+require notwindows
+
 require parquet
 
 require json

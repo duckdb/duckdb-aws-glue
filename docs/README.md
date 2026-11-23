@@ -187,7 +187,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   `bigint` to `int`, `double` to `int` or `string` to `int` do not. Nested types are not checked.
 - Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
   `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
-  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
+  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too. Filters that depend only on
+  `"$path"` or `filename` are applied to listed paths before files are opened, so nonmatching files are not read; the
+  relevant file locations are still listed.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
@@ -218,8 +220,10 @@ their codec themselves.
   parameters, except other engines' spellings of options this extension spells differently, which would do nothing
   there: `partitioned_by`, `partitioning`, `partition_by`, `partition_columns`, `partition_keys` and `PartitionKeys`
   (use `PARTITIONED BY (...)`), `external_location` (use `location`) and
-  `field_delimiter` (use `delimiter`) are refused. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
-  `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
+  `field_delimiter` (use `delimiter`) are refused. Column types are stored as Hive types. `HUGEINT` (e.g. `sum()` of
+  an integer column) is stored as `decimal(38,0)`, and `CREATE TABLE ... AS` writes it as such, so a value beyond 38
+  digits fails the statement. Other DuckDB types without a Hive type are refused, e.g. `UBIGINT`, `UHUGEINT`,
+  `INTERVAL` and `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
   `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
@@ -338,6 +342,14 @@ a file added to an existing partition is seen by the next query (the scans of on
 With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the connection's later transactions. It is
 per connection — two connections never share one — so another connection's write stays unseen until something clears
 this connection's cache: a write through it, a rollback, or DETACH.
+
+Listings follow the same rule. `SHOW TABLES`, `SHOW SCHEMAS`, `duckdb_tables()`, `duckdb_schemas()` and the other
+catalog functions list a database's tables, or the catalog's databases, from Glue once per transaction — once per
+connection under `'connection'` scope — and reuse that listing until the cache is cleared. A table another client
+created, replaced or dropped, or a database it created or dropped, shows up in the next transaction's listing. The cost
+is one `GetTables` per listed database per statement: an unfiltered `duckdb_tables()`, `duckdb_columns()` or
+`SHOW ALL TABLES` lists every database of the catalog on every statement. `SET glue_metadata_cache_scope = 'connection'`
+keeps the listing for the connection, as before.
 
 ## Views
 
@@ -474,7 +486,7 @@ query.
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
 | `CALL glue_set_partition_location('cat.db.t', {dt: '2016-05-14', country: 'IN'}, 's3://...')` | `ALTER TABLE PARTITION (...) SET LOCATION '...'` |
 | `CALL glue_set_table_location('cat.db.t', 's3://...')` | `ALTER TABLE SET LOCATION '...'`; existing partitions keep their locations, new ones land under the new location |
-| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`) |
+| `CALL glue_repair_table('cat.db.t')` | `MSCK REPAIR TABLE`: registers the Hive `<key>=<value>` partition directories under the table location that are not in Glue yet; one row per added partition (a typed column per partition key plus `location`); with `missing := true` also one per registered partition that is gone, and a `status` column (`added` or `missing`) |
 
 The functions that change Glue are called with `CALL`, outside a `BEGIN` transaction, since Glue has no transactions
 (see [Writing](#writing)).
@@ -495,10 +507,18 @@ ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
 
 Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
 becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
-statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The checks fetch
-the partitions they look at with `BatchGetPartition`, and consecutive drops go out as `BatchDeletePartition` calls of
-up to 25 partitions, so dropping partitions needs `glue:BatchGetPartition` and `glue:BatchDeletePartition`. The table
-name may be partially qualified; it is resolved like in a query.
+statement that fails a check changes nothing. Consecutive adds go out as one `BatchCreatePartition` call and consecutive
+drops as `BatchDeletePartition` calls of up to 25 partitions. When another client registers or drops one of the
+partitions between the check and these calls, the statement fails there, and the actions before it stay applied. Adding
+or dropping the same partition twice in one statement is not an error. The checks fetch the partitions they look at with
+`BatchGetPartition`, so besides `glue:BatchCreatePartition` and `glue:BatchDeletePartition`, adding and dropping
+partitions need `glue:BatchGetPartition`, unless every add has `IF NOT EXISTS` and every drop `IF EXISTS`. Renaming a
+partition needs `glue:BatchGetPartition`, `glue:GetPartition` and `glue:UpdatePartition`. The table name may be
+partially qualified; it is resolved like in a query. `glue_add_partition`, `glue_drop_partition`,
+`glue_rename_partition`, `glue_set_partition_location` and `glue_set_table_location` are `glue_alter_table` with their
+one action, so they check their arguments and call Glue as the SQL form does. For example, a location must be an `s3://`
+or `s3a://` location for a table in S3 (a table at a local path takes local paths), and a NULL `location` of
+`glue_add_partition` is the default one.
 
 `glue_partitions` lists every registered partition with a typed column per partition key, its `location` and
 `partition_values`, the strings Glue stores. A typed column is NULL for the NULL partition (Glue stores
@@ -517,8 +537,11 @@ WHERE (dt IS NULL) <> (partition_values[1] = '__HIVE_DEFAULT_PARTITION__')
 the partitions Glue does not have yet with `BatchCreatePartition`. A partition is a directory with one `<key>=<value>`
 component per partition key, in partition key order (keys compare case-insensitively); it is registered at that
 directory, with the values unescaped and cast to the key types (`year=07` is `7`). Directories that do not follow this
-scheme, whose values do not cast, that are already the location of a partition, or that hold no file a scan would read
-(only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. A table with another
+scheme, whose values are empty or do not cast, that are already the location of a partition, or that hold no file a
+scan would read (only `_`/`.` prefixed, `_$folder$` or empty objects) are ignored. It never removes partitions. With
+`missing := true` it also reports the registered partitions whose location is below the table location but holds no
+file at all, with `status` `missing`, and keeps them (partitions located elsewhere are not listed, so they are not
+checked). A table with another
 engine's InputFormat over a Hive SerDe (one INSERT refuses too) is refused: its files are not laid out the way Hive
 writes them.
 
@@ -534,6 +557,22 @@ descriptor with its columns, which the scan checks the partitions it reads again
 
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
+
+Each scan fetches its table's partitions when it first needs them: at filter pushdown when a filter on a partition
+key is pushed into it, otherwise when join ordering first estimates it. For a statement that scans several
+partitioned tables, that is one table after another. So when the first scan of a statement needs partitions, the
+partitions of every partitioned table its scans read that no cache holds yet are fetched concurrently,
+`glue_partition_load_parallelism` tables at a time (default 8; each with its `glue_get_partitions_segments`
+requests), and the scans take them from the query's cache. Subqueries, `UNION ALL` branches and CTEs are included; a
+scan the optimizer removed before then (e.g. `WHERE 1 = 0`) is not. A table alone in its catalog is left to its scan.
+
+When a request fails, the requests of that catalog not sent yet are not sent (other catalogs still prefetch), and the
+tables not fetched are fetched by their scans as before, which raise the error if it happens again. When Glue throttled
+a request (`ThrottlingException`, `SlowDown`, HTTP 429), no partitions are prefetched from that Glue catalog (account,
+region and endpoint; for `ATTACH ':'` the account Glue reports) for `glue_partition_load_cooldown` seconds (default
+300), in any connection: each connection compares the time of the last throttled prefetch with its own setting. Each prefetch is logged as a `GlueScan` event
+`prefetch`, its `detail` naming how many tables it fetched and why the others were not.
+`SET glue_partition_load_parallelism = 1` turns the prefetch off.
 
 ## Inspecting tables
 
@@ -584,6 +623,31 @@ where the SDK has none).
 `connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
 logged.
 
+With profiling enabled (`SET enable_profiling = 'json'`), the query profile reports what a query asked of Glue.
+`duckdb_available_metrics()` lists the metrics. A metric the query did not touch is absent.
+
+- `glue.requests`: Glue requests the AWS SDK attempted, every attempt counted, so retries and pages are included. It
+  does not count the credential calls of an AWS credential chain.
+- `glue.request_time`: time the query spent inside Glue API calls, in seconds, including the retries and the time the
+  AWS SDK waits between them (backoff). The parallel `GetPartitions` segments of one call are timed once, as the time
+  the query waited for all of them. Calls that run at the same time on different threads are each timed, so their sum
+  can exceed the query's wall time. It includes creating the Glue client for the first call, which reads the secret.
+- `glue.retries`: attempts the AWS SDK repeated after a failed one. Each of them is also counted in `glue.requests`.
+
+All three work with either HTTP client. A `CREATE TABLE AS` makes two calls outside the query's profile, a table lookup
+when it starts and a table drop when it is rolled back, and these are neither counted nor timed.
+
+A query that fails while it is bound, for example on a missing table (`GetTable` returns `EntityNotFound`), writes a
+profile without a `glue` entry, because DuckDB only gathers the metrics once a plan exists. Detail per request is in
+`glue_requests()` and detail per table scan is in the `GlueScan` log, both below.
+
+```sql
+SET enable_profiling = 'json';
+SET profiling_output = 'profile.json';
+SELECT count(*) FROM my_datalake.default.orders;
+SELECT (j::VARIANT).glue.requests, (j::VARIANT).glue.request_time FROM read_json_objects('profile.json') t(j);
+```
+
 The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
 `scan_id` that numbers the scans of a query from 1:
 
@@ -610,8 +674,7 @@ The `GlueRetry` log type (`WARNING`) records each retry the AWS SDK's retry stra
 before the wait, with either HTTP client: the `error` that caused it (e.g. `ThrottlingException`), its HTTP `status`,
 the `retry` number (1 for the first) and the `request_id` of the failed attempt. `status` is NULL when the request got
 no response, `error` and `request_id` when the SDK has none (e.g. a dropped connection). The retry limit is
-`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew does not go through the
-retry strategy and is not logged.
+`glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew is reported like any other.
 
 ```sql
 CALL enable_logging('GlueRetry', storage = 'memory');
@@ -640,7 +703,9 @@ database with ThrottlingException, letting the SDK's retries through. A table na
 may not describe, as Lake Formation leaves it: GetTable on it fails with AccessDeniedException and GetTables leaves it
 out. Tests that need the proxy are skipped without it. It
 also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
-`link_db` as Glue does through a database resource link whose target is `target_db`.
+`link_db` as Glue does through a database resource link whose target is `target_db`, and `GLUE_ENDPOINT_ALIAS`: moto
+under another URL, which is another Glue catalog to the prefetch cool-down (`glue_partition_load_cooldown`), which
+outlives a test's database.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
@@ -737,7 +802,32 @@ their timings (5 runs each) in two jobs of about three minutes, so it runs only 
 queries. The parquet job runs `benchmark/*.benchmark`, the parquet benchmarks of `benchmark/pushdown/` and
 `benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
 `benchmark/pushdown/` and `benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
-other queries and the json and avro TPC benchmarks only run locally.
+other queries and the json and avro TPC benchmarks only run locally. Six more jobs plan all 99 TPC-DS queries
+(`benchmark/tpcds/planning/local_sf1/`, below), about seven minutes each.
+
+`benchmark/tpcds/planning/local_sf1/` plans (`EXPLAIN`) the 99 TPC-DS queries at SF1 on parquet tables in the local
+Glue whose fact tables have one partition per day, as many as at SF100, so planning makes as many Glue and S3
+requests as on the cloud tables. Its load writes the tables through moto and SeaweedFS; the queries are planned
+through the latency proxies of `scripts/docker-compose.yml` (`scripts/latency_proxy.py`, ports 5558 and 9101), which
+delay each Glue request by 40 ms (at most 10 at a time) and each S3 request by 15 ms. A request that waits for
+another one adds its delay and requests in flight together share it, so a change that makes Glue calls or listings
+serial shows up as time, as it does against AWS. The delays are fitted to the planning times of the cloud tables
+from a GitHub runner (`CloudTPCDSBenchmark.yml`: 109 s for the 99 queries, 123 s locally). The proxies keep the
+answers to reads, as moto takes seconds for a GetPartitions of 1800 partitions: restart them
+(`docker compose -f scripts/docker-compose.yml restart glue-latency-proxy s3-latency-proxy`) after rebuilding the
+fixture. `GLUE_LATENCY_MS`, `GLUE_MAX_CONCURRENCY` and `S3_LATENCY_MS` change the delays.
+
+`benchmark/tpcds/cloud_sf100/partitioned/` runs the 99 TPC-DS queries at SF100 on parquet tables in a live AWS Glue
+catalog (`176760123605`, us-east-1, database `tpcds_sf100_partitioned`), whose fact tables have one partition per day
+of their date key. `scripts/benchmarks/create_tpcds_glue.sh` created them (and `tpcds_sf100_unpartitioned`); the
+benchmarks only read them, with credentials from the AWS credential chain. `benchmark/tpcds/planning/cloud_sf100/`
+only plans the same queries (`EXPLAIN`: the Glue calls, the listings for the row count estimates, binding and the
+optimizer); it reads the text of DuckDB's query files, so both suites follow the pinned `duckdb` submodule. `.github/workflows/CloudTPCDSBenchmark.yml` compares a PR (`gh workflow run CloudTPCDSBenchmark.yml -f
+pr_number=123`), merged into the head of the branch it targets, with that head, or the branch it is started on (`--ref`) with that
+branch a day ago (its newest first-parent commit older than 24 hours), on them; `-f benchmarks=execution` or `-f benchmarks=planning` runs one of
+the two suites (default both, in 8 and 2 parallel jobs). A maintainer starts it.
+`scripts/benchmarks/generate_tpcds_benchmarks.sh` writes the per-query files of the three suites; the regression
+jobs fail when they are out of date.
 
 ## Building
 

@@ -1,0 +1,13 @@
+# name: benchmark/tpcds/cloud_sf100/partitioned/q35.benchmark
+# description: Run query 35 from the TPC-DS benchmark at SF100 on the partitioned parquet tables in the AWS Glue catalog
+# group: [partitioned]
+
+include benchmark/tpcds/cloud_sf100/tpcds_cloud_glue.benchmark.in
+
+name DSQ35_cloud_sf100_partitioned
+group tpcds_glue_cloud
+subgroup sf100_partitioned
+
+run duckdb/extension/tpcds/dsdgen/queries/35.sql
+
+result duckdb/extension/tpcds/dsdgen/answers/sf100/35.csv

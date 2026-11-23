@@ -9,14 +9,15 @@ which sets the table parameter 'changed_by_another_client', and is then refused 
 if its VersionId is not the table's current one, as Glue does (moto ignores VersionId); without a VersionId it is
 forwarded and overwrites the other client's change. A BatchCreatePartition on a fault_partition_elsewhere* database is
 preceded by another client's registration of the same partitions at '<location>_by_another_client', so that each is
-refused with AlreadyExistsException while its files are not where Glue points. A CreatePartition on a
+refused with AlreadyExistsException while its files are not where Glue points. A BatchCreatePartition on a
 fault_noncanonical_values* database registers each value with a leading '0', as another engine may spell an integer
-('01' for 1). A BatchCreatePartition on a fault_slow_partitions* database is
-forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while partitions are registered; one on a
-fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
-with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
-request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
-amz-sdk-request header) and forwarded when the SDK retries it."""
+('01' for 1). A BatchDeletePartition on a fault_partition_dropped* database is preceded by another client's drop of
+the same partitions, so that Glue reports each as EntityNotFoundException. A BatchCreatePartition on a
+fault_slow_partitions* database is forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
+partitions are registered; one on a fault_recreated_during_write* database finds the table dropped and created again
+by another client, and then fails with InternalServiceException, so the write that registers them fails with a table
+that is no longer its own. A request on a fault_throttled* database is answered with ThrottlingException on its first
+attempt (the SDK's amz-sdk-request header) and forwarded when the SDK retries it."""
 
 import argparse
 import http.client
@@ -44,8 +45,10 @@ SLOW_PARTITIONS_SECONDS = 4
 RECREATED_PREFIX = "fault_recreated_during_write"
 # BatchCreatePartition on a database with this prefix races another client registering the partitions elsewhere
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
-# CreatePartition on a database with this prefix registers each value with a leading '0'
+# BatchCreatePartition on a database with this prefix registers each value with a leading '0'
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
+# BatchDeletePartition on a database with this prefix races another client dropping the partitions
+RACED_DROP_PREFIX = "fault_partition_dropped"
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -120,14 +123,18 @@ def is_raced_partition_create(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(RACED_PARTITION_PREFIX)
 
 
+def is_raced_partition_drop(target, database):
+    return target == "AWSGlue.BatchDeletePartition" and database.startswith(RACED_DROP_PREFIX)
+
+
 def is_noncanonical_create(target, database):
-    return target == "AWSGlue.CreatePartition" and database.startswith(NONCANONICAL_PREFIX)
+    return target == "AWSGlue.BatchCreatePartition" and database.startswith(NONCANONICAL_PREFIX)
 
 
 def with_noncanonical_values(request):
-    """The partition as another engine registers it: each value with a leading '0'."""
-    partition = request.get("PartitionInput", {})
-    partition["Values"] = ["0" + value for value in partition.get("Values", [])]
+    """The partitions as another engine registers them: each value with a leading '0'."""
+    for partition in request.get("PartitionInputList", []):
+        partition["Values"] = ["0" + value for value in partition.get("Values", [])]
     return json.dumps(request).encode()
 
 
@@ -177,6 +184,10 @@ class Handler(BaseHTTPRequestHandler):
             status, _, data = self.forward(target, as_other_clients_partitions(request))
             if status != 200:
                 raise RuntimeError(f"BatchCreatePartition as another client failed: {data!r}")
+        if is_raced_partition_drop(target, database):
+            status, _, data = self.forward(target, body)
+            if status != 200:
+                raise RuntimeError(f"BatchDeletePartition as another client failed: {data!r}")
         if is_noncanonical_create(target, database):
             body = with_noncanonical_values(request)
         raced = is_raced_create(target, database)

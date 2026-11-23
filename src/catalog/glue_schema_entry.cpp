@@ -6,6 +6,8 @@
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/catalog/entry_scan_filters.hpp"
+#include "duckdb/catalog/similar_catalog_entry.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -684,10 +686,6 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreatePragmaFunction(CatalogTransact
 	throw BinderException("Glue databases do not support creating pragma functions");
 }
 
-optional_ptr<CatalogEntry> GlueSchemaEntry::CreateCollation(CatalogTransaction transaction, CreateCollationInfo &info) {
-	throw BinderException("Glue databases do not support creating collations");
-}
-
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
 	throw BinderException("Glue databases do not support creating types");
 }
@@ -1089,6 +1087,22 @@ void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
 	if (entry) {
 		info.callback(*entry);
 	}
+}
+
+SimilarCatalogEntry GlueSchemaEntry::GetSimilarEntry(CatalogTransaction transaction,
+                                                     const EntryLookupInfo &lookup_info) {
+	SimilarCatalogEntry result;
+	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
+		return result;
+	}
+	tables.ScanLoaded([&](CatalogEntry &entry) {
+		auto score = StringUtil::SimilarityRating(entry.name.GetIdentifierName(), lookup_info.GetEntryName());
+		if (score > result.score) {
+			result.score = score;
+			result.name = Identifier(entry.name.GetIdentifierName());
+		}
+	});
+	return result;
 }
 
 const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {
