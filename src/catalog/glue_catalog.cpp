@@ -487,6 +487,12 @@ string GlueCatalog::KnownCatalogId() {
 	return StartsWithAccountId(options.catalog_id) ? options.catalog_id : string();
 }
 
+string GlueCatalog::GlueCatalogIdentity(ClientContext &context) {
+	// ':' is the credentials' default catalog: the id Glue reports names it like an explicit attach does
+	auto catalog_id = options.catalog_id.empty() ? FetchCatalogId(context) : options.catalog_id;
+	return catalog_id + "\x1f" + options.region + "\x1f" + options.endpoint;
+}
+
 string GlueCatalog::FetchCatalogId(ClientContext &context) {
 	{
 		lock_guard<mutex> guard(reported_id_lock);

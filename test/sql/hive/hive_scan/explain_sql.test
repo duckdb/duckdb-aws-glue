@@ -2,6 +2,9 @@
 # description: EXPLAIN (SQL) shows a hive_scan() as the standard reader calls that read its files, one per partition, and that SQL reads the scan's rows
 # group: [hive_scan]
 
+# Local Hive scans return no rows on Windows.
+require notwindows
+
 require parquet
 
 require json
