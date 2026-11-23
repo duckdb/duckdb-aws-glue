@@ -16,8 +16,14 @@ duckdb_extension_load(tpcds)
 
 # httpfs with S3 requests signed with the secret a file names (duckdb/duckdb-httpfs#521). Takes precedence over the
 # duckdb submodule's .github/config/extensions/httpfs.cmake; without its patches, which this commit already contains.
+# On Windows, httpfs's spilling tests fail to create the per-test temp directory under the deep CI checkout path
+if (WIN32)
+    set(HTTPFS_LOAD_TESTS "")
+else()
+    set(HTTPFS_LOAD_TESTS LOAD_TESTS)
+endif()
 duckdb_extension_load(httpfs
-    LOAD_TESTS
+    ${HTTPFS_LOAD_TESTS}
     GIT_URL https://github.com/duckdb/duckdb-httpfs
     GIT_TAG 5b1a46218dd31e811f1eeb0cac539e755cbb79c7
 )
