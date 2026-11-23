@@ -1,11 +1,12 @@
 # Runs all sqllogictests of a pull request or a branch, on a release build, against a live AWS Glue Data Catalog
 # (test/configs/cloud_glue.json), as four shards at the same time (see the Run tests step). It runs
 #   - on every push to main; a failing run lists the merges since the last passing one in its job summary
-#   - on a pull request when a maintainer adds the 'cloud-tests' label, and on later pushes to a labeled PR whose
-#     author is a member or collaborator. The PR's code runs with the AWS credentials of the 'cloud-glue' environment,
-#     so read an outside contributor's PR before labeling it, and remove and re-add the label after reading new commits
-#   - when a maintainer starts it (`gh workflow run CloudGlueTests.yml -f pr_number=123`, or without pr_number for the
-#     branch the run is started on, e.g. `gh workflow run CloudGlueTests.yml --ref main`)
+#   - on a pull request when someone with write access adds the 'cloud-tests' label, and on later pushes to a labeled
+#     PR whose author is a member or collaborator. The PR's code runs with the AWS credentials of the 'cloud-glue'
+#     environment, so read an outside contributor's PR before labeling it, and remove and re-add the label after
+#     reading new commits
+#   - when someone with write access starts it (`gh workflow run CloudGlueTests.yml -f pr_number=123`, or without
+#     pr_number for the branch the run is started on, e.g. `gh workflow run CloudGlueTests.yml --ref main`)
 #
 # The 'cloud-glue' environment provides:
 #   variables  GLUE_CATALOG_ID       the AWS account id of the Glue Data Catalog
@@ -71,17 +72,17 @@ jobs:
       AWS_REGION: ${{ vars.GLUE_REGION }}
 
     steps:
-      # workflow_dispatch and labeling already need write or triage access; running a PR's code with the AWS
-      # credentials needs more. A push to main or to a labeled PR of a member is not checked
-      - name: Check that a maintainer started the run
+      # labeling only needs triage access; running a PR's code with the AWS credentials needs write access or more.
+      # A push to main or to a labeled PR of a member is not checked
+      - name: Check that someone with write access started the run
         if: github.event_name == 'workflow_dispatch' || github.event.action == 'labeled'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           role=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.triggering_actor }}/permission" --jq .role_name)
           echo "${{ github.triggering_actor }} has role '$role'"
-          if [ "$role" != "admin" ] && [ "$role" != "maintain" ]; then
-            echo "::error::Only maintainers can run the cloud Glue tests"
+          if [ "$role" != "admin" ] && [ "$role" != "maintain" ] && [ "$role" != "write" ]; then
+            echo "::error::Only users with write access can run the cloud Glue tests"
             exit 1
           fi
 

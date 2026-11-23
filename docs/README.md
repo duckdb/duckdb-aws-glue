@@ -729,12 +729,12 @@ sanitizers, no debug info).
 
 The `Cloud Glue tests` workflow (`.github/workflows/CloudGlueTests.yml`) runs the whole suite, on a release build,
 against a live catalog. It runs on every push to `main`; when such a run fails, its job summary lists the failing tests
-and the merges since the last passing run on `main`. On a pull request it runs when a maintainer adds the `cloud-tests`
-label, and again on every push to a labeled PR whose author is a member or collaborator of the repository. Since the
-PR's code runs with the AWS credentials, read an outside contributor's PR before labeling it, and remove and re-add the
-label to test their later commits. A maintainer can also start it by hand (`gh workflow run CloudGlueTests.yml -f
-pr_number=<n>`, or `gh workflow run CloudGlueTests.yml --ref main` without a PR). Starting it by hand or through the
-label is refused for anyone below the `maintain` role. A run tests the PR's head commit (or the branch's) as it was when
+and the merges since the last passing run on `main`. On a pull request it runs when someone with write access adds the
+`cloud-tests` label, and again on every push to a labeled PR whose author is a member or collaborator of the
+repository. Since the PR's code runs with the AWS credentials, read an outside contributor's PR before labeling it, and
+remove and re-add the label to test their later commits. Anyone with write access can also start it by hand
+(`gh workflow run CloudGlueTests.yml -f pr_number=<n>`, or `gh workflow run CloudGlueTests.yml --ref main` without a
+PR). Starting it by hand or through the label is refused for anyone below the `write` role. A run tests the PR's head commit (or the branch's) as it was when
 the run started, and reports the result as a `Cloud Glue tests` status on that commit. Runs share the catalog, so they
 go one at a time; GitHub keeps only the newest waiting run, which is why a failing run on `main` compares with the last
 passing one rather than the previous commit. Every run first deletes all Glue databases of the account and creates an

@@ -66,7 +66,7 @@ SELECT id FROM my_datalake.{GLUE_TEST_DB}.overlap_orders WHERE dt = 'outer';
 
 # nor does a copy of the pruned scan, which the window self join rewrite reads the table through
 query II
-SELECT id, count(*) OVER (PARTITION BY dt) FROM my_datalake.default.overlap_orders WHERE dt = 'outer';
+SELECT id, count(*) OVER (PARTITION BY dt) FROM my_datalake.{GLUE_TEST_DB}.overlap_orders WHERE dt = 'outer';
 ----
 1	1
 
@@ -75,7 +75,7 @@ statement ok
 SET debug_verify_serializer = true;
 
 query I
-SELECT id FROM my_datalake.default.overlap_orders WHERE dt = 'outer';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.overlap_orders WHERE dt = 'outer';
 ----
 1
 

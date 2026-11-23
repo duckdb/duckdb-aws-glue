@@ -165,17 +165,17 @@ JOIN flat_blobs b ON t.filename = b.filename;
 # "$path" filtering on a Glue table
 statement ok
 COPY (SELECT 1000::INTEGER AS id, 'path'::VARCHAR AS name)
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_flat/path_filter.parquet' (FORMAT parquet);
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/meta_flat/path_filter.parquet' (FORMAT parquet);
 
 query II
-SELECT id, name FROM my_datalake.default.meta_flat
-WHERE "$path" = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_flat/path_filter.parquet';
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.meta_flat
+WHERE "$path" = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/meta_flat/path_filter.parquet';
 ----
 1000	path
 
 query II
-EXPLAIN ANALYZE SELECT count(*) FROM my_datalake.default.meta_flat
-WHERE "$path" = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/meta_flat/path_filter.parquet';
+EXPLAIN ANALYZE SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.meta_flat
+WHERE "$path" = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/meta_flat/path_filter.parquet';
 ----
 analyzed_plan	<REGEX>:.*Total Files Read: 1 .*
 
