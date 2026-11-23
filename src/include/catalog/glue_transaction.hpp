@@ -67,8 +67,8 @@ public:
 	void PutTable(const string &database_name, const string &table_name, shared_ptr<const GlueTableInfo> table);
 	//! Whether GetTable answers from the cache, a miss of the same query included, without calling Glue
 	bool IsTableResolved(const string &database_name, const string &table_name, transaction_t query = MAXIMUM_QUERY_ID);
-	//! Whether a first GetTables page of the database would help the lookup: none warmed this cache yet and the
-	//! table is not answered already
+	//! Whether a first GetTables page of the database would help the lookup: no page of this database warmed the
+	//! cache yet and the table is not answered already
 	bool NeedsTablePage(const string &database_name, const string &table_name, transaction_t query);
 	//! Records that a GetTables page of the database warmed this cache; the record ends with the cache's contents
 	void MarkTablePaged(const string &database_name);

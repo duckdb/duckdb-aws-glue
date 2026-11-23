@@ -153,6 +153,14 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 	}
 }
 
+bool GlueTableSet::ShouldFetchTablePage(ClientContext &context, GlueTransactionCache &cache, const string &name,
+                                        transaction_t query) {
+	if (batch_forbidden || direct_lookups == 0 || !BatchTableLookups(context)) {
+		return false;
+	}
+	return cache.NeedsTablePage(schema.GetDatabaseName(), name, query);
+}
+
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
 	auto &name = lookup.GetEntryName();
 	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
@@ -172,8 +180,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		// From the second round-trip-causing miss on (round trips count across caches), one GetTables page warms
 		// the cache, at most once per cache - under the default scope that is once per transaction.
 		// A name the cache already resolved, a known miss included, needs no page.
-		if (!cached && cache && !batch_forbidden && direct_lookups > 0 &&
-		    cache->NeedsTablePage(schema.GetDatabaseName(), glue_name, query) && BatchTableLookups(context)) {
+		if (!cached && cache && ShouldFetchTablePage(context, *cache, glue_name, query)) {
 			BulkLoadTableInfo(context, *cache);
 		}
 	}
