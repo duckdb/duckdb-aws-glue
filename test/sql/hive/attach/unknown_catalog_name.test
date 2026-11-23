@@ -12,6 +12,8 @@ require-env GLUE_CATALOG_ID
 
 require-env GLUE_TEST_DB
 
+require-env GLUE_TEST_DB_SQL
+
 statement ok
 ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
     TYPE glue,
@@ -37,12 +39,12 @@ USE my_datalake.{GLUE_TEST_DB};
 statement error
 SELECT id FROM "999999999999"."{GLUE_TEST_DB}".ucn_orders;
 ----
-Catalog "my_datalake" does not support nested schemas: "999999999999"."{GLUE_TEST_DB}"
+Catalog "my_datalake" does not support nested schemas: "999999999999".{GLUE_TEST_DB_SQL}
 
 statement error
 SELECT id FROM not_attached."{GLUE_TEST_DB}".ucn_orders;
 ----
-Catalog "my_datalake" does not support nested schemas: not_attached."{GLUE_TEST_DB}"
+Catalog "my_datalake" does not support nested schemas: not_attached.{GLUE_TEST_DB_SQL}
 
 # the names that do resolve still do
 query I

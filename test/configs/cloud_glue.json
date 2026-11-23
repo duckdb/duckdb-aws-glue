@@ -97,6 +97,12 @@
 			"paths": [
 				"test/sql/hive/bugs/foreign_input_format_as_hive.test"
 			]
+		},
+		{
+			"reason": "the pinned iceberg extension (4c0c087) binds the Avro COPY function of its manifests without its function info, so committing an Iceberg INSERT fails (\"The COPY TO bind of a copy function was called without its function info\"); fixed upstream in duckdb-iceberg b5db08d, which the duckdb submodule's iceberg patches do not apply to yet",
+			"paths": [
+				"test/sql/cloud_glue/glue_view_iceberg_catalog.test"
+			]
 		}
 	]
 }
