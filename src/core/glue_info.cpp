@@ -8,6 +8,7 @@
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/string_util.hpp"
 
@@ -445,6 +446,19 @@ static bool TryGetCount(const unordered_map<string, string> &parameters, const c
 		return false;
 	}
 	result = count;
+	return true;
+}
+
+bool GlueBasicStatistics::TryAdd(const GlueBasicStatistics &other) {
+	uint64_t rows, files, size;
+	if (!TryAddOperator::Operation(num_rows, other.num_rows, rows) ||
+	    !TryAddOperator::Operation(num_files, other.num_files, files) ||
+	    !TryAddOperator::Operation(total_size, other.total_size, size)) {
+		return false;
+	}
+	num_rows = rows;
+	num_files = files;
+	total_size = size;
 	return true;
 }
 

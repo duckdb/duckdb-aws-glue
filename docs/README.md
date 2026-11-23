@@ -266,17 +266,22 @@ their codec themselves.
   every partition is registered, a partition the write created gets those of its files, and an existing partition at
   the directory written to gets them added (BatchGetPartition, BatchUpdatePartition). A partition an `INSERT` created
   is first listed (one LIST per partition, run in parallel): when its directory holds other data files, e.g. those of
-  a dropped partition, it is left without them. An unpartitioned table keeps them as table parameters: `CREATE TABLE
-  ... AS` starts them at `0`, and so does `CREATE TABLE` when its location holds no data files (it is listed), e.g.
-  those of a dropped table; every write adds to them (UpdateTable, read again and retried with a backoff when
-  another client changed the table in between, and the three removed when every attempt loses). Tables and
-  partitions without all three set to a count (created by another client without them, added with
-  `glue_add_partition` or `glue_repair_table`, `-1` for unknown, or given only in part to `CREATE TABLE`) are left as
-  they are, and `glue_set_table_location` / `glue_set_partition_location` remove them. A write rolled back after
+  a dropped partition, or can not be listed, it is left without them. An `INSERT` that creates more partitions than
+  `glue_write_statistics_max_listings` (default 100; 0 for none) lists none and leaves all of them without. An
+  unpartitioned table keeps them as table parameters: `CREATE TABLE ... AS` starts them at `0`, and so does
+  `CREATE TABLE` when its location holds no data files. That makes a parquet `CREATE TABLE` list its location; when
+  the listing fails (no `s3:ListBucket`, no bucket yet) the table is created without them, and a warning is logged.
+  Every write adds to them (UpdateTable, read again and retried with a backoff when another client changed the table
+  in between, and the three removed when every attempt loses). Tables and partitions without all three set to a
+  count (created by another client without them, added with `glue_add_partition` or `glue_repair_table`, `-1` for
+  unknown, or given only in part to `CREATE TABLE`) are left as they are, and `glue_set_table_location` /
+  `glue_set_partition_location` remove them, as does a sum that does not fit in 64 bits. A write rolled back after
   registering some of its partitions leaves those without them. A failure to update them is logged as a warning, not
-  an error, since the rows are in the table, and they are then removed. Two clients appending to the same existing
-  partition at the same time can lose one update: BatchUpdatePartition has no version to check. csv, json and avro
-  writes record no statistics and leave existing ones as they are.
+  an error, since the rows are in the table, and they are then removed. Only writes through this extension update
+  them: files another client adds or deletes without updating the parameters (e.g. copied into the location) make
+  them stale, as for any writer that keeps them. Two clients appending to the same existing partition at the same time
+  can lose one update: BatchUpdatePartition has no version to check. csv, json and avro writes record no statistics
+  and leave existing ones as they are.
 - The files of one `INSERT` or `CREATE TABLE ... AS` are named `<write id>_<file id>.<extension>`, with a new write
   id (a UUIDv7) per statement. The write is registered with the Glue transaction when it starts and completed when
   its partitions are registered; a write that is still registered when the transaction ends belongs to a statement

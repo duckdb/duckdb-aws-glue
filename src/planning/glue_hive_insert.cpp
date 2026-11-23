@@ -758,17 +758,20 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 	lock_guard<mutex> guard(state.lock);
 	if (collect_statistics) {
 		// The COPY reports one row per file written: (filename, count, file_size_bytes, ...)
+		auto files = chunk.data[0].Values<string_t>();
+		auto rows = chunk.data[1].Values<uint64_t>();
+		auto sizes = chunk.data[2].Values<uint64_t>();
 		for (idx_t r = 0; r < chunk.size(); r++) {
-			auto file = chunk.GetValue(0, r);
-			if (file.IsNull()) {
+			auto file = files[r];
+			if (!file.IsValid()) {
 				continue;
 			}
 			GlueBasicStatistics statistics;
-			statistics.num_rows = chunk.GetValue(1, r).GetValue<uint64_t>();
+			statistics.num_rows = rows[r].GetValue();
 			statistics.num_files = 1;
-			statistics.total_size = chunk.GetValue(2, r).GetValue<uint64_t>();
+			statistics.total_size = sizes[r].GetValue();
 			state.insert_count += statistics.num_rows;
-			state.written_files.push_back(file.GetValue<string>());
+			state.written_files.push_back(file.GetValue().GetString());
 			state.file_statistics.push_back(statistics);
 		}
 		return SinkResultType::NEED_MORE_INPUT;
@@ -847,20 +850,29 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		RecordWrittenFiles(context, state.written_files);
 		if (!state.file_statistics.empty()) {
 			GlueBasicStatistics written;
+			bool exact = true;
 			for (auto &statistics : state.file_statistics) {
-				written.Add(statistics);
+				exact = exact && written.TryAdd(statistics);
 			}
-			AddStatistics(context, written, {}, {}, state.written_files);
+			if (exact) {
+				AddStatistics(context, written, {}, {}, state.written_files);
+			} else if (table_info.fetched) {
+				RemoveStatistics(context, {});
+			}
 		}
 		return SinkFinalizeType::READY;
 	}
 
 	// Register the partition directories the files were written to: the locations of existing partitions, or
 	// <key>=<value> directories in partition key order below the table location
-	unordered_map<string, GlueBasicStatistics> directory_statistics;
+	unordered_map<string, optional<GlueBasicStatistics>> directory_statistics;
 	for (idx_t i = 0; i < state.file_statistics.size(); i++) {
 		auto &file = state.written_files[i];
-		directory_statistics[file.substr(0, file.find_last_of('/'))].Add(state.file_statistics[i]);
+		auto entry = directory_statistics.emplace(file.substr(0, file.find_last_of('/')), GlueBasicStatistics()).first;
+		if (entry->second && !entry->second->TryAdd(state.file_statistics[i])) {
+			// a count past 64 bits is not one
+			entry->second.reset();
+		}
 	}
 	FilePathToGluePartition partitions;
 	for (auto &file : state.written_files) {
@@ -1019,23 +1031,47 @@ void GlueHiveInsert::AddStatistics(ClientContext &context, const GlueBasicStatis
 	for (auto &file : written_files) {
 		written.insert(ComparableLocation(file));
 	}
-	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
-	vector<unique_ptr<BaseExecutorTask>> tasks;
-	auto &fs = FileSystem::GetFileSystem(context);
+	vector<reference<GluePartitionInput>> to_list;
+	vector<vector<string>> without_statistics;
 	for (auto &partition : partitions) {
-		if (!partition.statistics || existed.find(partition.values) != existed.end()) {
+		auto exists = existed.find(partition.values) != existed.end();
+		if (!partition.statistics) {
+			if (exists) {
+				without_statistics.push_back(partition.values);
+			}
+			continue;
+		}
+		if (exists) {
 			continue;
 		}
 		created.insert(partition.values);
 		// a directory CREATE TABLE AS writes to held no data files; one an INSERT writes to may hold those of a
 		// dropped partition, which its count would miss
 		if (table_info.fetched) {
-			tasks.push_back(make_uniq<ListPartitionDirectoryTask>(executor, fs, partition, written));
+			to_list.push_back(partition);
+		}
+	}
+	Value max_listings;
+	idx_t listing_limit = 100;
+	if (context.TryGetCurrentSetting("glue_write_statistics_max_listings", max_listings) && !max_listings.IsNull()) {
+		listing_limit = max_listings.GetValue<idx_t>();
+	}
+	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+	vector<unique_ptr<BaseExecutorTask>> tasks;
+	auto &fs = FileSystem::GetFileSystem(context);
+	for (auto &partition : to_list) {
+		if (to_list.size() > listing_limit) {
+			partition.get().statistics.reset();
+		} else {
+			tasks.push_back(make_uniq<ListPartitionDirectoryTask>(executor, fs, partition.get(), written));
 		}
 	}
 	vector<vector<string>> values;
 	for (auto &partition : partitions) {
 		values.push_back(partition.values);
+	}
+	if (!without_statistics.empty()) {
+		RemoveStatistics(context, without_statistics);
 	}
 	try {
 		if (!tasks.empty()) {

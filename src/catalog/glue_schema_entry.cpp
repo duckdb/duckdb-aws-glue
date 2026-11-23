@@ -547,9 +547,24 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	auto given =
 	    table.parameters.count("numRows") + table.parameters.count("numFiles") + table.parameters.count("totalSize");
 	// CREATE TABLE AS has checked its location holds no data files; files a dropped table left would not be counted
-	if (table.file_format == HiveFileFormat::PARQUET && table.partition_keys.empty() && given == 0 &&
-	    (resolved_table_info || !LocationHasDataFiles(FileSystem::GetFileSystem(context), table.location))) {
-		SetBasicStatistics(table.parameters, GlueBasicStatistics());
+	if (table.file_format == HiveFileFormat::PARQUET && table.partition_keys.empty() && given == 0) {
+		bool empty = resolved_table_info;
+		if (!empty) {
+			try {
+				empty = !LocationHasDataFiles(FileSystem::GetFileSystem(context), table.location);
+			} catch (std::exception &ex) {
+				ErrorData error(ex);
+				if (error.Type() == ExceptionType::INTERRUPT) {
+					error.Throw();
+				}
+				// e.g. no s3:ListBucket, or no bucket yet: the table is created without them
+				DUCKDB_LOG_WARNING(context, "Could not list the location '%s' of Hive table '%s.%s': %s",
+				                   table.location, table.schema_name, table.name, error.RawMessage());
+			}
+		}
+		if (empty) {
+			SetBasicStatistics(table.parameters, GlueBasicStatistics());
+		}
 	}
 	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {
 		// another client created the table since the lookup above: take its entry

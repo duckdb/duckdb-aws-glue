@@ -262,8 +262,12 @@ void GlueAPI::AddPartitionStatistics(ClientContext &context, GlueCatalog &catalo
 			    // unknown statistics stay unknown
 			    return false;
 		    }
-		    statistics.Add(*input.statistics);
-		    SetBasicStatistics(parameters, statistics);
+		    if (statistics.TryAdd(*input.statistics)) {
+			    SetBasicStatistics(parameters, statistics);
+		    } else {
+			    // a count past 64 bits is not one
+			    RemoveBasicStatistics(parameters);
+		    }
 		    return true;
 	    });
 }

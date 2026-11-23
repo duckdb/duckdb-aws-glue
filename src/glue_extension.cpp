@@ -148,6 +148,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "partitions read, or as many rounds and a tenth of the requests.",
 	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
 
+	config.AddExtensionOption("glue_write_statistics_max_listings",
+	                          "A parquet INSERT that creates at most this many partitions lists each of their "
+	                          "directories, and records numRows, numFiles and totalSize on those holding only its own "
+	                          "files; one that creates more leaves the partitions it creates without them. 0 lists "
+	                          "none. Default 100.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(100));
+
 	config.AddExtensionOption("hive_footer_statistics_max_files",
 	                          "An unpartitioned parquet scan that reads at most this many files gives the optimizer "
 	                          "its row count and each column's min, max and NULLs, from the footers of all of them, "

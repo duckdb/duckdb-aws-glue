@@ -466,8 +466,12 @@ void GlueAPI::AddTableStatistics(ClientContext &context, GlueCatalog &catalog, c
 			                                            // unknown statistics stay unknown
 			                                            return false;
 		                                            }
-		                                            total.Add(statistics);
-		                                            SetBasicStatistics(parameters, total);
+		                                            if (total.TryAdd(statistics)) {
+			                                            SetBasicStatistics(parameters, total);
+		                                            } else {
+			                                            // a count past 64 bits is not one
+			                                            RemoveBasicStatistics(parameters);
+		                                            }
 		                                            return true;
 	                                            });
 	if (!added) {

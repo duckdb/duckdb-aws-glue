@@ -18,7 +18,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
-foreach table stats_plain stats_parts stats_located stats_unknown stats_csv stats_ctas stats_ctas_parts stats_dropped stats_rollback
+foreach table stats_plain stats_parts stats_located stats_unknown stats_csv stats_ctas stats_ctas_parts stats_dropped stats_rollback stats_overflow stats_unlisted
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.{table};
@@ -171,6 +171,29 @@ FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_unknown');
 ----
 -1	NULL	NULL
 
+# a count that would pass 64 bits becomes unknown instead of wrapping
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_overflow (id INTEGER)
+WITH (numRows = '18446744073709551615', numFiles = '0', totalSize = '0');
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_overflow VALUES (1);
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_overflow');
+----
+NULL	NULL	NULL
+
+# a location that can not be listed (no bucket) is created without them, instead of failing
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_unlisted (id INTEGER)
+WITH (location = 's3://glue-test-no-such-bucket/{TEST_DIR}/stats_unlisted');
+
+query III
+FROM table_stats('my_datalake.{GLUE_TEST_DB}.stats_unlisted');
+----
+NULL	NULL	NULL
+
 # csv writes report no statistics, and leave the table's as they are
 statement ok
 CREATE TABLE my_datalake.{GLUE_TEST_DB}.stats_csv (id INTEGER, name VARCHAR)
@@ -288,6 +311,46 @@ SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.stats_parts WHERE year = 2021;
 ----
 6
 
+# an INSERT creating more partitions than glue_write_statistics_max_listings lists none, and leaves them without
+statement ok
+SET glue_write_statistics_max_listings = 1;
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_parts VALUES (400, 2030), (401, 2031);
+
+query II
+SELECT p.partition_values[1], p.parameters['numRows']
+FROM (SELECT * FROM glue_get_partition_response('my_datalake.{GLUE_TEST_DB}.stats_parts', {year: 2030})
+      UNION ALL SELECT * FROM glue_get_partition_response('my_datalake.{GLUE_TEST_DB}.stats_parts', {year: 2031})) p
+ORDER BY 1;
+----
+2030	NULL
+2031	NULL
+
+# one within the limit gets them
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_parts VALUES (402, 2032);
+
+query II
+SELECT num_rows, num_files FROM partition_stats(2032);
+----
+1	1
+
+# 0 lists none
+statement ok
+SET glue_write_statistics_max_listings = 0;
+
+statement ok
+INSERT INTO my_datalake.{GLUE_TEST_DB}.stats_parts VALUES (403, 2033);
+
+query I
+SELECT num_rows FROM partition_stats(2033);
+----
+NULL
+
+statement ok
+RESET glue_write_statistics_max_listings;
+
 #---------------------------------------------------------------------------
 # a write rolled back after registering some of its partitions leaves them without statistics
 #---------------------------------------------------------------------------
@@ -364,7 +427,7 @@ ORDER BY 1;
 1	3	1
 2	3	1
 
-foreach table stats_plain stats_parts stats_located stats_unknown stats_csv stats_ctas stats_ctas_parts stats_rollback
+foreach table stats_plain stats_parts stats_located stats_unknown stats_csv stats_ctas stats_ctas_parts stats_rollback stats_overflow stats_unlisted
 
 statement ok
 DROP TABLE my_datalake.{GLUE_TEST_DB}.{table};

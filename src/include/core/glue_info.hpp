@@ -186,11 +186,8 @@ struct GlueBasicStatistics {
 	idx_t num_files = 0;
 	idx_t total_size = 0;
 
-	void Add(const GlueBasicStatistics &other) {
-		num_rows += other.num_rows;
-		num_files += other.num_files;
-		total_size += other.total_size;
-	}
+	//! False, leaving this unchanged, when a sum does not fit in 64 bits
+	bool TryAdd(const GlueBasicStatistics &other);
 };
 
 //! Whether numRows, numFiles and totalSize are all set to a count
