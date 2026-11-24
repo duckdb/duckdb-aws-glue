@@ -1527,8 +1527,8 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	auto partitions = info.Partitions(context);
 	unordered_set<idx_t> pruning_filters;
 	unordered_set<idx_t> decided_filters;
-	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
-	                             filters, pruning_filters, decided_filters);
+	HivePartitionPruner pruner(context, info, *partitions, pushdown_info.table_index, projections);
+	auto partitions_to_read = pruner.PartitionsToRead(*candidates, filters, pruning_filters, decided_filters);
 	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);
 	if (!pushdown_info.extra_info.total_files.IsValid()) {
 		pushdown_info.extra_info.file_filter_expressions = vector<unique_ptr<Expression>>();
@@ -1544,11 +1544,11 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	filters = std::move(remaining_filters);
 	// reported as files in EXPLAIN, but these are partitions: nothing has been listed yet
 	pushdown_info.extra_info.total_files = candidates->size();
-	pushdown_info.extra_info.filtered_files = kept.size();
-	if (kept.size() == candidates->size()) {
+	pushdown_info.extra_info.filtered_files = partitions_to_read.size();
+	if (partitions_to_read.size() == candidates->size()) {
 		return FileListWithPathFilters(hive_list, std::move(path_filters));
 	}
-	auto result = make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));
+	auto result = make_uniq<HiveMultiFileList>(context, scan_info, std::move(partitions_to_read));
 	result->SetPathFilters(std::move(path_filters));
 	return std::move(result);
 }

@@ -4,7 +4,6 @@
 #include "core/glue_types.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 
-#include "duckdb/common/array_ptr.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
@@ -17,18 +16,38 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 
-#include <functional>
-
 namespace duckdb {
 
-//! The expression a partition column reference is replaced by
-using PartitionColumnReplacement =
-    std::function<unique_ptr<Expression>(const PartitionKeyProjection &, const BoundColumnRefExpression &)>;
+// PreparePartitionFilter, LoadPartitionColumn, EvaluatePartitionFilterChunk and EvaluatePartitionFilter mirror the
+// helpers of the same names in core's duckdb/src/common/hive_partitioning.cpp, which are not exported: keep them in
+// sync. They differ in where the values come from (Glue partitions, not file paths), Glue's NULL values, and a single
+// partition the filter throws for, which is decided by EvaluatePartitionFilterAlone.
+
+enum class HivePartitionPruner::PartitionFilterResult : uint8_t { NOT_EVALUATED, KEEP_FILE, PRUNE_FILE };
+
+//! A filter the partition values decide, rewritten as core's hive partitioning does: every partition column it reads
+//! is a VARCHAR column of a chunk, cast to the column's type inside the filter
+struct HivePartitionPruner::PreparedPartitionFilter {
+	//! The index of the filter in the pushed-down filters
+	idx_t filter_index;
+	unique_ptr<Expression> expr;
+	//! For each chunk column: the partition key it holds, and the type the filter reads it as
+	vector<idx_t> key_indexes;
+	vector<LogicalType> types;
+
+	static bool EvaluatePartitionFilterChunk(ExpressionExecutor &executor, DataChunk &chunk,
+	                                         array_ptr<const idx_t> rows, vector<PartitionFilterResult> &results);
+};
+
+HivePartitionPruner::HivePartitionPruner(ClientContext &context, const HiveScanInfo &info,
+                                         const vector<GluePartitionInfo> &partitions, TableIndex table_index,
+                                         const vector<PartitionKeyProjection> &projections)
+    : context(context), info(info), partitions(partitions), table_index(table_index), projections(projections) {
+}
 
 //! Replace references to partition columns of the scanned table by the expression 'replacement' gives for them
-static void ReplacePartitionColumnRefs(unique_ptr<Expression> &expr, TableIndex table_index,
-                                       const vector<PartitionKeyProjection> &projections,
-                                       const PartitionColumnReplacement &replacement) {
+void HivePartitionPruner::ReplacePartitionColumnRefs(unique_ptr<Expression> &expr,
+                                                     const PartitionColumnReplacement &replacement) const {
 	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
 	    expr, [&](BoundColumnRefExpression &colref, unique_ptr<Expression> &ref) {
 		    if (colref.Binding().table_index != table_index) {
@@ -46,36 +65,22 @@ static void ReplacePartitionColumnRefs(unique_ptr<Expression> &expr, TableIndex 
 
 //! Whether the partition values alone can decide 'filter': with its partition columns replaced, it folds to a
 //! constant. That depends on the shape of the filter, not on the values, so it is asked once per filter.
-static bool DecidableByPartitionValues(const Expression &filter, TableIndex table_index,
-                                       const vector<PartitionKeyProjection> &projections) {
+bool HivePartitionPruner::DecidableByPartitionValues(const Expression &filter) const {
 	auto probe = filter.Copy();
-	ReplacePartitionColumnRefs(probe, table_index, projections,
-	                           [](const PartitionKeyProjection &, const BoundColumnRefExpression &colref) {
-		                           return make_uniq<BoundConstantExpression>(Value(colref.GetReturnType()));
-	                           });
+	ReplacePartitionColumnRefs(probe, [](const PartitionKeyProjection &, const BoundColumnRefExpression &colref) {
+		return make_uniq<BoundConstantExpression>(Value(colref.GetReturnType()));
+	});
 	return probe->IsScalar() && probe->IsFoldable();
 }
 
-//! A filter the partition values decide, rewritten as core's hive partitioning does: every partition column it reads
-//! is a VARCHAR column of a chunk, cast to the column's type inside the filter
-struct PreparedPartitionFilter {
-	//! The index of the filter in the pushed-down filters
-	idx_t filter_index;
-	unique_ptr<Expression> expr;
-	//! For each chunk column: the partition key it holds, and the type the filter reads it as
-	vector<idx_t> key_indexes;
-	vector<LogicalType> types;
-};
-
-static PreparedPartitionFilter PreparePartitionFilter(ClientContext &context, const Expression &filter,
-                                                      idx_t filter_index, TableIndex table_index,
-                                                      const vector<PartitionKeyProjection> &projections) {
+//! Mirrors core's PreparePartitionFilter
+HivePartitionPruner::PreparedPartitionFilter HivePartitionPruner::PreparePartitionFilter(const Expression &filter,
+                                                                                         idx_t filter_index) const {
 	PreparedPartitionFilter result;
 	result.filter_index = filter_index;
 	result.expr = filter.Copy();
 	ReplacePartitionColumnRefs(
-	    result.expr, table_index, projections,
-	    [&](const PartitionKeyProjection &projection, const BoundColumnRefExpression &colref) {
+	    result.expr, [&](const PartitionKeyProjection &projection, const BoundColumnRefExpression &colref) {
 		    idx_t slot;
 		    for (slot = 0; slot < result.key_indexes.size(); slot++) {
 			    if (result.key_indexes[slot] == projection.partition_key_index) {
@@ -94,7 +99,7 @@ static PreparedPartitionFilter PreparePartitionFilter(ClientContext &context, co
 }
 
 //! Loads the values Glue stores for a partition key of the given partitions into the result vector: verbatim, and NULL
-//! where GlueTypes::PartitionValue reads NULL
+//! where GlueTypes::PartitionValue reads NULL. Mirrors core's LoadPartitionColumn.
 static void LoadPartitionColumn(idx_t key_index, const LogicalType &type, const vector<GluePartitionInfo> &partitions,
                                 const vector<idx_t> &partition_indexes, array_ptr<const idx_t> rows, Vector &result) {
 	auto count = rows.size();
@@ -113,9 +118,11 @@ static void LoadPartitionColumn(idx_t key_index, const LogicalType &type, const 
 	result.Reference(strings);
 }
 
-//! Evaluates the filter over a chunk of partitions - returns false (leaving the partitions unevaluated) if it throws
-static bool EvaluatePartitionFilterChunk(ExpressionExecutor &executor, DataChunk &chunk, array_ptr<const idx_t> rows,
-                                         vector<PartitionFilterResult> &results) {
+//! Evaluates the filter over a chunk of partitions - returns false (leaving the partitions unevaluated) if it throws.
+//! Mirrors core's EvaluatePartitionFilterChunk, and also rethrows an interrupt.
+bool HivePartitionPruner::PreparedPartitionFilter::EvaluatePartitionFilterChunk(
+    ExpressionExecutor &executor, DataChunk &chunk, array_ptr<const idx_t> rows,
+    vector<PartitionFilterResult> &results) {
 	SelectionVector true_sel(chunk.size());
 	idx_t true_count;
 	try {
@@ -139,12 +146,11 @@ static bool EvaluatePartitionFilterChunk(ExpressionExecutor &executor, DataChunk
 //! The filter for one partition, with the partition's values folded into a copy of it: what pruning did for every
 //! partition before batching. A value its column's type can not hold fails the query here; a filter that can not be
 //! folded for the partition is left to the scan.
-static PartitionFilterResult EvaluatePartitionFilterAlone(ClientContext &context, const HiveScanInfo &info,
-                                                          const GluePartitionInfo &partition, const Expression &filter,
-                                                          TableIndex table_index,
-                                                          const vector<PartitionKeyProjection> &projections) {
+HivePartitionPruner::PartitionFilterResult
+HivePartitionPruner::EvaluatePartitionFilterAlone(const Expression &filter, idx_t partition_index) const {
+	auto &partition = partitions[partition_index];
 	auto copy = filter.Copy();
-	ReplacePartitionColumnRefs(copy, table_index, projections,
+	ReplacePartitionColumnRefs(copy,
 	                           [&](const PartitionKeyProjection &projection, const BoundColumnRefExpression &colref) {
 		                           auto &key = info.partition_keys[projection.partition_key_index];
 		                           auto &value = partition.values[projection.partition_key_index];
@@ -159,13 +165,36 @@ static PartitionFilterResult EvaluatePartitionFilterAlone(ClientContext &context
 	                                                   : PartitionFilterResult::KEEP_FILE;
 }
 
-//! The filter for each of the partitions 'partition_indexes', a chunk at a time. If the filter throws for a chunk, the
-//! chunk is split in halves so the other partitions can still be pruned, and a single partition is decided alone.
-static vector<PartitionFilterResult>
-EvaluatePartitionFilter(ClientContext &context, const HiveScanInfo &info, const vector<GluePartitionInfo> &partitions,
-                        const vector<idx_t> &partition_indexes, const Expression &filter,
-                        const PreparedPartitionFilter &prepared, TableIndex table_index,
-                        const vector<PartitionKeyProjection> &projections) {
+//! The filter for the partitions 'rows' (positions in 'partition_indexes'), loaded into 'chunk'. If it throws, they are
+//! split in halves so the other partitions can still be pruned, and a single partition is decided alone.
+void HivePartitionPruner::EvaluatePartitions(const PreparedPartitionFilter &prepared, const Expression &filter,
+                                             const vector<idx_t> &partition_indexes, ExpressionExecutor &executor,
+                                             DataChunk &chunk, array_ptr<const idx_t> rows,
+                                             vector<PartitionFilterResult> &results) const {
+	for (idx_t column = 0; column < prepared.key_indexes.size(); column++) {
+		LoadPartitionColumn(prepared.key_indexes[column], prepared.types[column], partitions, partition_indexes, rows,
+		                    chunk.data[column]);
+	}
+	chunk.SetChildCardinality(rows.size());
+	if (PreparedPartitionFilter::EvaluatePartitionFilterChunk(executor, chunk, rows, results)) {
+		return;
+	}
+	if (rows.size() == 1) {
+		results[rows[0]] = EvaluatePartitionFilterAlone(filter, partition_indexes[rows[0]]);
+		return;
+	}
+	auto half = rows.size() / 2;
+	EvaluatePartitions(prepared, filter, partition_indexes, executor, chunk, array_ptr<const idx_t>(rows.data(), half),
+	                   results);
+	EvaluatePartitions(prepared, filter, partition_indexes, executor, chunk,
+	                   array_ptr<const idx_t>(rows.data() + half, rows.size() - half), results);
+}
+
+//! The filter for each of the partitions 'partition_indexes', a chunk at a time. Mirrors core's
+//! EvaluatePartitionFilter.
+vector<HivePartitionPruner::PartitionFilterResult>
+HivePartitionPruner::EvaluatePartitionFilter(const PreparedPartitionFilter &prepared, const Expression &filter,
+                                             const vector<idx_t> &partition_indexes) const {
 	vector<PartitionFilterResult> results(partition_indexes.size(), PartitionFilterResult::NOT_EVALUATED);
 	vector<idx_t> rows(partition_indexes.size());
 	for (idx_t row = 0; row < rows.size(); row++) {
@@ -174,41 +203,22 @@ EvaluatePartitionFilter(ClientContext &context, const HiveScanInfo &info, const 
 	ExpressionExecutor executor(context, *prepared.expr);
 	DataChunk chunk;
 	chunk.InitializeEmpty(vector<LogicalType>(prepared.key_indexes.size(), LogicalType::VARCHAR));
-	std::function<void(array_ptr<const idx_t>)> evaluate_partitions = [&](array_ptr<const idx_t> batch) {
-		for (idx_t column = 0; column < prepared.key_indexes.size(); column++) {
-			LoadPartitionColumn(prepared.key_indexes[column], prepared.types[column], partitions, partition_indexes,
-			                    batch, chunk.data[column]);
-		}
-		chunk.SetChildCardinality(batch.size());
-		if (EvaluatePartitionFilterChunk(executor, chunk, batch, results)) {
-			return;
-		}
-		if (batch.size() == 1) {
-			results[batch[0]] = EvaluatePartitionFilterAlone(context, info, partitions[partition_indexes[batch[0]]],
-			                                                 filter, table_index, projections);
-			return;
-		}
-		auto half = batch.size() / 2;
-		evaluate_partitions(array_ptr<const idx_t>(batch.data(), half));
-		evaluate_partitions(array_ptr<const idx_t>(batch.data() + half, batch.size() - half));
-	};
 	for (idx_t offset = 0; offset < rows.size(); offset += STANDARD_VECTOR_SIZE) {
 		auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, rows.size() - offset);
-		evaluate_partitions(array_ptr<const idx_t>(rows.data() + offset, count));
+		EvaluatePartitions(prepared, filter, partition_indexes, executor, chunk,
+		                   array_ptr<const idx_t>(rows.data() + offset, count), results);
 	}
 	return results;
 }
 
-vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo &info,
-                               const vector<GluePartitionInfo> &partitions, const vector<idx_t> &candidates,
-                               TableIndex table_index, const vector<PartitionKeyProjection> &projections,
-                               const vector<unique_ptr<Expression>> &filters, unordered_set<idx_t> &pruning_filters,
-                               unordered_set<idx_t> &decided_filters) {
+vector<idx_t> HivePartitionPruner::PartitionsToRead(const vector<idx_t> &candidates,
+                                                    const vector<unique_ptr<Expression>> &filters,
+                                                    unordered_set<idx_t> &pruning_filters,
+                                                    unordered_set<idx_t> &decided_filters) const {
 	vector<PreparedPartitionFilter> decidable_filters;
 	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
-		if (DecidableByPartitionValues(*filters[filter_index], table_index, projections)) {
-			decidable_filters.push_back(
-			    PreparePartitionFilter(context, *filters[filter_index], filter_index, table_index, projections));
+		if (DecidableByPartitionValues(*filters[filter_index])) {
+			decidable_filters.push_back(PreparePartitionFilter(*filters[filter_index], filter_index));
 		}
 	}
 	if (decidable_filters.empty()) {
@@ -222,8 +232,7 @@ vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo &info,
 	vector<vector<idx_t>> not_evaluated(decidable_filters.size());
 	for (idx_t i = 0; i < decidable_filters.size() && !partitions_to_read.empty(); i++) {
 		auto &prepared = decidable_filters[i];
-		auto results = EvaluatePartitionFilter(context, info, partitions, partitions_to_read,
-		                                       *filters[prepared.filter_index], prepared, table_index, projections);
+		auto results = EvaluatePartitionFilter(prepared, *filters[prepared.filter_index], partitions_to_read);
 		vector<idx_t> still_read;
 		for (idx_t row = 0; row < partitions_to_read.size(); row++) {
 			switch (results[row]) {

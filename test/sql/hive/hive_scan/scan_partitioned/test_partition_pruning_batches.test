@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/scan_partitioned/test_partition_pruning_batches.test
-# description: Partition filters are evaluated over chunks of partition values: pruning across several chunks, and a value or filter that fails in a chunk decides that chunk partition by partition as before
+# description: Partition filters are evaluated over chunks of partition values: pruning across several chunks, a chunk the filter throws for split down to the partition that fails, and values cast only where the filter reads them
 # group: [scan_partitioned]
 
 require parquet
@@ -87,6 +87,23 @@ SET VARIABLE bad_parts = (
 statement error
 EXPLAIN SELECT id FROM hive_scan('{TEST_DIR}/pruning_batches', schema := {id: 'INTEGER', n: 'INTEGER'},
     partitions := getvariable('bad_parts')) WHERE n = 1
+----
+Unable to cast 'abc' (from Glue partition column 'N') to: 'INTEGER'
+
+# as in core's hive partitioning, a value is cast only where the filter reads it: when another branch decides the
+# partition first, a value that does not cast no longer fails the query
+statement ok
+SET VARIABLE guarded_parts = [{dt: 'skip', n: 'abc', location: NULL::VARCHAR}];
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/pruning_batches', schema := {id: 'INTEGER', dt: 'VARCHAR', n: 'INTEGER'},
+    partitions := getvariable('guarded_parts')) WHERE CASE WHEN dt = 'skip' THEN false ELSE n = 1 END
+----
+0
+
+statement error
+SELECT count(*) FROM hive_scan('{TEST_DIR}/pruning_batches', schema := {id: 'INTEGER', dt: 'VARCHAR', n: 'INTEGER'},
+    partitions := getvariable('guarded_parts')) WHERE n = 1
 ----
 Unable to cast 'abc' (from Glue partition column 'N') to: 'INTEGER'
 
