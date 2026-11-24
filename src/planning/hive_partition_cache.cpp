@@ -130,9 +130,9 @@ shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::GetFiltered(Clie
 		return entry->partitions;
 	}
 	if (entry->refused_expressions.count(expression)) {
-		throw InvalidInputException(GlueAPI::PartitionExpressionRejectedInfo(),
-		                            StringUtil::Format("Glue already refused the expression '%s' in this query",
-		                                               expression));
+		throw InvalidInputException(
+		    GlueAPI::PartitionExpressionRejectedInfo(),
+		    StringUtil::Format("Glue already refused the expression '%s' in this query", expression));
 	}
 	auto &partitions = entry->filtered_partitions[expression];
 	if (!partitions) {
