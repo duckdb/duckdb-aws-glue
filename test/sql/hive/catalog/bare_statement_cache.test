@@ -8,21 +8,24 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bare_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.bare_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.bare_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bare_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.bare_orders VALUES (1, '2026-01-01'), (2, '2026-01-02');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.bare_orders VALUES (1, '2026-01-01'), (2, '2026-01-02');
 
 # the connection scope is what a bare statement's cache lives in between statements
 statement ok
@@ -43,7 +46,7 @@ CALL enable_logging('HTTP', storage := 'memory');
 # --- fresh call has) and seeds the cache for the binds that follow ---
 
 query I
-SELECT response IS NOT NULL FROM glue_get_table_response('my_datalake.default.bare_orders');
+SELECT response IS NOT NULL FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bare_orders');
 ----
 true
 
@@ -52,7 +55,7 @@ CALL truncate_duckdb_logs();
 
 # the repeat fetches again and its response is still the full reply
 query I
-SELECT response IS NOT NULL FROM glue_get_table_response('my_datalake.default.bare_orders');
+SELECT response IS NOT NULL FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bare_orders');
 ----
 true
 
@@ -66,7 +69,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.bare_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bare_orders;
 ----
 2
 
@@ -79,7 +82,7 @@ SELECT glue_calls('GetTable');
 # --- second bind is served from the first one's fetch ---
 
 statement ok
-PREPARE bare_prepared AS SELECT count(*) FROM my_datalake.default.bare_orders;
+PREPARE bare_prepared AS SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bare_orders;
 
 statement ok
 CALL truncate_duckdb_logs();
@@ -103,7 +106,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
@@ -112,7 +115,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
@@ -126,20 +129,20 @@ SELECT glue_calls('GetPartitions');
 # (the regression this guards: Invalidate() was a no-op in a bare CALL, so this read stayed stale)
 
 statement ok
-CALL glue_add_partition('my_datalake.default.bare_orders', {dt: '2026-01-03'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.bare_orders', {dt: '2026-01-03'});
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
 2026-01-03
 
 statement ok
-CALL glue_drop_partition('my_datalake.default.bare_orders', {dt: '2026-01-03'});
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.bare_orders', {dt: '2026-01-03'});
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
@@ -147,21 +150,21 @@ SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
 # --- another session's write stays invisible to the connection-scoped cache until a local write invalidates ---
 
 statement ok con2
-CALL glue_add_partition('my_datalake.default.bare_orders', {dt: '2026-01-04'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.bare_orders', {dt: '2026-01-04'});
 
 # still served from this connection's cache: the foreign partition is not seen
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
 
 # a local write invalidates; the next read sees the foreign partition too
 statement ok
-CALL glue_add_partition('my_datalake.default.bare_orders', {dt: '2026-01-05'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.bare_orders', {dt: '2026-01-05'});
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
@@ -169,21 +172,21 @@ SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
 2026-01-05
 
 statement ok
-CALL glue_drop_partition('my_datalake.default.bare_orders', {dt: '2026-01-04'});
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.bare_orders', {dt: '2026-01-04'});
 
 statement ok
-CALL glue_drop_partition('my_datalake.default.bare_orders', {dt: '2026-01-05'});
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.bare_orders', {dt: '2026-01-05'});
 
 # --- a failed statement rolls the auto-transaction back, which clears the connection-scoped cache ---
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
 
 statement error
-SELECT no_such_column FROM my_datalake.default.bare_orders;
+SELECT no_such_column FROM my_datalake.{GLUE_TEST_DB}.bare_orders;
 ----
 <REGEX>:.*no_such_column.*
 
@@ -191,7 +194,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
@@ -208,13 +211,13 @@ statement ok
 BEGIN;
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
 
 statement error
-SELECT no_such_column FROM my_datalake.default.bare_orders;
+SELECT no_such_column FROM my_datalake.{GLUE_TEST_DB}.bare_orders;
 ----
 <REGEX>:.*no_such_column.*
 
@@ -225,7 +228,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders') ORDER BY dt;
 ----
 2026-01-01
 2026-01-02
@@ -238,25 +241,25 @@ SELECT glue_calls('GetPartitions');
 # --- an INSERT into an unpartitioned table invalidates too (files change with no partition to register) ---
 
 statement ok
-CREATE TABLE my_datalake.default.bare_flat (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bare_flat (id INTEGER);
 
 statement ok
-INSERT INTO my_datalake.default.bare_flat VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.bare_flat VALUES (1);
 
 query I
-SELECT count(*) FROM my_datalake.default.bare_flat;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bare_flat;
 ----
 1
 
 statement ok
-INSERT INTO my_datalake.default.bare_flat VALUES (2);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.bare_flat VALUES (2);
 
 statement ok
 CALL truncate_duckdb_logs();
 
 # the INSERT cleared the cache: this bind refetches instead of serving the pre-INSERT entry
 query I
-SELECT count(*) FROM my_datalake.default.bare_flat;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bare_flat;
 ----
 2
 
@@ -266,25 +269,25 @@ SELECT glue_calls('GetTable');
 1
 
 statement ok
-DROP TABLE my_datalake.default.bare_flat;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bare_flat;
 
 # --- a CTAS invalidates as well: it registers a Glue table and writes its files in one statement ---
 
 # warm the cache for a table the CTAS does not touch
 query I
-SELECT count(*) FROM my_datalake.default.bare_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bare_orders;
 ----
 2
 
 statement ok
-CREATE TABLE my_datalake.default.bare_ctas AS SELECT 1 AS id;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bare_ctas AS SELECT 1 AS id;
 
 statement ok
 CALL truncate_duckdb_logs();
 
 # the CTAS cleared the cache: this bind refetches instead of serving the pre-CTAS entry
 query I
-SELECT count(*) FROM my_datalake.default.bare_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bare_orders;
 ----
 2
 
@@ -294,12 +297,12 @@ SELECT glue_calls('GetTable');
 1
 
 statement ok
-DROP TABLE my_datalake.default.bare_ctas;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bare_ctas;
 
 # --- database-level DDL invalidates as well ---
 
 query I
-SELECT count(*) FROM my_datalake.default.bare_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bare_orders;
 ----
 2
 
@@ -310,7 +313,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.bare_orders;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.bare_orders;
 ----
 2
 
@@ -324,29 +327,29 @@ DROP SCHEMA my_datalake.bare_schema;
 
 # an ALTER TABLE SET (table properties) invalidates too: the next read serves the new parameters, not the cached ones
 query I
-SELECT parameters['bare_marker'] FROM glue_get_table_response('my_datalake.default.bare_orders');
+SELECT parameters['bare_marker'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bare_orders');
 ----
 NULL
 
 statement ok
-ALTER TABLE my_datalake.default.bare_orders SET (bare_marker = 'v1');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.bare_orders SET (bare_marker = 'v1');
 
 query I
-SELECT parameters['bare_marker'] FROM glue_get_table_response('my_datalake.default.bare_orders');
+SELECT parameters['bare_marker'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bare_orders');
 ----
 v1
 
 # a bare table mutation invalidates the cached table too: after DROP the cached entry must not be served
 query I
-SELECT count(*) FROM glue_get_table_response('my_datalake.default.bare_orders');
+SELECT count(*) FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bare_orders');
 ----
 1
 
 statement ok
-DROP TABLE my_datalake.default.bare_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bare_orders;
 
 statement error
-SELECT count(*) FROM glue_get_table_response('my_datalake.default.bare_orders');
+SELECT count(*) FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.bare_orders');
 ----
 <REGEX>:.*does not exist.*
 
@@ -357,7 +360,7 @@ statement ok
 BEGIN;
 
 statement error
-CREATE TABLE my_datalake.default.bare_guard (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bare_guard (id INTEGER);
 ----
 <REGEX>:TransactionContext Error.*This connection is currently in a transaction. Transaction support is not provided for Glue catalogs.*
 
@@ -365,10 +368,10 @@ statement ok
 ROLLBACK;
 
 statement ok
-CREATE TABLE my_datalake.default.bare_guard (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bare_guard (id INTEGER);
 
 statement ok
-DROP TABLE my_datalake.default.bare_guard;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bare_guard;
 
 # --- DETACH + re-ATTACH under the same alias gets a fresh cache: the new attach must not be served
 # --- the old attach's metadata. Two layers guarantee this, and this test holds whichever applies first:
@@ -377,26 +380,26 @@ DROP TABLE my_datalake.default.bare_guard;
 # --- cannot reach ---
 
 statement ok
-CREATE TABLE my_datalake.default.det_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.det_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-CALL glue_add_partition('my_datalake.default.det_orders', {dt: '2026-03-01'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.det_orders', {dt: '2026-03-01'});
 
 # warm the connection-scoped cache for this attach
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.det_orders');
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.det_orders');
 ----
 2026-03-01
 
 # a foreign write that this connection's cache hides: served with no Glue call, old partition list
 statement ok con2
-CALL glue_add_partition('my_datalake.default.det_orders', {dt: '2026-03-02'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.det_orders', {dt: '2026-03-02'});
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.det_orders');
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.det_orders');
 ----
 2026-03-01
 
@@ -412,7 +415,8 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
@@ -420,7 +424,7 @@ CALL truncate_duckdb_logs();
 
 # the re-attach resolves fresh instead of serving the previous attach's cached partition list
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.det_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.det_orders') ORDER BY dt;
 ----
 2026-03-01
 2026-03-02
@@ -431,20 +435,20 @@ SELECT glue_calls('GetPartitions');
 1
 
 statement ok
-DROP TABLE my_datalake.default.det_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.det_orders;
 
 # --- flipping the scope does not hide a local write: a write made while the scope is 'transaction'
 # --- clears the connection-level caches too, so flipping back serves the post-write state ---
 
 statement ok
-CREATE TABLE my_datalake.default.flip_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.flip_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-CALL glue_add_partition('my_datalake.default.flip_orders', {dt: '2026-04-01'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.flip_orders', {dt: '2026-04-01'});
 
 # warm the connection-scoped cache
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.flip_orders');
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flip_orders');
 ----
 2026-04-01
 
@@ -452,7 +456,7 @@ statement ok
 SET glue_metadata_cache_scope = 'transaction';
 
 statement ok
-CALL glue_add_partition('my_datalake.default.flip_orders', {dt: '2026-04-02'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.flip_orders', {dt: '2026-04-02'});
 
 statement ok
 SET glue_metadata_cache_scope = 'connection';
@@ -462,7 +466,7 @@ CALL truncate_duckdb_logs();
 
 # the write under 'transaction' scope invalidated the connection-level cache: fresh resolve, both partitions
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.flip_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.flip_orders') ORDER BY dt;
 ----
 2026-04-01
 2026-04-02
@@ -473,39 +477,40 @@ SELECT glue_calls('GetPartitions');
 1
 
 statement ok
-DROP TABLE my_datalake.default.flip_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.flip_orders;
 
 # --- the same Glue catalog attached under two aliases: a write through one alias must not be hidden
 # --- by the other alias's cache ---
 
 statement ok
-CREATE TABLE my_datalake.default.alias_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.alias_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-CALL glue_add_partition('my_datalake.default.alias_orders', {dt: '2026-05-01'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.alias_orders', {dt: '2026-05-01'});
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake_twin (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 # warm the first alias's cache
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.alias_orders');
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.alias_orders');
 ----
 2026-05-01
 
 # write through the other alias, then read through the first: the write cleared both aliases' caches
 statement ok
-CALL glue_add_partition('my_datalake_twin.default.alias_orders', {dt: '2026-05-02'});
+CALL glue_add_partition('my_datalake_twin.{GLUE_TEST_DB}.alias_orders', {dt: '2026-05-02'});
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.alias_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.alias_orders') ORDER BY dt;
 ----
 2026-05-01
 2026-05-02
@@ -519,22 +524,22 @@ statement ok
 DETACH my_datalake_twin;
 
 statement ok
-DROP TABLE my_datalake.default.alias_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.alias_orders;
 
 # the default (transaction) scope is unaffected: bare metadata reads still work after a reset
 statement ok
 RESET glue_metadata_cache_scope;
 
 statement ok
-CREATE TABLE my_datalake.default.bare_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.bare_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-CALL glue_add_partition('my_datalake.default.bare_orders', {dt: '2026-02-01'});
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.bare_orders', {dt: '2026-02-01'});
 
 query I
-SELECT dt FROM glue_partitions('my_datalake.default.bare_orders');
+SELECT dt FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.bare_orders');
 ----
 2026-02-01
 
 statement ok
-DROP TABLE my_datalake.default.bare_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.bare_orders;

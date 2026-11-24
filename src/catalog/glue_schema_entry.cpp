@@ -6,6 +6,8 @@
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/catalog/entry_scan_filters.hpp"
+#include "duckdb/catalog/similar_catalog_entry.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -25,6 +27,7 @@
 
 #include "core/glue_types.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "catalog/glue_view.hpp"
@@ -598,6 +601,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
 	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
 	GlueViewNames::PinToCatalog(*check->node, catalog.GetName(), name);
+	GlueViewNames::MapIcebergTables(context, glue_catalog, database_info.name + "." + view_name, *check->node);
 	vector<LogicalType> types;
 	vector<Identifier> names;
 	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
@@ -631,7 +635,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		GlueColumn column;
 		auto aliased = i < info.aliases.size() && !info.aliases[i].GetIdentifierName().empty();
 		column.name = (aliased ? info.aliases[i] : info.names[i]).GetIdentifierName();
-		column.type = info.types[i].ToString();
+		column.type = GlueTypes::FromLogicalTypeForView(info.types[i]);
 		view.columns.push_back(std::move(column));
 	}
 	// re-fetch so the entry reflects what Glue stored
@@ -680,10 +684,6 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateCopyFunction(CatalogTransactio
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreatePragmaFunction(CatalogTransaction transaction,
                                                                  CreatePragmaFunctionInfo &info) {
 	throw BinderException("Glue databases do not support creating pragma functions");
-}
-
-optional_ptr<CatalogEntry> GlueSchemaEntry::CreateCollation(CatalogTransaction transaction, CreateCollationInfo &info) {
-	throw BinderException("Glue databases do not support creating collations");
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
@@ -872,6 +872,18 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		return std::any_of(current.partition_keys.begin(), current.partition_keys.end(),
 		                   [&](const GlueColumn &column) { return StringUtil::CIEquals(column.name, name); });
 	};
+
+	auto type = alter_table.alter_table_type;
+	switch (type) {
+	case AlterTableType::ADD_COLUMN:
+	case AlterTableType::REMOVE_COLUMN:
+	case AlterTableType::RENAME_COLUMN:
+	case AlterTableType::ALTER_COLUMN_TYPE:
+		current.ThrowIfAvroSchemaDefined("change the columns of");
+		break;
+	default:
+		break;
+	}
 
 	auto columns = current.columns;
 	switch (alter_table.alter_table_type) {
@@ -1066,10 +1078,37 @@ void GlueSchemaEntry::Scan(ClientContext &context, SchemaScanInfo &info) {
 	// tables and views share the set, so the lookup returns whichever Glue holds under the name; the caller keeps
 	// the entries of the type it asked for
 	EntryLookupInfo lookup(info.type, QualifiedName(Identifier(name)));
-	auto entry = tables.GetEntry(context, lookup);
+	optional_ptr<CatalogEntry> entry;
+	try {
+		entry = tables.GetEntry(context, lookup);
+	} catch (const GlueException &ex) {
+		// like the listing this filter replaces, a table we may not describe is not listed
+		if (!ex.access_denied) {
+			throw;
+		}
+		ErrorData error(ex);
+		DUCKDB_LOG_WARNING(context, "Not listing Glue table '%s.%s': %s", database_info.name, name, error.RawMessage());
+		return;
+	}
 	if (entry) {
 		info.callback(*entry);
 	}
+}
+
+SimilarCatalogEntry GlueSchemaEntry::GetSimilarEntry(CatalogTransaction transaction,
+                                                     const EntryLookupInfo &lookup_info) {
+	SimilarCatalogEntry result;
+	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
+		return result;
+	}
+	tables.ScanLoaded([&](CatalogEntry &entry) {
+		auto score = StringUtil::SimilarityRating(entry.name.GetIdentifierName(), lookup_info.GetEntryName());
+		if (score > result.score) {
+			result.score = score;
+			result.name = Identifier(entry.name.GetIdentifierName());
+		}
+	});
+	return result;
 }
 
 const GlueDatabaseInfo &GlueSchemaEntry::GetSchemaInfo(ClientContext &context) {

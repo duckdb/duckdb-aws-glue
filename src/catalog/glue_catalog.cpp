@@ -24,6 +24,7 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "catalog/glue_view.hpp"
 #include "catalog/scan_filter_equality.hpp"
 #include "planning/glue_hive_insert.hpp"
 
@@ -86,7 +87,18 @@ ErrorData GlueCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	return ErrorData();
 }
 
+//! Glue databases do not nest: a nested path would otherwise create or drop the database of its last name
+static string NestedSchemaError(const Catalog &catalog, vector<Identifier> schema_path) {
+	return StringUtil::Format("Catalog %s does not support nested schemas: %s", catalog.GetName(),
+	                          QualifiedName::FromPath(std::move(schema_path)).ToString());
+}
+
 ErrorData GlueCatalog::SupportsCreateSchema(CreateSchemaInfo &info) {
+	if (info.IsNested()) {
+		auto schema_path = info.ParentSchemas();
+		schema_path.push_back(info.SchemaName());
+		return ErrorData(ExceptionType::BINDER, NestedSchemaError(*this, std::move(schema_path)));
+	}
 	return ErrorData();
 }
 
@@ -154,6 +166,17 @@ void GlueCatalog::OnDetach(ClientContext &context) {
 }
 
 void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
+	// the path is [catalog, parent schemas..., schema]
+	auto &path = info.GetQualifiedName().Path();
+	vector<Identifier> schema_path;
+	for (idx_t i = path.size() > 1 ? 1 : 0; i < path.size(); i++) {
+		if (!path[i].empty()) {
+			schema_path.push_back(path[i]);
+		}
+	}
+	if (schema_path.size() > 1) {
+		throw BinderException(NestedSchemaError(*this, std::move(schema_path)));
+	}
 	ThrowIfInExplicitTransaction(context);
 	auto schema_name = info.GetQualifiedName().Name().GetIdentifierName();
 	auto existing = schemas.GetEntry(context, schema_name);
@@ -277,13 +300,18 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
                                                                      const SchemaScanFilters &filters) {
+	optional_ptr<CatalogEntry> entry;
 	string name;
-	if (filters.GetSchemaOid() ||
-	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
+	idx_t oid;
+	if (TryGetOidEquality(filters.GetSchemaOid(), "GlueCatalog::GetSchemasForScan", oid)) {
+		entry = schemas.GetEntryByOid(context, oid);
+	} else if (!filters.GetSchemaOid() &&
+	           TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
+		entry = schemas.GetEntry(context, name);
+	} else {
 		return Catalog::GetSchemasForScan(context, filters);
 	}
 	vector<reference<SchemaCatalogEntry>> result;
-	auto entry = schemas.GetEntry(context, name);
 	if (entry) {
 		result.push_back(entry->Cast<SchemaCatalogEntry>());
 	}
@@ -343,7 +371,7 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 		case TableLookup::TABLE_NOT_FOUND:
 		case TableLookup::SCHEMA_NOT_FOUND:
 			// 'result' holds the table and its schema, the schema alone, or neither
-			return result;
+			return ViewForReading(transaction, result);
 		case TableLookup::SKIPPED:
 			break;
 		}
@@ -352,6 +380,47 @@ CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transa
 	if (schema) {
 		result.schema = &schema->Cast<SchemaCatalogEntry>();
 		result.entry = result.schema->LookupEntry(transaction, lookup_info);
+	}
+	if (lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		return ViewForReading(transaction, result);
+	}
+	return result;
+}
+
+bool GlueCatalog::IsIcebergCatalog(Catalog &catalog) {
+	auto &iceberg_catalog_name = options.iceberg_catalog;
+	if (iceberg_catalog_name.empty() || catalog.GetName() != iceberg_catalog_name) {
+		return false;
+	}
+	if (catalog.GetCatalogType() != "iceberg") {
+		throw BinderException("ICEBERG_CATALOG \"%s\" of Glue catalog \"%s\" is a %s catalog, not an Iceberg catalog",
+		                      iceberg_catalog_name.GetIdentifierName(), GetName().GetIdentifierName(),
+		                      catalog.GetCatalogType());
+	}
+	auto warehouse = catalog.GetDBPath();
+	auto catalog_id = KnownCatalogId();
+	if (!StringUtil::CIEquals(warehouse, options.path) && !StringUtil::CIEquals(warehouse, catalog_id)) {
+		throw BinderException("ICEBERG_CATALOG \"%s\" reads warehouse '%s', not Glue catalog \"%s\" ('%s')",
+		                      iceberg_catalog_name.GetIdentifierName(), warehouse, GetName().GetIdentifierName(),
+		                      catalog_id.empty() ? options.path : catalog_id);
+	}
+	return true;
+}
+
+bool GlueCatalog::IsIcebergTable(ClientContext &context, const Identifier &schema_name, const Identifier &table_name) {
+	auto schema = schemas.GetEntry(context, schema_name.GetIdentifierName());
+	if (!schema) {
+		return false;
+	}
+	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(table_name));
+	auto entry = schema->Cast<SchemaCatalogEntry>().LookupEntry(GetCatalogTransaction(context), lookup);
+	return entry && entry->type == CatalogType::TABLE_ENTRY &&
+	       entry->Cast<GlueTable>().table_info.GetFormat().format == GlueFormat::ICEBERG;
+}
+
+CatalogEntryLookup GlueCatalog::ViewForReading(CatalogTransaction transaction, CatalogEntryLookup result) {
+	if (result.entry && result.entry->type == CatalogType::VIEW_ENTRY) {
+		result.entry = &result.entry->Cast<GlueView>().ForReading(transaction.GetContext());
 	}
 	return result;
 }
@@ -408,6 +477,12 @@ string GlueCatalog::KnownCatalogId() {
 		}
 	}
 	return StartsWithAccountId(options.catalog_id) ? options.catalog_id : string();
+}
+
+string GlueCatalog::GlueCatalogIdentity(ClientContext &context) {
+	// ':' is the credentials' default catalog: the id Glue reports names it like an explicit attach does
+	auto catalog_id = options.catalog_id.empty() ? FetchCatalogId(context) : options.catalog_id;
+	return catalog_id + "\x1f" + options.region + "\x1f" + options.endpoint;
 }
 
 string GlueCatalog::FetchCatalogId(ClientContext &context) {

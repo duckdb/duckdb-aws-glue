@@ -61,6 +61,7 @@ ATTACH '123456789012' AS my_datalake (
 
 run
 SET enable_external_file_cache = false;
+SET glue_enable_partition_key_statistics = false;
 SET debug_fs_delay_mean_ms = 20;
 SELECT count(*), sum(value) > 0 FROM my_datalake.default.listing_50_of_1100
 WHERE dt BETWEEN '2021-01-01' AND '2021-02-19';

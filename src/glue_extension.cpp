@@ -11,9 +11,12 @@
 #include "core/readers/hive_csv_options.hpp"
 #include "functions/glue_functions.hpp"
 #include "functions/glue_repair_table.hpp"
+#include "execution/glue_written_files.hpp"
 #include "grammar/glue_grammar.hpp"
+#include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_request_metrics.hpp"
 #include "core/glue_log_types.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
@@ -37,6 +40,13 @@ public:
 		create_transaction_manager = CreateTransactionManager;
 	}
 };
+
+static void SetHiveFooterStatisticsMaxFiles(ClientContext &context, SetScope scope, Value &parameter) {
+	if (!parameter.IsNull() && UBigIntValue::Get(parameter) > HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT) {
+		throw InvalidInputException("hive_footer_statistics_max_files is at most %d, not %d",
+		                            HIVE_FOOTER_STATISTICS_MAX_FILES_LIMIT, UBigIntValue::Get(parameter));
+	}
+}
 
 static void InitAWSAPI() {
 	// Should only be called once, and databases can load the extension concurrently
@@ -64,6 +74,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "has no HTTP client of its own.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	config.AddExtensionOption(
+	    GlueWrittenFiles::SETTING,
+	    "Add the data files each INSERT or CREATE TABLE AS into a Hive table wrote to the temporary "
+	    "table glue_written_files",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	config.AddExtensionOption("glue_get_partitions_segments",
 	                          "How many GetPartitions requests to run at the same time when listing the partitions of "
 	                          "a table (Glue's Segment API splits them over non overlapping segments). 0, the "
@@ -71,6 +86,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_partition_load_parallelism",
+	                          "The number of partitioned Glue tables a statement scans whose partitions are loaded "
+	                          "concurrently, when the first of its scans needs partitions. 1 loads each table's "
+	                          "partitions on its own, when its scan first needs them. Default 8.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(8));
+	config.AddExtensionOption("glue_partition_load_cooldown",
+	                          "After Glue throttles a concurrent partition load (glue_partition_load_parallelism), the "
+	                          "number of seconds every connection loads that Glue catalog's tables one at a time. "
+	                          "Default 300.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(300));
 	config.AddExtensionOption("glue_max_retries",
 	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
 	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "
@@ -116,12 +141,25 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "superseded files, until then. Default false.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
+	config.AddExtensionOption("glue_enable_partition_key_statistics",
+	                          "Give the optimizer the bounds and distinct count of a Hive table's partition keys, from "
+	                          "the partitions a scan reads. Default false, as for read_parquet with hive partitioning.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	config.AddExtensionOption("hive_partition_listing_threshold",
 	                          "When set, a scan reading at least this many partitions below the table location lists "
 	                          "the location once (recursively) instead of one listing per partition. Unset (default), "
 	                          "the location is listed when that takes fewer rounds of requests than listing the "
 	                          "partitions read, or as many rounds and a tenth of the requests.",
 	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
+
+	config.AddExtensionOption("hive_footer_statistics_max_files",
+	                          "An unpartitioned parquet scan that reads at most this many files gives the optimizer "
+	                          "its row count and each column's min, max and NULLs, from the footers of all of them, "
+	                          "which it reads at bind; a scan of more files gives a sampled estimate and no column "
+	                          "statistics. 0 turns it off. Default 16, at most 25.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(HIVE_FOOTER_STATISTICS_DEFAULT_MAX_FILES),
+	                          SetHiveFooterStatisticsMaxFiles);
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
@@ -144,11 +182,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "InternalServiceException, ...) fails the first attempt only. Empty, the default, injects "
 	    "nothing.",
 	    LogicalType::VARCHAR, Value(""), GlueAPI::CheckDebugFailPartitionRegistration, SetScope::SESSION, true);
+	config.AddExtensionOption("glue_debug_fail_partition_loads",
+	                          "For tests: an AWS error name (ThrottlingException, InternalServiceException, ...) that "
+	                          "every GetPartitions request of a concurrent partition load fails with, before it is "
+	                          "sent. A scan loading its own table's partitions is not affected. Empty, the default, "
+	                          "injects nothing.",
+	                          LogicalType::VARCHAR, Value(""), nullptr, SetScope::SESSION, true);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
-	RegisterGlueHttpClientFactory();
+	RegisterGlueHttpClientFactory(instance);
 	RegisterGlueLogTypes(instance);
+	GlueRequestMetrics::Register(loader);
 
 	// Hive tables are read with read_parquet. A linked parquet is loaded as linked: autoloading would install it first
 	if (!instance.ExtensionIsLoaded("parquet")) {

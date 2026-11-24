@@ -10,63 +10,66 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.vg_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.vg_view;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.vg_table;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.vg_table;
 
 statement ok
-CREATE TABLE my_datalake.default.vg_table (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.vg_table (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-CREATE VIEW my_datalake.default.vg_view AS SELECT id FROM vg_table;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.vg_view AS SELECT id FROM vg_table;
 
 statement error
-ALTER VIEW my_datalake.default.vg_view RENAME TO vg_renamed;
+ALTER VIEW my_datalake.{GLUE_TEST_DB}.vg_view RENAME TO vg_renamed;
 ----
 Glue cannot rename a view
 
 statement error
-COMMENT ON VIEW my_datalake.default.vg_view IS 'a comment';
+COMMENT ON VIEW my_datalake.{GLUE_TEST_DB}.vg_view IS 'a comment';
 ----
 Comments on Glue views are not supported yet
 
 statement error
-ALTER TABLE my_datalake.default.vg_view ADD COLUMN x INTEGER;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.vg_view ADD COLUMN x INTEGER;
 ----
 "vg_view" is a view
 
 statement error
-INSERT INTO my_datalake.default.vg_view VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.vg_view VALUES (1);
 ----
 vg_view is not an table
 
 statement error
-SELECT * FROM glue_partitions('my_datalake.default.vg_view');
+SELECT * FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.vg_view');
 ----
-Glue view 'default.vg_view' has no partitions
+Glue view '{GLUE_TEST_DB}.vg_view' has no partitions
 
 statement ok
-USE my_datalake.default;
+USE my_datalake.{GLUE_TEST_DB};
 
 statement error
 SELECT * FROM glue_partitions('vg_view');
 ----
-Glue view 'default.vg_view' has no partitions
+Glue view '{GLUE_TEST_DB}.vg_view' has no partitions
 
 statement ok
 USE memory;
 
 statement error
-SELECT * FROM glue_add_partition('my_datalake.default.vg_view', {'dt': '2024-01-01'});
+SELECT * FROM glue_add_partition('my_datalake.{GLUE_TEST_DB}.vg_view', {'dt': '2024-01-01'});
 ----
 has no partitions
 
@@ -74,12 +77,12 @@ statement ok
 SET active_grammar_extensions = ['glue_hive_ddl'];
 
 statement error
-ALTER TABLE my_datalake.default.vg_view ADD PARTITION (dt = '2024-01-01');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.vg_view ADD PARTITION (dt = '2024-01-01');
 ----
 has no partitions
 
 statement ok
-DROP VIEW my_datalake.default.vg_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.vg_view;
 
 statement ok
-DROP TABLE my_datalake.default.vg_table;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.vg_table;

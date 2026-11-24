@@ -8,33 +8,36 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.glog_parts;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.glog_parts;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.glog_flat;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.glog_flat;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.glog_avro;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.glog_avro;
 
 statement ok
-CREATE TABLE my_datalake.default.glog_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.glog_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.glog_parts VALUES (1, 'a'), (2, 'b'), (3, 'c');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.glog_parts VALUES (1, 'a'), (2, 'b'), (3, 'c');
 
 statement ok
-CREATE TABLE my_datalake.default.glog_flat AS SELECT range AS id FROM range(5);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.glog_flat AS SELECT range AS id FROM range(5);
 
 statement ok
-CREATE TABLE my_datalake.default.glog_avro WITH (format = 'avro') AS SELECT range AS id FROM range(4);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.glog_avro WITH (format = 'avro') AS SELECT range AS id FROM range(4);
 
 statement ok
 CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
@@ -42,13 +45,13 @@ CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
 # a cold catalog: every request of the lookup and the partition load is logged; finding the table first needs no
 # GetDatabase
 statement ok
-attach '{GLUE_CATALOG_ID}' as glog_cold (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+attach '{GLUE_CATALOG_ID}' as glog_cold (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA '{GLUE_TEST_DB}');
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM glog_cold.default.glog_parts WHERE dt = 'b';
+SELECT count(*) FROM glog_cold.{GLUE_TEST_DB}.glog_parts WHERE dt = 'b';
 ----
 1
 
@@ -56,10 +59,10 @@ query IIIIIIII
 SELECT "table", scan_id, event, partitions, partitions_read, listings, files, detail
 FROM duckdb_logs_parsed('GlueScan') ORDER BY event;
 ----
-default.glog_parts	1	listing	NULL	1	NULL	1	partition
-default.glog_parts	1	partitions	3	NULL	NULL	NULL	NULL
-default.glog_parts	1	plan	3	1	1	NULL	partitions
-default.glog_parts	1	sample	NULL	NULL	NULL	1	NULL
+{GLUE_TEST_DB}.glog_parts	1	listing	NULL	1	NULL	1	partition
+{GLUE_TEST_DB}.glog_parts	1	partitions	3	NULL	NULL	NULL	NULL
+{GLUE_TEST_DB}.glog_parts	1	plan	3	1	1	NULL	partitions
+{GLUE_TEST_DB}.glog_parts	1	sample	NULL	NULL	NULL	1	NULL
 
 query I
 SELECT bool_and(duration_ms >= 0) FROM duckdb_logs_parsed('GlueScan') WHERE event != 'plan';
@@ -78,13 +81,12 @@ GROUP BY ALL ORDER BY operation;
 AWSGlue.GetPartitions	OK_200	true
 AWSGlue.GetTable	OK_200	true
 
-# each scan of a query has its own scan_id, numbered from 1 in every query; the second scan of a table reuses its
-# sample
+# a small unpartitioned parquet table is counted from the footers its scan reads while planning: neither scan samples it
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM glog_cold.default.glog_flat a JOIN glog_cold.default.glog_flat b USING (id);
+SELECT count(*) FROM glog_cold.{GLUE_TEST_DB}.glog_flat a JOIN glog_cold.{GLUE_TEST_DB}.glog_flat b USING (id);
 ----
 5
 
@@ -92,8 +94,33 @@ query III
 SELECT scan_id, count(*) FILTER (event = 'listing'), count(*) FILTER (event = 'sample')
 FROM duckdb_logs_parsed('GlueScan') GROUP BY scan_id ORDER BY scan_id;
 ----
-1	1	1
+1	1	0
 2	1	0
+
+# without footer statistics each scan of a query has its own scan_id, numbered from 1 in every query; the second scan
+# of a table to ask reuses the sample of the first
+statement ok
+SET hive_footer_statistics_max_files = 0;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM glog_cold.{GLUE_TEST_DB}.glog_flat a JOIN glog_cold.{GLUE_TEST_DB}.glog_flat b USING (id);
+----
+5
+
+query III
+SELECT scan_id, count(*) FILTER (event = 'listing'), count(*) FILTER (event = 'sample') < 2
+FROM duckdb_logs_parsed('GlueScan') GROUP BY scan_id ORDER BY scan_id;
+----
+1	1	true
+2	1	true
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'sample';
+----
+1
 
 # from hive_partition_listing_threshold partitions on, the table location is listed once
 statement ok
@@ -103,7 +130,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM glog_cold.default.glog_parts WHERE dt IN ('a', 'c');
+SELECT count(*) FROM glog_cold.{GLUE_TEST_DB}.glog_parts WHERE dt IN ('a', 'c');
 ----
 2
 
@@ -122,7 +149,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM glog_cold.default.glog_flat;
+SELECT count(*) FROM glog_cold.{GLUE_TEST_DB}.glog_flat;
 ----
 5
 
@@ -132,12 +159,15 @@ SELECT event, partitions, partitions_read, listings, files, detail FROM duckdb_l
 listing	NULL	NULL	NULL	1	table
 sample	NULL	NULL	NULL	1	NULL
 
+statement ok
+RESET hive_footer_statistics_max_files;
+
 # an avro table is not sampled: its sample lists nothing
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM glog_cold.default.glog_avro;
+SELECT count(*) FROM glog_cold.{GLUE_TEST_DB}.glog_avro;
 ----
 4
 
@@ -152,7 +182,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement error
-SELECT * FROM glog_cold.default.glog_missing;
+SELECT * FROM glog_cold.{GLUE_TEST_DB}.glog_missing;
 ----
 <REGEX>:Catalog Error: Table with name glog_missing does not exist.*
 
@@ -169,10 +199,10 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-attach '{GLUE_CATALOG_ID}' as glog_quiet (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+attach '{GLUE_CATALOG_ID}' as glog_quiet (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', DEFAULT_SCHEMA '{GLUE_TEST_DB}');
 
 query I
-SELECT count(*) FROM glog_quiet.default.glog_parts;
+SELECT count(*) FROM glog_quiet.{GLUE_TEST_DB}.glog_parts;
 ----
 3
 
@@ -182,10 +212,10 @@ SELECT (SELECT count(*) FROM glue_requests()), count(*) FROM duckdb_logs WHERE t
 0	0
 
 statement ok
-DROP TABLE my_datalake.default.glog_parts;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.glog_parts;
 
 statement ok
-DROP TABLE my_datalake.default.glog_flat;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.glog_flat;
 
 statement ok
-DROP TABLE my_datalake.default.glog_avro;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.glog_avro;

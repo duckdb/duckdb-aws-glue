@@ -1,14 +1,18 @@
 #pragma once
 
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_entry_set.hpp"
 #include "execution/glue_hive_write.hpp"
 
 #include <functional>
@@ -16,6 +20,8 @@
 namespace duckdb {
 class GlueCatalog;
 class GlueSchemaEntry;
+class GlueView;
+class ViewCatalogEntry;
 
 enum class GlueTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -46,7 +52,7 @@ public:
 		shared_ptr<CacheEntry<GlueTableInfo>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(tables, database_name + "\n" + table_name);
+			entry = FindEntry(tables, TableCacheKey(database_name, table_name));
 		}
 		return Resolve(*entry, load);
 	}
@@ -56,7 +62,7 @@ public:
 		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(partitions, database_name + "\n" + table_name);
+			entry = FindEntry(partitions, TableCacheKey(database_name, table_name));
 		}
 		return Resolve(*entry, load);
 	}
@@ -66,7 +72,7 @@ public:
 		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(partitions, database_name + "\n" + table_name);
+			entry = FindEntry(partitions, TableCacheKey(database_name, table_name));
 		}
 		annotated_lock_guard<annotated_mutex> guard(entry->load_lock);
 		return entry->value;
@@ -75,16 +81,30 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
+		listed_sets.clear();
 	}
 	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
 	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
 	idx_t Id() const {
 		return id;
 	}
+	//! Whether the entry set with this id was listed from Glue under this cache; the listing holds until the cache is
+	//! cleared
+	bool HasListed(glue_entry_set_id_t set_id) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		return listed_sets.count(set_id) > 0;
+	}
+	void MarkListed(glue_entry_set_id_t set_id) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		listed_sets.insert(set_id);
+	}
+	//! Monotonic ids, never reused: for cache instances and for the entry sets they track
+	static idx_t NextId();
+	static string TableCacheKey(const string &database_name, const string &table_name) {
+		return database_name + "\x1f" + table_name;
+	}
 
 private:
-	static idx_t NextId();
-
 	//! One cached value and the lock that guards loading it. The lock is per entry so the Glue calls for
 	//! different tables do not wait on each other (resolving N tables runs their fetches in parallel).
 	template <class T>
@@ -119,6 +139,7 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
+	unordered_set<glue_entry_set_id_t> listed_sets DUCKDB_GUARDED_BY(lock);
 	const idx_t id = NextId();
 };
 
@@ -196,6 +217,10 @@ public:
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
 	//! (so a prepared statement's two binds share it).
 	shared_ptr<GlueTransactionCache> cache;
+	//! Glue views with their Iceberg tables bound in the catalog the attach option ICEBERG_CATALOG names, per alias
+	//! mapping and Iceberg catalog; null when the view reads no Iceberg table
+	mutex iceberg_views_lock;
+	reference_map_t<GlueView, map<string, unique_ptr<ViewCatalogEntry>>> iceberg_views;
 
 private:
 	//! Undo the write if it did not complete (GlueHiveWrite::Undo); nothing is done once the connection is gone

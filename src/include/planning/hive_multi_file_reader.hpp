@@ -14,6 +14,7 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
+class ExpressionFilter;
 
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
@@ -48,6 +49,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
+	//! The cardinality function of the bound file format reader, used once the footers of every file are read
+	table_function_cardinality_t format_cardinality = nullptr;
 	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
 	//! columns
 	table_function_get_virtual_columns_t format_virtual_columns = nullptr;
@@ -78,6 +81,14 @@ struct HiveScanInfo : public TableFunctionInfo {
 	                           const vector<idx_t> &column_indexes) const;
 	//! A description of the table for error messages
 	string Describe() const;
+	//! The key of the table in the query cache: a Glue table by name, a hive_scan by its location
+	string CacheKey() const;
+	//! Whether the optimizer gets the footers of every file for statistics: a small unpartitioned parquet scan
+	bool ReadsFooterStatistics() const;
+	//! A copy of 'bind_data' with the footers of all its files, or null when the scan has none. They are read when the
+	//! optimizer first asks, once per query and table, or per scan when path-filtered
+	unique_ptr<MultiFileBindData> FooterStatisticsBindData(ClientContext &context,
+	                                                       const MultiFileBindData &bind_data) const;
 	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
 	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
@@ -87,8 +98,13 @@ struct HiveScanInfo : public TableFunctionInfo {
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
 	//! The GetPartitions Expression of the fetch Partitions() makes; ignored once the partitions are loaded
 	void SetPartitionExpression(string expression) const;
+	void SetPartitions(shared_ptr<const vector<GluePartitionInfo>> partitions_p);
 
 private:
+	string FootersCacheKey(bool path_filtered) const;
+	vector<shared_ptr<BaseUnionData>> ReadFooters(ClientContext &context, const MultiFileBindData &bind_data,
+	                                              idx_t max_files) const;
+
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
 	mutable string partition_expression DUCKDB_GUARDED_BY(partitions_lock);
@@ -96,10 +112,6 @@ private:
 	shared_ptr<const vector<GluePartitionInfo>> FetchPartitions(ClientContext &context) const
 	    DUCKDB_REQUIRES(partitions_lock);
 };
-
-//! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with
-//! '_' or '.', as Spark's _SUCCESS), not a directory marker (_$folder$) and not empty
-bool IsDataFile(const OpenFileInfo &file, const string &prefix);
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so
@@ -127,6 +139,11 @@ public:
 	FileExpandResult GetExpandResult() const override;
 	//! Prune on the table filters pushed in when the scan starts
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
+	//! Keep files matching filters that depend only on "$path" or filename
+	void SetPathFilters(vector<shared_ptr<ExpressionFilter>> filters);
+	bool HasPathFilters() const {
+		return !path_filters.empty();
+	}
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
 	//! The data files listed to measure the table: the first partition's, or the location of an unpartitioned table.
@@ -163,15 +180,21 @@ private:
 	//! The partition of the deepest registered location containing the file, searching no shorter than
 	//! 'min_directory_size' characters of its ComparableLocation
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
+	//! IsDataFile below the deepest registered partition location containing the file (see OwningPartition), or below
+	//! the root when there is none, so a partition key such as '_k' is not read as a hidden directory
+	bool IsRootListedDataFile(const OpenFileInfo &file, const string &root_prefix, idx_t comparable_root_size,
+	                          const vector<GluePartitionInfo> &partitions) const;
 	//! Add a listed file of the partition unless this list already has it. Called with
-	//! HiveScanInfo::file_partitions_lock held.
-	void AddFile(OpenFileInfo file, idx_t partition_index) const;
+	//! HiveScanInfo::file_partitions_lock held. 'partition_index' is invalid for an unpartitioned table.
+	void AddFile(OpenFileInfo file, optional_idx partition_index) const;
 
 private:
 	//! The context the list was created in; LazyMultiFileList keeps it as an optional_ptr that is const in const
 	//! members
 	ClientContext &client_context;
 	shared_ptr<HiveScanInfo> scan_info;
+	//! Filters whose only column is "$path" or filename, applied to listed files before any is opened
+	vector<shared_ptr<ExpressionFilter>> path_filters;
 	mutable annotated_mutex indexes_lock;
 	//! Null for every partition of the table until PartitionIndexes() resolves it
 	mutable shared_ptr<const vector<idx_t>> partition_indexes DUCKDB_GUARDED_BY(indexes_lock);
@@ -195,8 +218,8 @@ private:
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
-//! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan
-//! binds the same scan again
+//! Give 'function' the Hive scan's plan serialization. A deserialized plan binds the same scan again from it; a
+//! partitioned table's scan also needs the query's partition list, and is refused without it
 void SetHiveScanSerialization(TableFunction &function);
 
 //! MultiFileReader for Hive tables registered in Glue. It reads the files Glue's partitions point to (whatever their

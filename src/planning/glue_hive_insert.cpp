@@ -1,4 +1,5 @@
 #include "planning/glue_hive_insert.hpp"
+#include "planning/hive_field_conversion.hpp"
 
 #include "api/glue_api_util.hpp"
 
@@ -33,6 +34,7 @@
 #include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
 #include "core/hive_location.hpp"
+#include "execution/glue_written_files.hpp"
 #include "execution/hive_copy.hpp"
 
 namespace duckdb {
@@ -52,19 +54,6 @@ static string DelimiterToString(const string &delimiter) {
 	for (auto c : delimiter) {
 		auto byte = static_cast<uint8_t>(c);
 		result += byte < 0x20 ? StringUtil::Format("\\%03o", byte) : string(1, c);
-	}
-	return result;
-}
-
-//! The scalar function 'name' bound to 'children'
-static unique_ptr<Expression> BindFunction(ClientContext &context, const string &name,
-                                           vector<unique_ptr<Expression>> children) {
-	FunctionBinder function_binder(context);
-	ErrorData error;
-	auto result =
-	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier(name), std::move(children), error);
-	if (!result) {
-		error.Throw();
 	}
 	return result;
 }
@@ -719,12 +708,26 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 	}
 	vector<Identifier> names;
 	vector<LogicalType> types;
+	vector<unique_ptr<Expression>> select_list;
+	bool needs_cast = false;
 	for (auto &column : op.info->Base().columns.Logical()) {
 		names.push_back(column.Name());
-		types.push_back(column.Type());
+		// the type the table's files are read with, e.g. DECIMAL(38,0) for a HUGEINT
+		auto glue_type = GlueTypes::ToLogicalType(GlueTypes::FromLogicalType(column.Type()));
+		needs_cast = needs_cast || glue_type != column.Type();
+		select_list.push_back(BoundCastExpression::AddCastToType(
+		    context, make_uniq<BoundReferenceExpression>(column.Type(), select_list.size()), glue_type));
+		types.push_back(std::move(glue_type));
+	}
+	reference<PhysicalOperator> source = plan;
+	if (needs_cast) {
+		auto &projection = planner.Make<PhysicalProjection>(types, std::move(select_list), op.estimated_cardinality);
+		projection.children.push_back(plan);
+		source = projection;
 	}
 	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
-	PlanWrite(context, planner, op, insert, nullptr, table_info, plan, names, types, schema, std::move(op.info));
+	PlanWrite(context, planner, op, insert, nullptr, table_info, source.get(), names, types, schema,
+	          std::move(op.info));
 	return insert;
 }
 
@@ -756,6 +759,12 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 		}
 	}
 	return SinkResultType::NEED_MORE_INPUT;
+}
+
+void GlueHiveInsert::RecordWrittenFiles(ClientContext &context, const vector<string> &files) const {
+	if (!files.empty() && GlueWrittenFiles::IsEnabled(context)) {
+		GlueWrittenFiles::Append(context, table_info.schema_name + "." + table_info.name, files);
+	}
 }
 
 //! Case sensitive, like S3 paths
@@ -809,6 +818,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		transaction.CompleteHiveWrite(write_id);
+		RecordWrittenFiles(context, state.written_files);
 		return SinkFinalizeType::READY;
 	}
 
@@ -893,6 +903,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		                  table_info.schema_name, table_info.name, error.RawMessage());
 	}
 	transaction.CompleteHiveWrite(write_id);
+	RecordWrittenFiles(context, state.written_files);
 	return SinkFinalizeType::READY;
 }
 

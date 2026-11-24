@@ -10,6 +10,7 @@
 #include "duckdb/common/unordered_map.hpp"
 
 #include "core/glue_format.hpp"
+#include "core/hive_serde.hpp"
 #include "core/readers/hive_csv_options.hpp"
 #include "core/readers/hive_json_options.hpp"
 
@@ -56,9 +57,6 @@ bool IsTextFileFormat(HiveFileFormat format);
 //! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
 
-//! The SerDe of a Hive table, decided by its SerializationLibrary; SerDes of one file format can differ in how they
-//! read the data files and which engines write them
-enum class HiveSerDe : uint8_t { PARQUET, LAZY_SIMPLE, OPEN_CSV, HIVE_JSON, OPENX_JSON, AVRO };
 HiveFileFormat HiveSerDeFileFormat(HiveSerDe serde);
 
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
@@ -146,6 +144,9 @@ public:
 	string GetCompressionLevel() const;
 	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
 	string GetNullFormat() const;
+	//! Throws when the table or its SerDe holds an Avro schema (avro.schema.literal or avro.schema.url), which
+	//! Hive and Athena read the columns from and DuckDB does not update
+	void ThrowIfAvroSchemaDefined(const string &action) const;
 	//! skip.header.line.count, 0 without
 	idx_t GetHeaderLineCount() const;
 	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
@@ -193,7 +194,7 @@ struct GluePartitionInfo {
 	vector<string> values;
 	string location;
 	//! The partition's own StorageDescriptor.InputFormat and SerdeInfo, which Hive reads its files with and which can
-	//! differ from the table's; empty when not known (a hive_scan, a deserialized plan)
+	//! differ from the table's; empty when not known (a hive_scan)
 	string input_format;
 	string serde_library;
 	unordered_map<string, string> serde_parameters;

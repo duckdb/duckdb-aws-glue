@@ -8,41 +8,44 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.card_skew;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.card_skew;
 
 statement ok
-CREATE TABLE my_datalake.default.card_skew (id INTEGER, pad VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.card_skew (id INTEGER, pad VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
 
 # two partitions, each holding ONE wide row (~190KB of incompressible text). With one file per partition
 # the sampled directory has min_file_size == max_file_size, so the within-directory bytes weighting never
 # triggers, and rows x files x partitions would estimate the whole table at ~1 row per partition.
 statement ok
-INSERT INTO my_datalake.default.card_skew
+INSERT INTO my_datalake.{GLUE_TEST_DB}.card_skew
     SELECT range AS id, (SELECT string_agg(md5((r.range * 7919 + range)::VARCHAR), '') FROM range(6000)) AS pad,
            chr(97 + range::INTEGER) AS dt FROM range(2) r;
 
 query II
-SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.card_skew')), (SELECT count(*) FROM my_datalake.default.card_skew);
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.card_skew')), (SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.card_skew);
 ----
 2	2
 
 # the bytes floor keeps the estimate in the thousands (~100 bytes per row over ~190KB directories)
 # instead of ~2 rows
 query II
-EXPLAIN SELECT id FROM my_datalake.default.card_skew;
+EXPLAIN SELECT id FROM my_datalake.{GLUE_TEST_DB}.card_skew;
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~[1-9][0-9]{0,2},?[0-9]{3} rows.*
 
 statement ok
-DROP TABLE my_datalake.default.card_skew;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.card_skew;
 
 # ----------------------------------------------------------------------------------------------------
 # Negative control: the floor must NOT fire on an unpartitioned table. The same one-wide-row shape
@@ -50,18 +53,18 @@ DROP TABLE my_datalake.default.card_skew;
 # ----------------------------------------------------------------------------------------------------
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.card_skew_unpart;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.card_skew_unpart;
 
 statement ok
-CREATE TABLE my_datalake.default.card_skew_unpart (id INTEGER, pad VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.card_skew_unpart (id INTEGER, pad VARCHAR);
 
 statement ok
-INSERT INTO my_datalake.default.card_skew_unpart
+INSERT INTO my_datalake.{GLUE_TEST_DB}.card_skew_unpart
     SELECT range AS id, (SELECT string_agg(md5((r.range * 7919 + range)::VARCHAR), '') FROM range(6000)) AS pad
     FROM range(1) r;
 
 query II
-EXPLAIN SELECT id FROM my_datalake.default.card_skew_unpart;
+EXPLAIN SELECT id FROM my_datalake.{GLUE_TEST_DB}.card_skew_unpart;
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
@@ -71,18 +74,18 @@ physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 # ----------------------------------------------------------------------------------------------------
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.card_skew_single;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.card_skew_single;
 
 statement ok
-CREATE TABLE my_datalake.default.card_skew_single (id INTEGER, pad VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.card_skew_single (id INTEGER, pad VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.card_skew_single
+INSERT INTO my_datalake.{GLUE_TEST_DB}.card_skew_single
     SELECT range AS id, (SELECT string_agg(md5((r.range * 7919 + range)::VARCHAR), '') FROM range(6000)) AS pad,
            'a' AS dt FROM range(1) r;
 
 query II
-EXPLAIN SELECT id FROM my_datalake.default.card_skew_single;
+EXPLAIN SELECT id FROM my_datalake.{GLUE_TEST_DB}.card_skew_single;
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
@@ -92,30 +95,30 @@ physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 # ----------------------------------------------------------------------------------------------------
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.card_dense;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.card_dense;
 
 statement ok
-CREATE TABLE my_datalake.default.card_dense (id INTEGER, v VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.card_dense (id INTEGER, v VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.card_dense
+INSERT INTO my_datalake.{GLUE_TEST_DB}.card_dense
     SELECT i AS id, 'x' AS v, dt FROM generate_series(1, 5000) t(i), (VALUES ('a'), ('b')) p(dt);
 
 query II
-SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.card_dense')), (SELECT count(*) FROM my_datalake.default.card_dense);
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.card_dense')), (SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.card_dense);
 ----
 2	10000
 
 query II
-EXPLAIN SELECT id FROM my_datalake.default.card_dense;
+EXPLAIN SELECT id FROM my_datalake.{GLUE_TEST_DB}.card_dense;
 ----
 physical_plan	<REGEX>:.*Hive Scan.*~10,000 rows.*
 
 statement ok
-DROP TABLE my_datalake.default.card_skew_unpart;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.card_skew_unpart;
 
 statement ok
-DROP TABLE my_datalake.default.card_skew_single;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.card_skew_single;
 
 statement ok
-DROP TABLE my_datalake.default.card_dense;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.card_dense;

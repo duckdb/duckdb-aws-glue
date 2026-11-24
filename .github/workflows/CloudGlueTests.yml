@@ -1,11 +1,12 @@
 # Runs all sqllogictests of a pull request or a branch, on a release build, against a live AWS Glue Data Catalog
-# (test/configs/cloud_glue.json). It runs
+# (test/configs/cloud_glue.json), as four shards at the same time (see the Run tests step). It runs
 #   - on every push to main; a failing run lists the merges since the last passing one in its job summary
-#   - on a pull request when a maintainer adds the 'cloud-tests' label, and on later pushes to a labeled PR whose
-#     author is a member or collaborator. The PR's code runs with the AWS credentials of the 'cloud-glue' environment,
-#     so read an outside contributor's PR before labeling it, and remove and re-add the label after reading new commits
-#   - when a maintainer starts it (`gh workflow run CloudGlueTests.yml -f pr_number=123`, or without pr_number for the
-#     branch the run is started on, e.g. `gh workflow run CloudGlueTests.yml --ref main`)
+#   - on a pull request when someone with write access adds the 'cloud-tests' label, and on later pushes to a labeled
+#     PR whose author is a member or collaborator. The PR's code runs with the AWS credentials of the 'cloud-glue'
+#     environment, so read an outside contributor's PR before labeling it, and remove and re-add the label after
+#     reading new commits
+#   - when someone with write access starts it (`gh workflow run CloudGlueTests.yml -f pr_number=123`, or without
+#     pr_number for the branch the run is started on, e.g. `gh workflow run CloudGlueTests.yml --ref main`)
 #
 # The 'cloud-glue' environment provides:
 #   variables  GLUE_CATALOG_ID       the AWS account id of the Glue Data Catalog
@@ -71,17 +72,17 @@ jobs:
       AWS_REGION: ${{ vars.GLUE_REGION }}
 
     steps:
-      # workflow_dispatch and labeling already need write or triage access; running a PR's code with the AWS
-      # credentials needs more. A push to main or to a labeled PR of a member is not checked
-      - name: Check that a maintainer started the run
+      # labeling only needs triage access; running a PR's code with the AWS credentials needs write access or more.
+      # A push to main or to a labeled PR of a member is not checked
+      - name: Check that someone with write access started the run
         if: github.event_name == 'workflow_dispatch' || github.event.action == 'labeled'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           role=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.triggering_actor }}/permission" --jq .role_name)
           echo "${{ github.triggering_actor }} has role '$role'"
-          if [ "$role" != "admin" ] && [ "$role" != "maintain" ]; then
-            echo "::error::Only maintainers can run the cloud Glue tests"
+          if [ "$role" != "admin" ] && [ "$role" != "maintain" ] && [ "$role" != "write" ]; then
+            echo "::error::Only users with write access can run the cloud Glue tests"
             exit 1
           fi
 
@@ -134,6 +135,11 @@ jobs:
           persist-credentials: false
           # the merges since the last passing run on main
           fetch-depth: 0
+
+      # Before the build: a test that hardcodes the default database, lists the whole account or creates a database
+      # whose name the sharding cannot read would fail now and then, and only here
+      - name: Check that the tests can run as shards
+        run: python3 scripts/shard_tests.py --check
 
       # the build and its vcpkg dependencies otherwise fill the runner's disk
       - name: Free disk space
@@ -215,12 +221,61 @@ jobs:
           GLUE_REGION: ${{ vars.GLUE_REGION }}
           DEFAULT_S3_LOCATION: ${{ steps.bucket.outputs.location }}
 
+      # The tests run as SHARDS processes at the same time on this runner: they mostly wait for Glue and S3. Each shard has
+      # a Glue database (GLUE_TEST_DB, and GLUE_TEST_DB_SQL, the name as DuckDB prints it: quoted only for 'default') and an S3 prefix of its own, so it cannot see the tables of another, and
+      # scripts/shard_tests.py balances them by the times of test/configs/cloud_timings.json. The tests that look at what
+      # the whole account holds (test/configs/cloud_serial_tests.txt) run afterwards, alone, on the default database.
       - name: Run tests
         id: tests
+        env:
+          SHARDS: "4"
+          RUN: ${{ github.run_id }}_${{ github.run_attempt }}
+          GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+          DEFAULT_S3_LOCATION: ${{ steps.bucket.outputs.location }}
         run: |
           set -o pipefail
-          make test-cloud TEST_BUILD=release CLOUD_TEST_CONFIG="$RUNNER_TEMP/cloud_glue_ci.json" 2>&1 \
-            | tee "$RUNNER_TEMP/cloud_tests.log"
+          pids=()
+          for i in $(seq 1 "$SHARDS"); do
+            database="ci_${RUN}_s$i"
+            aws glue create-database --catalog-id "$GLUE_CATALOG_ID" --database-input "Name=$database"
+            jq --arg database "$database" --arg location "$DEFAULT_S3_LOCATION/shard$i" '
+              .test_env |= map(
+                if .env_name == "GLUE_TEST_DB" then .env_value = $database
+                elif .env_name == "GLUE_TEST_DB_SQL" then .env_value = $database
+                elif .env_name == "DEFAULT_S3_LOCATION" then .env_value = $location
+                else . end)
+            ' "$RUNNER_TEMP/cloud_glue_ci.json" > "$RUNNER_TEMP/cloud_glue_shard$i.json"
+            python3 scripts/shard_tests.py --shards "$SHARDS" --index "$i" --timings test/configs/cloud_timings.json \
+              --summary > "$RUNNER_TEMP/shard$i.txt"
+            if [ -s "$RUNNER_TEMP/shard$i.txt" ]; then
+              make test-cloud TEST_BUILD=release CLOUD_TEST_CONFIG="$RUNNER_TEMP/cloud_glue_shard$i.json" \
+                CLOUD_TEST_LIST="$RUNNER_TEMP/shard$i.txt" > "$RUNNER_TEMP/cloud_tests_shard$i.log" 2>&1 &
+              pids+=($!)
+            fi
+          done
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=1
+          done
+          # the serial tests look at the whole account: leave them only the default database
+          for i in $(seq 1 "$SHARDS"); do
+            aws glue delete-database --catalog-id "$GLUE_CATALOG_ID" --name "ci_${RUN}_s$i" || true
+          done
+          python3 scripts/shard_tests.py --serial > "$RUNNER_TEMP/serial.txt"
+          if [ -s "$RUNNER_TEMP/serial.txt" ]; then
+            make test-cloud TEST_BUILD=release CLOUD_TEST_CONFIG="$RUNNER_TEMP/cloud_glue_ci.json" \
+              CLOUD_TEST_LIST="$RUNNER_TEMP/serial.txt" > "$RUNNER_TEMP/cloud_tests_serial.log" 2>&1 || status=1
+          fi
+          : > "$RUNNER_TEMP/cloud_tests.log"
+          for log in "$RUNNER_TEMP"/cloud_tests_shard*.log "$RUNNER_TEMP/cloud_tests_serial.log"; do
+            if [ -f "$log" ]; then
+              echo "::group::$(basename "$log")"
+              tail -n 25 "$log"
+              echo "::endgroup::"
+              cat "$log" >> "$RUNNER_TEMP/cloud_tests.log"
+            fi
+          done
+          exit $status
 
       - name: Summarize the failures
         if: failure() && steps.tests.outcome == 'failure'

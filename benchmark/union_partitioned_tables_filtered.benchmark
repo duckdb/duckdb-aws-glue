@@ -1,0 +1,25 @@
+# name: benchmark/union_partitioned_tables_filtered.benchmark
+# description: UNION ALL over 20 partitioned Hive tables of 100 partitions of 30 rows each, each branch filtering on the partition key so its scan loads the partitions at filter pushdown, in the local Glue (moto) + S3, whose partitions load concurrently (glue_partition_load_parallelism)
+# group: [partition_loading_benchmarks]
+
+name UNION ALL of 20 partitioned hive tables filtered on the partition key
+group partition_loading_benchmarks
+subgroup partition_prefetch
+
+include benchmark/union_partitioned_tables_load.benchmark.in
+
+run
+SELECT count(*) FROM (
+    SELECT v FROM my_datalake.default.union_partitioned_t01 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t02 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t03 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t04 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t05 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t06 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t07 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t08 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t09 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t10 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t11 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t12 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t13 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t14 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t15 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t16 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t17 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t18 WHERE dt = 'p001' UNION ALL
+    SELECT v FROM my_datalake.default.union_partitioned_t19 WHERE dt = 'p001' UNION ALL SELECT v FROM my_datalake.default.union_partitioned_t20 WHERE dt = 'p001');
+
+result I
+600

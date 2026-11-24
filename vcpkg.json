@@ -5,7 +5,10 @@
 		"zlib",
 		"snappy",
 		"liblzma",
+		"bzip2",
+		"zstd",
 		"jansson",
+		"roaring",
 		{
 			"name": "aws-sdk-cpp",
 			"features": [

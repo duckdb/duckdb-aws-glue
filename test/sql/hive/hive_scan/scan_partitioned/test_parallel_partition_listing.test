@@ -8,38 +8,41 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.pl_events;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.pl_events;
 
 statement ok
-CREATE TABLE my_datalake.default.pl_events (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.pl_events (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 # 20 partitions under the table location, 100 rows each
 statement ok
-INSERT INTO my_datalake.default.pl_events SELECT i, 'd' || (i % 20) FROM range(2000) t(i);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.pl_events SELECT i, 'd' || (i % 20) FROM range(2000) t(i);
 
 # 5 partitions stored outside the table location, 10 rows each
 loop i 0 5
 
 statement ok
-CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'c{i}'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c{i}');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.pl_events', {dt: 'c{i}'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pl_elsewhere/c{i}');
 
 statement ok
 COPY (SELECT 10000 + {i} * 10 + j AS id FROM range(10) t(j))
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c{i}/f.parquet';
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pl_elsewhere/c{i}/f.parquet';
 
 endloop
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.pl_events');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.pl_events');
 ----
 25
 
@@ -64,7 +67,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query III
-SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.default.pl_events;
+SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.{GLUE_TEST_DB}.pl_events;
 ----
 2050	2500225	25
 
@@ -75,14 +78,14 @@ SELECT requests FROM listings();
 25
 
 query II
-SELECT dt, count(*) FROM my_datalake.default.pl_events WHERE dt IN ('d3', 'c2', 'c4') GROUP BY dt ORDER BY dt;
+SELECT dt, count(*) FROM my_datalake.{GLUE_TEST_DB}.pl_events WHERE dt IN ('d3', 'c2', 'c4') GROUP BY dt ORDER BY dt;
 ----
 c2	10
 c4	10
 d3	100
 
 query I
-SELECT max(id) FROM my_datalake.default.pl_events WHERE dt LIKE 'c%';
+SELECT max(id) FROM my_datalake.{GLUE_TEST_DB}.pl_events WHERE dt LIKE 'c%';
 ----
 10049
 
@@ -91,17 +94,17 @@ statement ok
 RESET hive_partition_listing_threshold;
 
 query III
-SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.default.pl_events;
+SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.{GLUE_TEST_DB}.pl_events;
 ----
 2050	2500225	25
 
 # a partition registered at another one's location, which holds files, is refused whichever way it is listed
 statement ok
-CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'shared'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pl_elsewhere/c0');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.pl_events', {dt: 'shared'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/pl_elsewhere/c0');
 
 statement error
-SELECT count(*) FROM my_datalake.default.pl_events;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pl_events;
 ----
 <REGEX>:.*Partitions \[c0\] and \[shared\] of Hive table .* are registered at the same location.*
 
@@ -109,26 +112,38 @@ statement ok
 SET hive_partition_listing_threshold = 1000;
 
 statement error
-SELECT count(*) FROM my_datalake.default.pl_events WHERE dt = 'shared';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pl_events WHERE dt = 'shared';
 ----
 <REGEX>:.*Partitions \[c0\] and \[shared\] of Hive table .* are registered at the same location.*
+
+# a deserialized plan refuses it too: it holds the table's partitions as the scan it copies does
+statement ok
+SET debug_verify_serializer = true;
+
+statement error
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pl_events WHERE dt = 'shared';
+----
+<REGEX>:.*Partitions \[c0\] and \[shared\] of Hive table .* are registered at the same location.*
+
+statement ok
+SET debug_verify_serializer = false;
 
 statement ok
 RESET hive_partition_listing_threshold;
 
 statement ok
-CALL glue_drop_partition('my_datalake.default.pl_events', {dt: 'shared'});
+CALL glue_drop_partition('my_datalake.{GLUE_TEST_DB}.pl_events', {dt: 'shared'});
 
 # if a listing fails in one of the tasks, the query fails too
 statement ok
-CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'unreadable'},
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.pl_events', {dt: 'unreadable'},
     location := 's3://pl-missing-bucket/unreadable');
 
 statement ok
 SET hive_partition_listing_threshold = 1000;
 
 statement error
-SELECT count(*) FROM my_datalake.default.pl_events;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.pl_events;
 ----
 <REGEX>:.*(pl-missing-bucket|NoSuchBucket|404).*
 
@@ -136,4 +151,4 @@ statement ok
 RESET hive_partition_listing_threshold;
 
 statement ok
-DROP TABLE my_datalake.default.pl_events;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.pl_events;

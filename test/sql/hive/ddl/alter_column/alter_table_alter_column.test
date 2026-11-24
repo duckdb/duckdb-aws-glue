@@ -8,28 +8,31 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ddl_alter_column;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ddl_alter_column;
 
 statement ok
-CREATE TABLE my_datalake.default.ddl_alter_column (id INTEGER, price FLOAT, label VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ddl_alter_column (id INTEGER, price FLOAT, label VARCHAR);
 
 # widening changes, the ones Hive can read back from existing parquet files
 statement ok
-ALTER TABLE my_datalake.default.ddl_alter_column ALTER COLUMN id TYPE BIGINT;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_alter_column ALTER COLUMN id TYPE BIGINT;
 
 statement ok
-ALTER TABLE my_datalake.default.ddl_alter_column ALTER COLUMN price TYPE DOUBLE;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_alter_column ALTER COLUMN price TYPE DOUBLE;
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ddl_alter_column' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_alter_column' ORDER BY column_index;
 ----
 id	BIGINT
 price	DOUBLE
@@ -37,12 +40,12 @@ label	VARCHAR
 
 # narrowing is not allowed
 statement error
-ALTER TABLE my_datalake.default.ddl_alter_column ALTER COLUMN id TYPE INTEGER;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_alter_column ALTER COLUMN id TYPE INTEGER;
 ----
 
 # an unknown column is an error
 statement error
-ALTER TABLE my_datalake.default.ddl_alter_column ALTER COLUMN missing TYPE BIGINT;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.ddl_alter_column ALTER COLUMN missing TYPE BIGINT;
 ----
 
 # a second attach sees the change, it is stored in Glue and not only in the cached entry
@@ -50,15 +53,16 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake_2 (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
-SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake_2' AND table_name = 'ddl_alter_column' ORDER BY column_index;
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake_2' AND schema_name = '{GLUE_TEST_DB}' AND table_name = 'ddl_alter_column' ORDER BY column_index;
 ----
 id	BIGINT
 price	DOUBLE
 label	VARCHAR
 
 statement ok
-DROP TABLE my_datalake.default.ddl_alter_column;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ddl_alter_column;

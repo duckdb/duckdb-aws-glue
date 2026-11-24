@@ -13,23 +13,26 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.path_nested;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.path_nested;
 
 statement ok
-CREATE TABLE my_datalake.default.path_nested (id INTEGER, val VARCHAR, year INTEGER, month INTEGER, day VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.path_nested (id INTEGER, val VARCHAR, year INTEGER, month INTEGER, day VARCHAR)
 PARTITIONED BY (year, month, day);
 
 # three levels of partition directories: <root>/year=.../month=.../day=...
 statement ok
-INSERT INTO my_datalake.default.path_nested VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_nested VALUES
     (1, 'a', 2024, 1, '01'), (2, 'b', 2024, 1, '01'),
     (3, 'c', 2024, 1, '02'),
     (4, 'd', 2024, 2, '01'),
@@ -37,50 +40,50 @@ INSERT INTO my_datalake.default.path_nested VALUES
 
 # a second file in a partition that already has one
 statement ok
-INSERT INTO my_datalake.default.path_nested VALUES (6, 'f', 2024, 1, '01');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_nested VALUES (6, 'f', 2024, 1, '01');
 
 # day=0 next to day=01 and day=02: a directory name that is a prefix of other directory names
 statement ok
-INSERT INTO my_datalake.default.path_nested VALUES (7, 'g', 2024, 1, '0');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_nested VALUES (7, 'g', 2024, 1, '0');
 
 # a value that is escaped in the directory name, and a NULL (__HIVE_DEFAULT_PARTITION__)
 statement ok
-INSERT INTO my_datalake.default.path_nested VALUES (8, 'h', 2024, 3, 'a/b'), (9, 'i', 2024, 3, NULL);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.path_nested VALUES (8, 'h', 2024, 3, 'a/b'), (9, 'i', 2024, 3, NULL);
 
 # a partition registered INSIDE the directory of another partition (year=2024/month=1/day=01)
 statement ok
-COPY (SELECT 20 AS id, 'late' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late/data.parquet';
+COPY (SELECT 20 AS id, 'late' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/late/data.parquet';
 
 statement ok
-CALL glue_add_partition('my_datalake.default.path_nested', {year: '2024', month: '1', day: 'late'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.path_nested', {year: '2024', month: '1', day: 'late'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/late');
 
 # a partition registered ABOVE the directories of other partitions: its files lie directly in year=2024
 statement ok
-COPY (SELECT 30 AS id, 'top' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/data.parquet';
+COPY (SELECT 30 AS id, 'top' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/year=2024/data.parquet';
 
 statement ok
-CALL glue_add_partition('my_datalake.default.path_nested', {year: '2023', month: '12', day: 'top'},
-    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.path_nested', {year: '2023', month: '12', day: 'top'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/year=2024');
 
 # a partition outside the table location
 statement ok
 COPY (SELECT 40 AS id, 'away' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p/data.parquet';
 
 statement ok
-CALL glue_add_partition('my_datalake.default.path_nested', {year: '2022', month: '6', day: 'away'},
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.path_nested', {year: '2022', month: '6', day: 'away'},
     location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p');
 
 # a directory inside a partition that is not a partition itself, and one below the table location that is not a
 # partition either: both belong to the deepest partition registered above them (day=02 and top)
 statement ok
-COPY (SELECT 50 AS id, 'stray' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=02/extra/data.parquet';
+COPY (SELECT 50 AS id, 'stray' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/extra/data.parquet';
 
 statement ok
-COPY (SELECT 51 AS id, 'unregistered' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=9/day=09/data.parquet';
+COPY (SELECT 51 AS id, 'unregistered' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/year=2024/month=9/day=09/data.parquet';
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.path_nested');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.path_nested');
 ----
 10
 
@@ -88,7 +91,7 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.path_nested');
 statement ok
 CREATE TEMP TABLE nested_files AS
 SELECT id, filename AS path
-FROM read_parquet(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*.parquet',
+FROM read_parquet(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/**/*.parquet',
                    '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*.parquet'], hive_partitioning = false);
 
 query II
@@ -110,33 +113,33 @@ SET hive_partition_listing_threshold = {threshold};
 # a full scan: every row names the file it is in
 #---------------------------------------------------------------------------
 query IIII
-SELECT id, year, day, rel_dir(filename) FROM my_datalake.default.path_nested ORDER BY id;
+SELECT id, year, day, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested ORDER BY id;
 ----
-1	2024	01	default/path_nested/year=2024/month=1/day=01/
-2	2024	01	default/path_nested/year=2024/month=1/day=01/
-3	2024	02	default/path_nested/year=2024/month=1/day=02/
-4	2024	01	default/path_nested/year=2024/month=2/day=01/
-5	2025	01	default/path_nested/year=2025/month=1/day=01/
-6	2024	01	default/path_nested/year=2024/month=1/day=01/
-7	2024	0	default/path_nested/year=2024/month=1/day=0/
-8	2024	a/b	default/path_nested/year=2024/month=3/day=a%2Fb/
-9	2024	NULL	default/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
-20	2024	late	default/path_nested/year=2024/month=1/day=01/late/
-30	2023	top	default/path_nested/year=2024/
+1	2024	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
+2	2024	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
+3	2024	02	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/
+4	2024	01	{GLUE_TEST_DB}/path_nested/year=2024/month=2/day=01/
+5	2025	01	{GLUE_TEST_DB}/path_nested/year=2025/month=1/day=01/
+6	2024	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
+7	2024	0	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=0/
+8	2024	a/b	{GLUE_TEST_DB}/path_nested/year=2024/month=3/day=a%2Fb/
+9	2024	NULL	{GLUE_TEST_DB}/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
+20	2024	late	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/late/
+30	2023	top	{GLUE_TEST_DB}/path_nested/year=2024/
 40	2022	away	path_nested_elsewhere/p/
-50	2024	02	default/path_nested/year=2024/month=1/day=02/extra/
-51	2023	top	default/path_nested/year=2024/month=9/day=09/
+50	2024	02	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/extra/
+51	2023	top	{GLUE_TEST_DB}/path_nested/year=2024/month=9/day=09/
 
 query II
 SELECT count(*), count(*) FILTER (t.filename = f.path)
-FROM my_datalake.default.path_nested t JOIN nested_files f USING (id);
+FROM my_datalake.{GLUE_TEST_DB}.path_nested t JOIN nested_files f USING (id);
 ----
 14	14
 
 # the two files of year=2024/month=1/day=01
 query I
-SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_nested
-WHERE rel_dir(filename) = 'default/path_nested/year=2024/month=1/day=01/'
+SELECT list(id ORDER BY id) AS ids FROM my_datalake.{GLUE_TEST_DB}.path_nested
+WHERE rel_dir(filename) = '{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/'
 GROUP BY filename ORDER BY ids;
 ----
 [1, 2]
@@ -146,55 +149,55 @@ GROUP BY filename ORDER BY ids;
 # pruned to the partition that has another partition registered inside its directory: the nested files are not its
 #---------------------------------------------------------------------------
 query III
-SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2024 AND month = 1 AND day = '01'
+SELECT id, day, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE year = 2024 AND month = 1 AND day = '01'
 ORDER BY id;
 ----
-1	01	default/path_nested/year=2024/month=1/day=01/
-2	01	default/path_nested/year=2024/month=1/day=01/
-6	01	default/path_nested/year=2024/month=1/day=01/
+1	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
+2	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
+6	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
 
 # pruned to the partition inside it
 query III
-SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE day = 'late';
+SELECT id, day, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE day = 'late';
 ----
-20	late	default/path_nested/year=2024/month=1/day=01/late/
+20	late	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/late/
 
 # pruned to the partition above the others: its own files and those of unregistered directories below it
 query III
-SELECT id, year, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2023 ORDER BY id;
+SELECT id, year, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE year = 2023 ORDER BY id;
 ----
-30	2023	default/path_nested/year=2024/
-51	2023	default/path_nested/year=2024/month=9/day=09/
+30	2023	{GLUE_TEST_DB}/path_nested/year=2024/
+51	2023	{GLUE_TEST_DB}/path_nested/year=2024/month=9/day=09/
 
 # pruned to every partition below the one above the others, and not that one
 query I
-SELECT list(id ORDER BY id) FROM my_datalake.default.path_nested WHERE year = 2024 AND month = 1;
+SELECT list(id ORDER BY id) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE year = 2024 AND month = 1;
 ----
 [1, 2, 3, 6, 7, 20, 50]
 
 # pruned to the partition with the stray directory: the stray file is read as part of it
 query III
-SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE month = 1 AND day = '02' ORDER BY id;
+SELECT id, day, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE month = 1 AND day = '02' ORDER BY id;
 ----
-3	02	default/path_nested/year=2024/month=1/day=02/
-50	02	default/path_nested/year=2024/month=1/day=02/extra/
+3	02	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/
+50	02	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/extra/
 
 # pruned to the day=0 partition, whose directory name is a prefix of day=01 and day=02
 query III
-SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE day = '0';
+SELECT id, day, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE day = '0';
 ----
-7	0	default/path_nested/year=2024/month=1/day=0/
+7	0	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=0/
 
 # pruned to the escaped and the NULL partition
 query III
-SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE month = 3 ORDER BY id;
+SELECT id, day, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE month = 3 ORDER BY id;
 ----
-8	a/b	default/path_nested/year=2024/month=3/day=a%2Fb/
-9	NULL	default/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
+8	a/b	{GLUE_TEST_DB}/path_nested/year=2024/month=3/day=a%2Fb/
+9	NULL	{GLUE_TEST_DB}/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
 
 # pruned to the partition outside the table location
 query III
-SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year < 2023;
+SELECT id, day, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE year < 2023;
 ----
 40	away	path_nested_elsewhere/p/
 
@@ -202,17 +205,17 @@ SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE yea
 # filters on filename together with partition filters
 #---------------------------------------------------------------------------
 query I
-SELECT list(id ORDER BY id) FROM my_datalake.default.path_nested WHERE filename LIKE '%/day=01/%';
+SELECT list(id ORDER BY id) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE filename LIKE '%/day=01/%';
 ----
 [1, 2, 4, 5, 6, 20]
 
 query I
-SELECT list(id ORDER BY id) FROM my_datalake.default.path_nested WHERE filename LIKE '%/day=01/%' AND day = '01';
+SELECT list(id ORDER BY id) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE filename LIKE '%/day=01/%' AND day = '01';
 ----
 [1, 2, 4, 5, 6]
 
 query I
-SELECT id FROM my_datalake.default.path_nested WHERE filename = (SELECT path FROM nested_files WHERE id = 30);
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE filename = (SELECT path FROM nested_files WHERE id = 30);
 ----
 30
 
@@ -220,20 +223,20 @@ SELECT id FROM my_datalake.default.path_nested WHERE filename = (SELECT path FRO
 # ORDER BY ... LIMIT (late materialization) and aggregates
 #---------------------------------------------------------------------------
 query II
-SELECT id, rel_dir(filename) FROM my_datalake.default.path_nested ORDER BY id DESC LIMIT 3;
+SELECT id, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested ORDER BY id DESC LIMIT 3;
 ----
-51	default/path_nested/year=2024/month=9/day=09/
-50	default/path_nested/year=2024/month=1/day=02/extra/
+51	{GLUE_TEST_DB}/path_nested/year=2024/month=9/day=09/
+50	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/extra/
 40	path_nested_elsewhere/p/
 
 query II
-SELECT id, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2024 AND month = 1 ORDER BY val DESC LIMIT 2;
+SELECT id, rel_dir(filename) FROM my_datalake.{GLUE_TEST_DB}.path_nested WHERE year = 2024 AND month = 1 ORDER BY val DESC LIMIT 2;
 ----
-50	default/path_nested/year=2024/month=1/day=02/extra/
-20	default/path_nested/year=2024/month=1/day=01/late/
+50	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/extra/
+20	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/late/
 
 query II
-SELECT count(DISTINCT filename), count(DISTINCT rel_dir(filename)) FROM my_datalake.default.path_nested;
+SELECT count(DISTINCT filename), count(DISTINCT rel_dir(filename)) FROM my_datalake.{GLUE_TEST_DB}.path_nested;
 ----
 13	12
 
@@ -251,27 +254,27 @@ statement ok
 SET hive_partition_listing_threshold = {threshold};
 
 query III
-SELECT id, day, rel_dir(filename) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested',
+SELECT id, day, rel_dir(filename) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested',
     schema := {id: 'INTEGER', val: 'VARCHAR', year: 'INTEGER', month: 'INTEGER', day: 'VARCHAR'},
     partitions := [
         {year: 2024, month: 1, day: '01', location: NULL},
-        {year: 2024, month: 1, day: 'late', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late'},
-        {year: 2023, month: 12, day: 'top', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024'}
+        {year: 2024, month: 1, day: 'late', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/late'},
+        {year: 2023, month: 12, day: 'top', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/path_nested/year=2024'}
     ])
 WHERE day <> 'late'
 ORDER BY id;
 ----
-1	01	default/path_nested/year=2024/month=1/day=01/
-2	01	default/path_nested/year=2024/month=1/day=01/
-3	top	default/path_nested/year=2024/month=1/day=02/
-4	top	default/path_nested/year=2024/month=2/day=01/
-6	01	default/path_nested/year=2024/month=1/day=01/
-7	top	default/path_nested/year=2024/month=1/day=0/
-8	top	default/path_nested/year=2024/month=3/day=a%2Fb/
-9	top	default/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
-30	top	default/path_nested/year=2024/
-50	top	default/path_nested/year=2024/month=1/day=02/extra/
-51	top	default/path_nested/year=2024/month=9/day=09/
+1	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
+2	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
+3	top	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/
+4	top	{GLUE_TEST_DB}/path_nested/year=2024/month=2/day=01/
+6	01	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=01/
+7	top	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=0/
+8	top	{GLUE_TEST_DB}/path_nested/year=2024/month=3/day=a%2Fb/
+9	top	{GLUE_TEST_DB}/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
+30	top	{GLUE_TEST_DB}/path_nested/year=2024/
+50	top	{GLUE_TEST_DB}/path_nested/year=2024/month=1/day=02/extra/
+51	top	{GLUE_TEST_DB}/path_nested/year=2024/month=9/day=09/
 
 endloop
 
@@ -279,4 +282,4 @@ statement ok
 RESET hive_partition_listing_threshold;
 
 statement ok
-DROP TABLE my_datalake.default.path_nested;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.path_nested;

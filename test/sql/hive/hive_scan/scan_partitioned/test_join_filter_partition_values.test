@@ -8,31 +8,34 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.jf_escaped;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.jf_escaped;
 
 statement ok
-CREATE TABLE my_datalake.default.jf_escaped (id INTEGER, tag VARCHAR) PARTITIONED BY (tag);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.jf_escaped (id INTEGER, tag VARCHAR) PARTITIONED BY (tag);
 
 statement ok
-INSERT INTO my_datalake.default.jf_escaped VALUES (1, 'plain'), (2, 'other'), (3, 'third');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.jf_escaped VALUES (1, 'plain'), (2, 'other'), (3, 'third');
 
 # a partition whose Glue value looks URL-escaped
 statement ok
 COPY (SELECT 4 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom/data.parquet';
 
 statement ok
-CALL glue_add_partition('my_datalake.default.jf_escaped', {tag: 'a%20b'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom');
+CALL glue_add_partition('my_datalake.{GLUE_TEST_DB}.jf_escaped', {tag: 'a%20b'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom');
 
 query II
-SELECT id, tag FROM my_datalake.default.jf_escaped WHERE tag = 'a%20b';
+SELECT id, tag FROM my_datalake.{GLUE_TEST_DB}.jf_escaped WHERE tag = 'a%20b';
 ----
 4	a%20b
 
@@ -40,7 +43,7 @@ statement ok
 CREATE TEMP TABLE wanted_tags AS SELECT 'a%20b' AS t;
 
 query II
-SELECT o.id, o.tag FROM my_datalake.default.jf_escaped o, wanted_tags w WHERE o.tag = w.t;
+SELECT o.id, o.tag FROM my_datalake.{GLUE_TEST_DB}.jf_escaped o, wanted_tags w WHERE o.tag = w.t;
 ----
 4	a%20b
 
@@ -49,6 +52,6 @@ statement ok
 CREATE TEMP TABLE unescaped_tags AS SELECT 'a b' AS t;
 
 query I
-SELECT count(*) FROM my_datalake.default.jf_escaped o, unescaped_tags w WHERE o.tag = w.t;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.jf_escaped o, unescaped_tags w WHERE o.tag = w.t;
 ----
 0

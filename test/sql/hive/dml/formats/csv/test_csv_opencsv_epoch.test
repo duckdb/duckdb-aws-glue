@@ -8,47 +8,62 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.opencsv_epoch;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.opencsv_epoch;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.opencsv_epoch_range;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.opencsv_epoch_range;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.opencsv_epoch_write;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.opencsv_epoch_write;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.opencsv_epoch_null;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.opencsv_epoch_null;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.opencsv_epoch_ctas;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.opencsv_epoch_ctas;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.opencsv_epoch_ctas_inf;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.opencsv_epoch_ctas_inf;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.lazy_epoch;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.lazy_epoch;
 
 #---------------------------------------------------------------------------
 # reading: milliseconds and days since the epoch, a missing field is NULL
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.opencsv_epoch (id INTEGER, ts TIMESTAMP, d DATE) WITH (format = 'csv', quote = '"');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch (id INTEGER, ts TIMESTAMP, d DATE) WITH (format = 'csv', quote = '"');
 
 statement ok
 COPY (SELECT * FROM (VALUES ('1,1579059880000,18276'), ('2,"1579059880123","18276"'), ('3,-1,-1'), ('4,0,0'),
     ('5,+1579059880000,20200115'), ('6'))
-t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/opencsv_epoch/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# the reader call converts the fields as the scan does
+query II
+EXPLAIN (SQL) SELECT ts, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch;
+----
+sql	<REGEX>:.*make_timestamp_ms\(CAST\(__internal_barrier\(ts\) AS BIGINT\)\) AS ts,\s+\(CAST\('1970-01-01' AS DATE\) \+ CAST\(__internal_barrier\(d\) AS INTEGER\)\) AS d.*
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 query III
-SELECT id, ts, d FROM my_datalake.default.opencsv_epoch ORDER BY id;
+SELECT id, ts, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch ORDER BY id;
 ----
 1	2020-01-15 03:44:40	2020-01-15
 2	2020-01-15 03:44:40.123	2020-01-15
@@ -59,42 +74,80 @@ SELECT id, ts, d FROM my_datalake.default.opencsv_epoch ORDER BY id;
 
 query II
 SELECT count(*) FILTER (WHERE ts >= TIMESTAMP '2020-01-15 03:44:40'), count(*) FILTER (WHERE d = DATE '2020-01-15')
-FROM my_datalake.default.opencsv_epoch;
+FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch;
 ----
 3	2
 
 # a cast over the column applies to the value, not to the field's text
 query II
-SELECT CAST(ts AS VARCHAR), CAST(d AS VARCHAR) FROM my_datalake.default.opencsv_epoch WHERE id = 2;
+SELECT CAST(ts AS VARCHAR), CAST(d AS VARCHAR) FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch WHERE id = 2;
 ----
 2020-01-15 03:44:40.123	2020-01-15
+
+statement ok
+RESET debug_verify_statement;
+
+endloop
 
 #---------------------------------------------------------------------------
 # a field that is not a number fails the query unless use.null.for.invalid.data is true
 #---------------------------------------------------------------------------
 statement ok
 COPY (SELECT * FROM (VALUES ('7,2020-01-15 03:44:40,18276'))
-t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch/text_ts.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/opencsv_epoch/text_ts.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 statement error
-SELECT id, ts FROM my_datalake.default.opencsv_epoch;
+SELECT id, ts FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch;
 ----
 <REGEX>:.*Could not convert string '2020-01-15 03:44:40' to INT64.*
 
 statement ok
+RESET debug_verify_statement;
+
+endloop
+
+statement ok
 COPY (SELECT * FROM (VALUES ('8,0,2020-01-15'), ('9,0,1579059880000'))
-t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch/text_d.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/opencsv_epoch/text_d.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 statement error
-SELECT id, d FROM my_datalake.default.opencsv_epoch;
+SELECT id, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch;
 ----
 <REGEX>:.*Could not convert string '(2020-01-15|1579059880000)' to INT32.*
 
 statement ok
-ALTER TABLE my_datalake.default.opencsv_epoch SET ('use.null.for.invalid.data' = 'true');
+RESET debug_verify_statement;
+
+endloop
+
+statement ok
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch SET ('use.null.for.invalid.data' = 'true');
+
+query II
+EXPLAIN (SQL) SELECT ts, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch;
+----
+sql	<REGEX>:.*TRY\(make_timestamp_ms\(TRY_CAST\(__internal_barrier\(ts\) AS BIGINT\)\)\) AS ts,\s+TRY\(\(CAST\('1970-01-01' AS DATE\) \+ TRY_CAST\(__internal_barrier\(d\) AS INTEGER\)\)\) AS d.*
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 query III
-SELECT id, ts, d FROM my_datalake.default.opencsv_epoch WHERE id >= 5 ORDER BY id;
+SELECT id, ts, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch WHERE id >= 5 ORDER BY id;
 ----
 5	2020-01-15 03:44:40	57276-01-14
 6	NULL	NULL
@@ -102,46 +155,73 @@ SELECT id, ts, d FROM my_datalake.default.opencsv_epoch WHERE id >= 5 ORDER BY i
 8	1970-01-01 00:00:00	NULL
 9	1970-01-01 00:00:00	NULL
 
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
 #---------------------------------------------------------------------------
 # a number out of the type's range fails the query, and is NULL with use.null.for.invalid.data
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.opencsv_epoch_range (id INTEGER, ts TIMESTAMP, d DATE) WITH (format = 'csv', quote = '"');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_range (id INTEGER, ts TIMESTAMP, d DATE) WITH (format = 'csv', quote = '"');
 
 statement ok
 COPY (SELECT * FROM (VALUES ('1,9223372036854775807,2147483647'), ('2,-9223372036854775808,-2147483648'),
     ('3,9223372036854775,2147483646'))
-t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch_range/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/opencsv_epoch_range/data.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 statement error
-SELECT id, ts FROM my_datalake.default.opencsv_epoch_range;
+SELECT id, ts FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch_range;
 ----
 <REGEX>:.*Could not convert Timestamp\(MS\) to Timestamp\(US\).*
 
 statement error
-SELECT id, d FROM my_datalake.default.opencsv_epoch_range;
+SELECT id, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch_range;
 ----
 <REGEX>:.*Date out of range.*
 
 statement ok
-ALTER TABLE my_datalake.default.opencsv_epoch_range SET ('use.null.for.invalid.data' = 'true');
+RESET debug_verify_statement;
+
+endloop
+
+statement ok
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_range SET ('use.null.for.invalid.data' = 'true');
+
+# also as the reader call EXPLAIN (SQL) restates the scan as
+foreach mode none explain_sql_strict
+
+statement ok
+SET debug_verify_statement = '{mode}';
 
 query III
-SELECT id, ts, d FROM my_datalake.default.opencsv_epoch_range ORDER BY id;
+SELECT id, ts, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch_range ORDER BY id;
 ----
 1	NULL	NULL
 2	NULL	NULL
 3	294247-01-10 04:00:54.775	5881580-07-10
 
+statement ok
+RESET debug_verify_statement;
+
+endloop
+
 #---------------------------------------------------------------------------
 # writing: milliseconds and days since the epoch, which read back as the same values (timestamps to the millisecond)
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.opencsv_epoch_write (id INTEGER, ts TIMESTAMP, d DATE)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_write (id INTEGER, ts TIMESTAMP, d DATE)
 WITH (format = 'csv', quote = '"');
 
 statement ok
-INSERT INTO my_datalake.default.opencsv_epoch_write VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.opencsv_epoch_write VALUES
     (1, TIMESTAMP '2020-01-15 03:44:40.123456', DATE '2020-01-15'),
     (2, TIMESTAMP '1969-12-31 23:59:59.999', DATE '1969-12-31'),
     (3, TIMESTAMP '1970-01-01', DATE '1970-01-01'),
@@ -150,12 +230,12 @@ INSERT INTO my_datalake.default.opencsv_epoch_write VALUES
 
 # the milliseconds are truncated, not rounded: the value stays in its second and day
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch_write/*.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/opencsv_epoch_write/*.csv');
 ----
 "1","1579059880123","18276"<nl>"2","-1","-1"<nl>"3","0","0"<nl>"4","1579132799999","18276"<nl>"5","-1","-1"<nl>
 
 query III
-SELECT id, ts, d FROM my_datalake.default.opencsv_epoch_write ORDER BY id;
+SELECT id, ts, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch_write ORDER BY id;
 ----
 1	2020-01-15 03:44:40.123	2020-01-15
 2	1969-12-31 23:59:59.999	1969-12-31
@@ -164,59 +244,59 @@ SELECT id, ts, d FROM my_datalake.default.opencsv_epoch_write ORDER BY id;
 5	1969-12-31 23:59:59.999	1969-12-31
 
 statement error
-INSERT INTO my_datalake.default.opencsv_epoch_write VALUES (6, TIMESTAMP 'infinity', DATE '2020-01-15');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.opencsv_epoch_write VALUES (6, TIMESTAMP 'infinity', DATE '2020-01-15');
 ----
 <REGEX>:.*a value of column 'ts' is infinite, which the table's OpenCSVSerde files can not hold.*
 
 statement error
-INSERT INTO my_datalake.default.opencsv_epoch_write VALUES (7, TIMESTAMP '2020-01-15', DATE '-infinity');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.opencsv_epoch_write VALUES (7, TIMESTAMP '2020-01-15', DATE '-infinity');
 ----
 <REGEX>:.*a value of column 'd' is infinite, which the table's OpenCSVSerde files can not hold.*
 
 # NULL is written as an empty field: it fails to read back as a timestamp or a date, and is NULL with
 # use.null.for.invalid.data
 statement ok
-CREATE TABLE my_datalake.default.opencsv_epoch_null (id INTEGER, ts TIMESTAMP, d DATE, ok BOOLEAN, s VARCHAR)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_null (id INTEGER, ts TIMESTAMP, d DATE, ok BOOLEAN, s VARCHAR)
 WITH (format = 'csv', quote = '"');
 
 statement ok
-INSERT INTO my_datalake.default.opencsv_epoch_null VALUES (1, NULL, NULL, NULL, NULL);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.opencsv_epoch_null VALUES (1, NULL, NULL, NULL, NULL);
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch_null/*.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/opencsv_epoch_null/*.csv');
 ----
 "1",,,,<nl>
 
 statement error
-SELECT ts FROM my_datalake.default.opencsv_epoch_null;
+SELECT ts FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch_null;
 ----
 <REGEX>:.*Could not convert string '' to INT64.*
 
 statement ok
-ALTER TABLE my_datalake.default.opencsv_epoch_null SET ('use.null.for.invalid.data' = 'true');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_null SET ('use.null.for.invalid.data' = 'true');
 
 query IIIII
-SELECT id, ts, d, ok, s = '' FROM my_datalake.default.opencsv_epoch_null;
+SELECT id, ts, d, ok, s = '' FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch_null;
 ----
 1	NULL	NULL	false	true
 
 # CREATE TABLE AS writes them the same way
 statement ok
-CREATE TABLE my_datalake.default.opencsv_epoch_ctas WITH (format = 'csv', quote = '"') AS
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_ctas WITH (format = 'csv', quote = '"') AS
 SELECT 1 AS id, TIMESTAMP '2020-01-15 03:44:40.123' AS ts, DATE '2020-01-15' AS d;
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/opencsv_epoch_ctas/*.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/opencsv_epoch_ctas/*.csv');
 ----
 "1","1579059880123","18276"<nl>
 
 query III
-SELECT id, ts, d FROM my_datalake.default.opencsv_epoch_ctas;
+SELECT id, ts, d FROM my_datalake.{GLUE_TEST_DB}.opencsv_epoch_ctas;
 ----
 1	2020-01-15 03:44:40.123	2020-01-15
 
 statement error
-CREATE TABLE my_datalake.default.opencsv_epoch_ctas_inf WITH (format = 'csv', quote = '"') AS
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_ctas_inf WITH (format = 'csv', quote = '"') AS
 SELECT 1 AS id, TIMESTAMP 'infinity' AS ts;
 ----
 <REGEX>:.*a value of column 'ts' is infinite, which the table's OpenCSVSerde files can not hold.*
@@ -225,38 +305,38 @@ SELECT 1 AS id, TIMESTAMP 'infinity' AS ts;
 # LazySimpleSerDe reads and writes timestamps and dates as text
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.lazy_epoch (id INTEGER, ts TIMESTAMP, d DATE) WITH (format = 'csv');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.lazy_epoch (id INTEGER, ts TIMESTAMP, d DATE) WITH (format = 'csv');
 
 statement ok
-INSERT INTO my_datalake.default.lazy_epoch VALUES (1, TIMESTAMP '2020-01-15 03:44:40.123', DATE '2020-01-15');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.lazy_epoch VALUES (1, TIMESTAMP '2020-01-15 03:44:40.123', DATE '2020-01-15');
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lazy_epoch/*.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/lazy_epoch/*.csv');
 ----
 1,2020-01-15 03:44:40.123,2020-01-15<nl>
 
 query III
-SELECT id, ts, d FROM my_datalake.default.lazy_epoch;
+SELECT id, ts, d FROM my_datalake.{GLUE_TEST_DB}.lazy_epoch;
 ----
 1	2020-01-15 03:44:40.123	2020-01-15
 
 statement ok
-DROP TABLE my_datalake.default.opencsv_epoch;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch;
 
 statement ok
-DROP TABLE my_datalake.default.opencsv_epoch_range;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_range;
 
 statement ok
-DROP TABLE my_datalake.default.opencsv_epoch_write;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_write;
 
 statement ok
-DROP TABLE my_datalake.default.opencsv_epoch_null;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_null;
 
 statement ok
-DROP TABLE my_datalake.default.opencsv_epoch_ctas;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.opencsv_epoch_ctas;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.opencsv_epoch_ctas_inf;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.opencsv_epoch_ctas_inf;
 
 statement ok
-DROP TABLE my_datalake.default.lazy_epoch;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.lazy_epoch;

@@ -8,83 +8,86 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.collate_t;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.collate_t;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.collate_ctas;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.collate_ctas;
 
 statement error
-CREATE TABLE my_datalake.default.collate_t (id INTEGER, s VARCHAR COLLATE NOCASE);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.collate_t (id INTEGER, s VARCHAR COLLATE NOCASE);
 ----
 Not implemented Error: Collation "NOCASE" of column "s" is not supported for tables in a Glue catalog
 
 statement error
-CREATE TABLE my_datalake.default.collate_t (id INTEGER, s VARCHAR COLLATE NOACCENT.NOCASE) PARTITIONED BY (s);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.collate_t (id INTEGER, s VARCHAR COLLATE NOACCENT.NOCASE) PARTITIONED BY (s);
 ----
 of column "s" is not supported
 
 # a collated expression of the query carries the collation into the table
 statement error
-CREATE TABLE my_datalake.default.collate_ctas AS SELECT 'Hello' COLLATE NOCASE AS s;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.collate_ctas AS SELECT 'Hello' COLLATE NOCASE AS s;
 ----
 Collation "NOCASE" of column "s" is not supported
 
 # nothing was created in Glue
 statement error
-SELECT * FROM my_datalake.default.collate_t;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.collate_t;
 ----
 does not exist
 
 statement error
-SELECT * FROM my_datalake.default.collate_ctas;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.collate_ctas;
 ----
 does not exist
 
 statement ok
-CREATE TABLE my_datalake.default.collate_t (id INTEGER, s VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.collate_t (id INTEGER, s VARCHAR);
 
 statement error
-ALTER TABLE my_datalake.default.collate_t ADD COLUMN t VARCHAR COLLATE NOCASE;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.collate_t ADD COLUMN t VARCHAR COLLATE NOCASE;
 ----
 Collation "NOCASE" of column "t" is not supported
 
 statement error
-ALTER TABLE my_datalake.default.collate_t ALTER COLUMN s TYPE VARCHAR COLLATE NOCASE;
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.collate_t ALTER COLUMN s TYPE VARCHAR COLLATE NOCASE;
 ----
 Collation "NOCASE" of column "s" is not supported
 
 statement ok
-INSERT INTO my_datalake.default.collate_t VALUES (1, 'Hello');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.collate_t VALUES (1, 'Hello');
 
 # without a stored collation comparisons are case sensitive, an explicit COLLATE in the query still works
 query I
-SELECT count(*) FROM my_datalake.default.collate_t WHERE s = 'hello';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.collate_t WHERE s = 'hello';
 ----
 0
 
 query I
-SELECT count(*) FROM my_datalake.default.collate_t WHERE s COLLATE NOCASE = 'hello';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.collate_t WHERE s COLLATE NOCASE = 'hello';
 ----
 1
 
 statement ok
-CREATE TABLE my_datalake.default.collate_ctas AS SELECT s FROM my_datalake.default.collate_t;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.collate_ctas AS SELECT s FROM my_datalake.{GLUE_TEST_DB}.collate_t;
 
 query I
-SELECT s FROM my_datalake.default.collate_ctas;
+SELECT s FROM my_datalake.{GLUE_TEST_DB}.collate_ctas;
 ----
 Hello
 
 statement ok
-DROP TABLE my_datalake.default.collate_ctas;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.collate_ctas;
 
 statement ok
-DROP TABLE my_datalake.default.collate_t;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.collate_t;

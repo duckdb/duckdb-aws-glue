@@ -10,46 +10,49 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.no_dir_object;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.no_dir_object;
 
 statement ok
-CREATE TABLE my_datalake.default.no_dir_object (id INTEGER, name VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.no_dir_object (id INTEGER, name VARCHAR);
 
 statement ok
-INSERT INTO my_datalake.default.no_dir_object VALUES (1, 'a'), (2, 'b'), (3, 'c');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.no_dir_object VALUES (1, 'a'), (2, 'b'), (3, 'c');
 
 # 'no_dir_object*' matches a key named like the location, but not the files below it
 query I
-SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_object*');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/no_dir_object*');
 ----
 0
 
 query I
-SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_object/*.parquet');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/no_dir_object/*.parquet');
 ----
 1
 
 query I
-SELECT count(*) FROM my_datalake.default.no_dir_object;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.no_dir_object;
 ----
 3
 
 # an INSERT without rows does not create it either
 statement ok
-INSERT INTO my_datalake.default.no_dir_object SELECT * FROM my_datalake.default.no_dir_object WHERE false;
+INSERT INTO my_datalake.{GLUE_TEST_DB}.no_dir_object SELECT * FROM my_datalake.{GLUE_TEST_DB}.no_dir_object WHERE false;
 
 query I
-SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_object*');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/no_dir_object*');
 ----
 0
 
 statement ok
-DROP TABLE my_datalake.default.no_dir_object;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.no_dir_object;

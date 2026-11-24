@@ -21,16 +21,18 @@ emscripten so the SDK builds for wasm (there every request goes through DuckDB's
 the vcpkg archives the wasm side module links):
 
 ```sh
-VCPKG_TOOLCHAIN_PATH='<vcpkg>/scripts/buildsystems/vcpkg.cmake' GEN=ninja make relassert   # what tests use
-BUILD_BENCHMARK=1 ... make relassert                                                    # also builds benchmark_runner
+VCPKG_TOOLCHAIN_PATH='<vcpkg>/scripts/buildsystems/vcpkg.cmake' GEN=ninja make release   # what agents build
+BUILD_BENCHMARK=1 ... make release                                                    # also builds benchmark_runner
 ```
 
-`relassert` is ASAN-instrumented while the vcpkg AWS SDK is not, so always run with
+Agents build and test `release` (`TEST_BUILD=release` for the `make test-*` targets, which default to `relassert`).
+Build `relassert` (assertions and ASAN, a much larger build) only when actively debugging a crash, an assertion or
+memory error. It is ASAN-instrumented while the vcpkg AWS SDK is not, so always run it with
 `ASAN_OPTIONS=detect_container_overflow=0` (otherwise false-positive container-overflow on secret/credential code).
 Each `src/` subdirectory has its own `CMakeLists.txt` (an `add_library_unity` object library appended to
 `GLUE_EXTENSION_FILES`, like DuckDB's own source tree): add new `.cpp` files there, and a new directory with
-`add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds` and `avro` (avro is
-loaded on demand for AvroSerDe tables).
+`add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds`, `avro` (avro is
+loaded on demand for AvroSerDe tables) and `iceberg` (for `ICEBERG_CATALOG`; needs `roaring` from vcpkg).
 
 Run `make format-fix` (clang-format over `src` and `test`, via the duckdb submodule) before committing.
 
@@ -43,14 +45,17 @@ SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CAT
   `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything through DuckDB's
   `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially in batches of 10 tests per process, retrying a
   failing batch twice: against the local servers a read right after a write occasionally comes back empty.
-- `test/configs/cloud_glue.json`: live AWS (credential chain, eu-central-1). `test/sql/cloud/` only runs here
-  (`require-env GLUE_TEST_CONFIG cloud`) and reads pre-existing tables in the account.
+- `test/configs/cloud_glue.json`: live AWS (credential chain, eu-west-1). `test/sql/cloud_glue/` only runs here
+  (`require-env GLUE_TEST_CONFIG cloud`) and attaches the Glue catalog both as `TYPE glue` and `TYPE iceberg`;
+  `skip_error_messages` is empty, so HTTP errors fail instead of skip.
+  A `credential_process` profile isn't resolved under the runner's HOME: export its credentials first
+  (`eval "$(aws configure export-credentials --profile <p> --format env)"`).
 
 Single test:
 
 ```sh
 AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 \
-  ./build/relassert/test/unittest --test-config test/configs/local_glue.json test/sql/hive/dml/select.test
+  ./build/release/test/unittest --test-config test/configs/local_glue.json test/sql/hive/dml/select.test
 ```
 
 - `AWS_EC2_METADATA_DISABLED=true` is required: the test runner replaces HOME, so the SDK can't find a region and
@@ -63,7 +68,8 @@ AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 \
 - `test/configs/*.json` own the init SQL, env and skip policy. When something fails for one config only, skip the
   narrowest path there with a concrete reason instead of weakening the test; remove the skip when support lands.
   Validate config edits with `jq empty test/configs/*.json`.
-- Test targets don't build first: rebuild before running tests (`make test-cpp` builds its own binary).
+- Test targets don't build first: rebuild before running tests (`make test-cpp` builds its own binary). A stale
+  binary fails tests that pass on `main`: check its timestamp against the last merge before debugging a failure.
 
 C++ tests: `test/unittest/` holds Catch tests of `src/include/functions/hive_reader_call.hpp`, which no SQL reaches, in
 their own binary `unittest_glue` (extensions linked statically; a normal build skips it). `make test-cpp` builds and
@@ -76,7 +82,7 @@ Test format is DuckDB's sqllogictest (`statement ok|error`, `query I...`, `----`
 happy path.
 
 Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
-`./build/relassert/benchmark/benchmark_runner <path>`; see `docs/README.md` for data caching and caveats
+`./build/release/benchmark/benchmark_runner <path>`; see `docs/README.md` for data caching and caveats
 (TPC-DS load needs a non-assert `release` build).
 
 ## Architecture
@@ -135,8 +141,8 @@ Follow DuckDB's style (`duckdb/AGENTS.md`):
 
 ## Change checklist
 
-- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/SeaweedFS),
-  and `make test-cpp` when it touches `BindHiveScan`, `InitializeReader` or `hive_reader_call.hpp`.
+- C++ change: `make format-check`, build `release`, run the focused sqllogictests (locally against moto/SeaweedFS),
+  and `make test-cpp TEST_BUILD=release` when it touches `BindHiveScan`, `InitializeReader` or `hive_reader_call.hpp`.
 - Build change: read both the root `Makefile` and `extension-ci-tools/makefiles/duckdb_extension.Makefile`.
 - Documentation-only change: check commands statically; don't start containers or run tests.
 

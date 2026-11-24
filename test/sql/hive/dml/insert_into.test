@@ -8,43 +8,46 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_vancouver_pageviews;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_vancouver_pageviews;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_canada_pageviews;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_canada_pageviews;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_canada_july_pageviews;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_canada_july_pageviews;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_cities_world;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_cities_world;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_cities_usa;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_cities_usa;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_cities;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_cities;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.dml_cities_by_state;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.dml_cities_by_state;
 
 #---------------------------------------------------------------------------
 # INSERT INTO ... SELECT
 #---------------------------------------------------------------------------
 # "date" is a reserved word and is quoted
 statement ok
-CREATE TABLE my_datalake.default.dml_vancouver_pageviews ("date" DATE, page VARCHAR, views BIGINT);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_vancouver_pageviews ("date" DATE, page VARCHAR, views BIGINT);
 
 statement ok
-INSERT INTO my_datalake.default.dml_vancouver_pageviews VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_vancouver_pageviews VALUES
     ('2019-06-30', 'home', 5),
     ('2019-07-01', 'home', 7),
     ('2019-07-15', 'about', 2),
@@ -52,33 +55,33 @@ INSERT INTO my_datalake.default.dml_vancouver_pageviews VALUES
     ('2019-08-01', 'about', 3);
 
 statement ok
-CREATE TABLE my_datalake.default.dml_canada_pageviews ("date" DATE, page VARCHAR, views BIGINT);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_canada_pageviews ("date" DATE, page VARCHAR, views BIGINT);
 
 # select all rows of one table and insert them into another
 statement ok
-INSERT INTO my_datalake.default.dml_canada_pageviews
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_canada_pageviews
 SELECT *
-FROM my_datalake.default.dml_vancouver_pageviews;
+FROM my_datalake.{GLUE_TEST_DB}.dml_vancouver_pageviews;
 
 query II
-SELECT count(*), sum(views) FROM my_datalake.default.dml_canada_pageviews;
+SELECT count(*), sum(views) FROM my_datalake.{GLUE_TEST_DB}.dml_canada_pageviews;
 ----
 5	26
 
 statement ok
-CREATE TABLE my_datalake.default.dml_canada_july_pageviews ("date" DATE, page VARCHAR, views BIGINT);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_canada_july_pageviews ("date" DATE, page VARCHAR, views BIGINT);
 
 # select a date range and insert it
 statement ok
-INSERT INTO my_datalake.default.dml_canada_july_pageviews
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_canada_july_pageviews
 SELECT *
-FROM my_datalake.default.dml_vancouver_pageviews
+FROM my_datalake.{GLUE_TEST_DB}.dml_vancouver_pageviews
 WHERE date
     BETWEEN date '2019-07-01'
         AND '2019-07-31';
 
 query III
-SELECT "date", page, views FROM my_datalake.default.dml_canada_july_pageviews ORDER BY "date";
+SELECT "date", page, views FROM my_datalake.{GLUE_TEST_DB}.dml_canada_july_pageviews ORDER BY "date";
 ----
 2019-07-01	home	7
 2019-07-15	about	2
@@ -86,22 +89,22 @@ SELECT "date", page, views FROM my_datalake.default.dml_canada_july_pageviews OR
 
 # select a subset of the columns into named columns of the destination
 statement ok
-CREATE TABLE my_datalake.default.dml_cities_world (city VARCHAR, state VARCHAR, country VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_cities_world (city VARCHAR, state VARCHAR, country VARCHAR);
 
 statement ok
-INSERT INTO my_datalake.default.dml_cities_world VALUES ('Seattle', 'WA', 'usa'), ('Vancouver', 'BC', 'canada'), ('Portland', 'OR', 'usa');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities_world VALUES ('Seattle', 'WA', 'usa'), ('Vancouver', 'BC', 'canada'), ('Portland', 'OR', 'usa');
 
 statement ok
-CREATE TABLE my_datalake.default.dml_cities_usa (city VARCHAR, state VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_cities_usa (city VARCHAR, state VARCHAR);
 
 statement ok
-INSERT INTO my_datalake.default.dml_cities_usa (city,state)
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities_usa (city,state)
 SELECT city,state
-FROM my_datalake.default.dml_cities_world
+FROM my_datalake.{GLUE_TEST_DB}.dml_cities_world
     WHERE country='usa';
 
 query II
-SELECT * FROM my_datalake.default.dml_cities_usa ORDER BY city;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.dml_cities_usa ORDER BY city;
 ----
 Portland	OR
 Seattle	WA
@@ -110,21 +113,21 @@ Seattle	WA
 # INSERT INTO ... VALUES
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.dml_cities (id INTEGER, city VARCHAR, state VARCHAR, state_motto VARCHAR);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_cities (id INTEGER, city VARCHAR, state VARCHAR, state_motto VARCHAR);
 
 # a single row with every column specified
 statement ok
-INSERT INTO my_datalake.default.dml_cities
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities
 VALUES (1,'Lansing','MI','Si quaeris peninsulam amoenam circumspice');
 
 # two rows at once (every INSERT writes a new file, the rows are appended)
 statement ok
-INSERT INTO my_datalake.default.dml_cities
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities
 VALUES (1,'Lansing','MI','Si quaeris peninsulam amoenam circumspice'),
        (3,'Boise','ID','Esto perpetua');
 
 query IIII
-SELECT * FROM my_datalake.default.dml_cities ORDER BY id, city;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.dml_cities ORDER BY id, city;
 ----
 1	Lansing	MI	Si quaeris peninsulam amoenam circumspice
 1	Lansing	MI	Si quaeris peninsulam amoenam circumspice
@@ -132,45 +135,45 @@ SELECT * FROM my_datalake.default.dml_cities ORDER BY id, city;
 
 # columns that are not mentioned become NULL
 statement ok
-INSERT INTO my_datalake.default.dml_cities (id, city) VALUES (4, 'Austin');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities (id, city) VALUES (4, 'Austin');
 
 # values are cast to the column types
 statement ok
-INSERT INTO my_datalake.default.dml_cities VALUES ('5', 'Denver', 'CO', 'Nil sine numine');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities VALUES ('5', 'Denver', 'CO', 'Nil sine numine');
 
 query IIII
-SELECT id, city, state, state_motto FROM my_datalake.default.dml_cities WHERE id >= 4 ORDER BY id;
+SELECT id, city, state, state_motto FROM my_datalake.{GLUE_TEST_DB}.dml_cities WHERE id >= 4 ORDER BY id;
 ----
 4	Austin	NULL	NULL
 5	Denver	CO	Nil sine numine
 
 # the number of values must match the number of columns
 statement error
-INSERT INTO my_datalake.default.dml_cities VALUES (6, 'Boston');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities VALUES (6, 'Boston');
 ----
 
 statement error
-INSERT INTO my_datalake.default.dml_cities (id, city) VALUES (6, 'Boston', 'MA');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities (id, city) VALUES (6, 'Boston', 'MA');
 ----
 
 #---------------------------------------------------------------------------
 # partitioned destination: the partition column is the last column of the projection
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.dml_cities_by_state (id INTEGER, city VARCHAR, state VARCHAR) PARTITIONED BY (state);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.dml_cities_by_state (id INTEGER, city VARCHAR, state VARCHAR) PARTITIONED BY (state);
 
 statement ok
-INSERT INTO my_datalake.default.dml_cities_by_state
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities_by_state
 SELECT id, city, state
-FROM my_datalake.default.dml_cities
+FROM my_datalake.{GLUE_TEST_DB}.dml_cities
 WHERE state IS NOT NULL;
 
 # with a column list the partition column can be anywhere in the list
 statement ok
-INSERT INTO my_datalake.default.dml_cities_by_state (state, id, city) VALUES ('WA', 6, 'Seattle');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities_by_state (state, id, city) VALUES ('WA', 6, 'Seattle');
 
 query II
-SELECT state, count(*) FROM my_datalake.default.dml_cities_by_state GROUP BY state ORDER BY state;
+SELECT state, count(*) FROM my_datalake.{GLUE_TEST_DB}.dml_cities_by_state GROUP BY state ORDER BY state;
 ----
 CO	1
 ID	1
@@ -178,7 +181,7 @@ MI	2
 WA	1
 
 query II
-SELECT id, city FROM my_datalake.default.dml_cities_by_state WHERE state = 'MI' ORDER BY id;
+SELECT id, city FROM my_datalake.{GLUE_TEST_DB}.dml_cities_by_state WHERE state = 'MI' ORDER BY id;
 ----
 1	Lansing
 1	Lansing
@@ -188,11 +191,12 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as verify_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
-SELECT state, count(*) FROM verify_datalake.default.dml_cities_by_state GROUP BY state ORDER BY state;
+SELECT state, count(*) FROM verify_datalake.{GLUE_TEST_DB}.dml_cities_by_state GROUP BY state ORDER BY state;
 ----
 CO	1
 ID	1
@@ -201,42 +205,42 @@ WA	1
 
 # the source has more columns than the destination
 statement error
-INSERT INTO my_datalake.default.dml_cities_by_state SELECT * FROM my_datalake.default.dml_cities;
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities_by_state SELECT * FROM my_datalake.{GLUE_TEST_DB}.dml_cities;
 ----
 
 #---------------------------------------------------------------------------
 # not supported
 #---------------------------------------------------------------------------
 statement error
-INSERT INTO my_datalake.default.dml_cities VALUES (7, 'Reno', 'NV', 'All for our country') RETURNING id;
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities VALUES (7, 'Reno', 'NV', 'All for our country') RETURNING id;
 ----
 RETURNING clause not yet supported
 
 statement error
-INSERT INTO my_datalake.default.dml_cities VALUES (7, 'Reno', 'NV', 'All for our country') ON CONFLICT DO NOTHING;
+INSERT INTO my_datalake.{GLUE_TEST_DB}.dml_cities VALUES (7, 'Reno', 'NV', 'All for our country') ON CONFLICT DO NOTHING;
 ----
 
 statement error
-INSERT OR REPLACE INTO my_datalake.default.dml_cities VALUES (7, 'Reno', 'NV', 'All for our country');
+INSERT OR REPLACE INTO my_datalake.{GLUE_TEST_DB}.dml_cities VALUES (7, 'Reno', 'NV', 'All for our country');
 ----
 
 statement ok
-DROP TABLE my_datalake.default.dml_vancouver_pageviews;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_vancouver_pageviews;
 
 statement ok
-DROP TABLE my_datalake.default.dml_canada_pageviews;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_canada_pageviews;
 
 statement ok
-DROP TABLE my_datalake.default.dml_canada_july_pageviews;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_canada_july_pageviews;
 
 statement ok
-DROP TABLE my_datalake.default.dml_cities_world;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_cities_world;
 
 statement ok
-DROP TABLE my_datalake.default.dml_cities_usa;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_cities_usa;
 
 statement ok
-DROP TABLE my_datalake.default.dml_cities;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_cities;
 
 statement ok
-DROP TABLE my_datalake.default.dml_cities_by_state;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.dml_cities_by_state;
