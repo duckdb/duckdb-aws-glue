@@ -304,7 +304,7 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 				column.comment = previous->comment;
 			}
 			auto from = GlueTypes::ToLogicalType(previous->type);
-			if (!GlueSchemaEntry::IsAllowedHiveTypeChange(from, type)) {
+			if (!GlueTypes::IsAllowedHiveTypeChange(from, type)) {
 				throw BinderException("glue_replace_columns: can not change column '%s' of table '%s' from %s to %s: "
 				                      "existing files keep their types, only widening changes are supported",
 				                      previous->name, result->target.TableName(), from.ToString(), type.ToString());
