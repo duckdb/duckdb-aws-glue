@@ -544,14 +544,16 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	D_ASSERT(table.name == table_name);
 	D_ASSERT(table.schema_name == database_info.name);
 	// writes keep these current; a partitioned table keeps them per partition
-	auto given =
-	    table.parameters.count("numRows") + table.parameters.count("numFiles") + table.parameters.count("totalSize");
-	// CREATE TABLE AS has checked its location holds no data files; files a dropped table left would not be counted
-	if (table.file_format == HiveFileFormat::PARQUET && table.partition_keys.empty() && given == 0) {
-		bool empty = resolved_table_info;
-		if (!empty) {
+	auto has_statistics_parameter =
+	    table.parameters.count("numRows") || table.parameters.count("numFiles") || table.parameters.count("totalSize");
+	if (table.file_format == HiveFileFormat::PARQUET && table.partition_keys.empty() && !has_statistics_parameter) {
+		// CREATE TABLE AS has checked its location holds no data files; files a dropped table left would not be
+		// counted
+		auto is_ctas = resolved_table_info != nullptr;
+		auto location_empty = is_ctas;
+		if (!is_ctas) {
 			try {
-				empty = !LocationHasDataFiles(FileSystem::GetFileSystem(context), table.location);
+				location_empty = !HiveLocation::HasDataFiles(FileSystem::GetFileSystem(context), table.location);
 			} catch (std::exception &ex) {
 				ErrorData error(ex);
 				if (error.Type() == ExceptionType::INTERRUPT) {
@@ -562,8 +564,8 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 				                   table.location, table.schema_name, table.name, error.RawMessage());
 			}
 		}
-		if (empty) {
-			SetBasicStatistics(table.parameters, GlueBasicStatistics());
+		if (location_empty) {
+			GlueBasicStatistics().WriteTo(table.parameters);
 		}
 	}
 	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {

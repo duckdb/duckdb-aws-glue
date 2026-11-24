@@ -418,7 +418,7 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 		table_input.SetStorageDescriptor(storage_descriptor);
 		// the statistics count the files at the old location
 		auto parameters = ToStdMap(table_input.GetParameters());
-		RemoveBasicStatistics(parameters);
+		GlueBasicStatistics::RemoveFrom(parameters);
 		table_input.SetParameters(ToAwsMap(parameters));
 	});
 }
@@ -462,15 +462,15 @@ void GlueAPI::AddTableStatistics(ClientContext &context, GlueCatalog &catalog, c
 	auto added = UpdateTableParametersWithRetry(context, catalog, database_name, table_name,
 	                                            [&](unordered_map<string, string> &parameters) {
 		                                            GlueBasicStatistics total;
-		                                            if (!TryGetBasicStatistics(parameters, total)) {
+		                                            if (!GlueBasicStatistics::TryRead(parameters, total)) {
 			                                            // unknown statistics stay unknown
 			                                            return false;
 		                                            }
 		                                            if (total.TryAdd(statistics)) {
-			                                            SetBasicStatistics(parameters, total);
+			                                            total.WriteTo(parameters);
 		                                            } else {
 			                                            // a count past 64 bits is not one
-			                                            RemoveBasicStatistics(parameters);
+			                                            GlueBasicStatistics::RemoveFrom(parameters);
 		                                            }
 		                                            return true;
 	                                            });
@@ -483,12 +483,9 @@ void GlueAPI::RemoveTableStatistics(ClientContext &context, GlueCatalog &catalog
                                     const string &table_name) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateTable");
-	auto removed = UpdateTableParametersWithRetry(context, catalog, database_name, table_name,
-	                                              [&](unordered_map<string, string> &parameters) {
-		                                              auto count = parameters.size();
-		                                              RemoveBasicStatistics(parameters);
-		                                              return parameters.size() != count;
-	                                              });
+	auto removed = UpdateTableParametersWithRetry(
+	    context, catalog, database_name, table_name,
+	    [&](unordered_map<string, string> &parameters) { return GlueBasicStatistics::RemoveFrom(parameters); });
 	if (!removed) {
 		throw TransactionException("Glue table \"%s.%s\" kept being changed by another client, so its numRows, "
 		                           "numFiles and totalSize could not be removed",

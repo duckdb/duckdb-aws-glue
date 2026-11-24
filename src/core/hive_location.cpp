@@ -4,6 +4,7 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/unordered_set.hpp"
 
 namespace duckdb {
 
@@ -43,15 +44,19 @@ unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location) {
 	return fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
 }
 
-bool LocationHasDataFiles(FileSystem &fs, const string &location, const unordered_set<string> &except) {
+bool HiveLocation::HasDataFiles(FileSystem &fs, const string &location, const vector<string> &except) {
 	if (LocationHasGlob(location)) {
 		return true;
+	}
+	unordered_set<string> skipped;
+	for (auto &path : except) {
+		skipped.insert(ComparableLocation(path));
 	}
 	auto prefix = location;
 	StringUtil::RTrim(prefix, "/");
 	auto listing = ListLocation(fs, prefix);
 	for (auto &file : listing->Files()) {
-		if (IsDataFile(file, prefix + "/") && except.find(ComparableLocation(file.path)) == except.end()) {
+		if (IsDataFile(file, prefix + "/") && skipped.find(ComparableLocation(file.path)) == skipped.end()) {
 			return true;
 		}
 	}

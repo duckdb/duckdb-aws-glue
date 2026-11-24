@@ -4,7 +4,6 @@
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/path.hpp"
 #include "duckdb/common/string.hpp"
-#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/vector.hpp"
 
@@ -37,8 +36,11 @@ bool IsDataFile(const OpenFileInfo &file, const string &prefix);
 bool LocationHasGlob(const string &location);
 //! Every file below a location, recursively; empty when there are none. Check LocationHasGlob first
 unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location);
-//! Whether a location holds data files (IsDataFile) other than 'except' (ComparableLocation of each); true for a
-//! location with a glob character, which can not be listed
-bool LocationHasDataFiles(FileSystem &fs, const string &location, const unordered_set<string> &except = {});
+
+struct HiveLocation {
+	//! Whether a location holds data files (IsDataFile) other than the files 'except' names; true for a location with
+	//! a glob character, which can not be listed
+	static bool HasDataFiles(FileSystem &fs, const string &location, const vector<string> &except = {});
+};
 
 } // namespace duckdb

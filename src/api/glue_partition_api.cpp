@@ -42,7 +42,7 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 	input.SetStorageDescriptor(storage_descriptor);
 	// the statistics count the files at the old location
 	auto parameters = ToStdMap(fetched.GetParameters());
-	RemoveBasicStatistics(parameters);
+	GlueBasicStatistics::RemoveFrom(parameters);
 	input.SetParameters(ToAwsMap(parameters));
 	Aws::Glue::Model::UpdatePartitionRequest request;
 	SetCatalogId(request, catalog);
@@ -227,14 +227,13 @@ static void UpdatePartitionParameters(
 }
 
 void GlueAPI::AddPartitionStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                     const string &table_name, const vector<GluePartitionInput> &partitions,
-                                     const set<vector<string>> &created) {
+                                     const string &table_name, const vector<GluePartitionStatistics> &partitions) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "BatchUpdatePartition");
-	map<vector<string>, reference<const GluePartitionInput>> written;
+	map<vector<string>, reference<const GluePartitionStatistics>> written;
 	vector<vector<string>> values;
 	for (auto &partition : partitions) {
-		if (partition.statistics && written.emplace(partition.values, partition).second) {
+		if (written.emplace(partition.values, partition).second) {
 			values.push_back(partition.values);
 		}
 	}
@@ -246,28 +245,26 @@ void GlueAPI::AddPartitionStatistics(ClientContext &context, GlueCatalog &catalo
 	UpdatePartitionParameters(
 	    *client, catalog, database_name, table_name, values,
 	    [&](const Aws::Glue::Model::Partition &partition, unordered_map<string, string> &parameters) {
-		    auto partition_values = ToStdValues(partition.GetValues());
-		    auto entry = written.find(partition_values);
+		    auto entry = written.find(ToStdValues(partition.GetValues()));
 		    if (entry == written.end()) {
 			    return false;
 		    }
 		    auto &input = entry->second.get();
 		    // files written to another directory than the partition's are not its files
 		    auto location = ToStdString(partition.GetStorageDescriptor().GetLocation());
-		    if (ComparableLocation(location) != ComparableLocation(input.location)) {
-			    return false;
+		    if (!input.statistics || ComparableLocation(location) != ComparableLocation(input.location)) {
+			    return GlueBasicStatistics::RemoveFrom(parameters);
 		    }
 		    GlueBasicStatistics statistics;
-		    if (created.find(partition_values) == created.end() && !TryGetBasicStatistics(parameters, statistics)) {
+		    if (!input.created && !GlueBasicStatistics::TryRead(parameters, statistics)) {
 			    // unknown statistics stay unknown
 			    return false;
 		    }
-		    if (statistics.TryAdd(*input.statistics)) {
-			    SetBasicStatistics(parameters, statistics);
-		    } else {
+		    if (!statistics.TryAdd(*input.statistics)) {
 			    // a count past 64 bits is not one
-			    RemoveBasicStatistics(parameters);
+			    return GlueBasicStatistics::RemoveFrom(parameters);
 		    }
+		    statistics.WriteTo(parameters);
 		    return true;
 	    });
 }
@@ -283,9 +280,7 @@ void GlueAPI::RemovePartitionStatistics(ClientContext &context, GlueCatalog &cat
 	auto client = GetClient(context, catalog);
 	UpdatePartitionParameters(*client, catalog, database_name, table_name, partitions,
 	                          [&](const Aws::Glue::Model::Partition &, unordered_map<string, string> &parameters) {
-		                          auto count = parameters.size();
-		                          RemoveBasicStatistics(parameters);
-		                          return parameters.size() != count;
+		                          return GlueBasicStatistics::RemoveFrom(parameters);
 	                          });
 }
 

@@ -146,13 +146,12 @@ public:
 	static map<vector<string>, string> PartitionLocations(ClientContext &context, GlueCatalog &catalog,
 	                                                      const string &database_name, const string &table_name,
 	                                                      const vector<vector<string>> &partitions);
-	//! Record the statistics of each of 'partitions' in the numRows, numFiles and totalSize parameters of the
-	//! partition with its values (BatchUpdatePartition): a partition in 'created' gets them, another gets them added
-	//! to its own. Partitions at another location, and those not created without all three set to a count, keep their
-	//! parameters as they are.
+	//! Record the statistics of the files written to each of 'partitions' in one BatchGetPartition +
+	//! BatchUpdatePartition pass: a created partition gets them, an existing one with all three set to a count gets
+	//! them added, an existing one without keeps its parameters. They are removed where they can not be exact: no
+	//! statistics given, a sum past 64 bits, or a partition registered at another location than the files.
 	static void AddPartitionStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                   const string &table_name, const vector<GluePartitionInput> &partitions,
-	                                   const set<vector<string>> &created);
+	                                   const string &table_name, const vector<GluePartitionStatistics> &partitions);
 	//! Remove numRows, numFiles and totalSize from those of 'partitions' that have them (BatchUpdatePartition)
 	static void RemovePartitionStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                      const string &table_name, const vector<vector<string>> &partitions);

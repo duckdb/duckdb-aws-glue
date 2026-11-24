@@ -462,22 +462,23 @@ bool GlueBasicStatistics::TryAdd(const GlueBasicStatistics &other) {
 	return true;
 }
 
-bool TryGetBasicStatistics(const unordered_map<string, string> &parameters, GlueBasicStatistics &result) {
+bool GlueBasicStatistics::TryRead(const unordered_map<string, string> &parameters, GlueBasicStatistics &result) {
 	return TryGetCount(parameters, NUM_ROWS_PARAMETER, result.num_rows) &&
 	       TryGetCount(parameters, NUM_FILES_PARAMETER, result.num_files) &&
 	       TryGetCount(parameters, TOTAL_SIZE_PARAMETER, result.total_size);
 }
 
-void SetBasicStatistics(unordered_map<string, string> &parameters, const GlueBasicStatistics &statistics) {
-	parameters[NUM_ROWS_PARAMETER] = to_string(statistics.num_rows);
-	parameters[NUM_FILES_PARAMETER] = to_string(statistics.num_files);
-	parameters[TOTAL_SIZE_PARAMETER] = to_string(statistics.total_size);
+void GlueBasicStatistics::WriteTo(unordered_map<string, string> &parameters) const {
+	parameters[NUM_ROWS_PARAMETER] = to_string(num_rows);
+	parameters[NUM_FILES_PARAMETER] = to_string(num_files);
+	parameters[TOTAL_SIZE_PARAMETER] = to_string(total_size);
 }
 
-void RemoveBasicStatistics(unordered_map<string, string> &parameters) {
-	parameters.erase(NUM_ROWS_PARAMETER);
-	parameters.erase(NUM_FILES_PARAMETER);
-	parameters.erase(TOTAL_SIZE_PARAMETER);
+bool GlueBasicStatistics::RemoveFrom(unordered_map<string, string> &parameters) {
+	auto removed = parameters.erase(NUM_ROWS_PARAMETER);
+	removed += parameters.erase(NUM_FILES_PARAMETER);
+	removed += parameters.erase(TOTAL_SIZE_PARAMETER);
+	return removed > 0;
 }
 
 } // namespace duckdb

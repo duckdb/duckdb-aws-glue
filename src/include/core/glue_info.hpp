@@ -188,19 +188,30 @@ struct GlueBasicStatistics {
 
 	//! False, leaving this unchanged, when a sum does not fit in 64 bits
 	bool TryAdd(const GlueBasicStatistics &other);
-};
+	//! Write them as the numRows, numFiles and totalSize parameters
+	void WriteTo(unordered_map<string, string> &parameters) const;
 
-//! Whether numRows, numFiles and totalSize are all set to a count
-bool TryGetBasicStatistics(const unordered_map<string, string> &parameters, GlueBasicStatistics &result);
-void SetBasicStatistics(unordered_map<string, string> &parameters, const GlueBasicStatistics &statistics);
-void RemoveBasicStatistics(unordered_map<string, string> &parameters);
+	//! Whether numRows, numFiles and totalSize are all set to a count
+	static bool TryRead(const unordered_map<string, string> &parameters, GlueBasicStatistics &result);
+	//! Remove numRows, numFiles and totalSize; returns whether any was there
+	static bool RemoveFrom(unordered_map<string, string> &parameters);
+};
 
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location
 struct GluePartitionInput {
 	vector<string> values;
 	string location;
-	//! The statistics of the files written to it, recorded once the partition is registered
+};
+
+//! What a write records in the numRows, numFiles and totalSize parameters of a partition it wrote files to
+struct GluePartitionStatistics {
+	vector<string> values;
+	//! The directory the files were written to
+	string location;
+	//! The statistics of those files; unset when they can not be made exact
 	optional<GlueBasicStatistics> statistics;
+	//! Whether this write registered the partition, which then holds no other files
+	bool created = false;
 };
 
 //! A partition of a Hive table as registered in Glue: the partition values (in partition key order, as strings)
