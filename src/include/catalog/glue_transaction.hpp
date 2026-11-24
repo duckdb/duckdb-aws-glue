@@ -72,7 +72,7 @@ public:
 		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(partitions, database_name + "\n" + table_name);
+			entry = FindEntry(partitions, TableCacheKey(database_name, table_name));
 		}
 		annotated_lock_guard<annotated_mutex> guard(entry->load_lock);
 		return entry->value;
