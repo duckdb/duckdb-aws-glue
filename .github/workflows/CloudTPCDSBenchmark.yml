@@ -1,0 +1,324 @@
+# Compares the timings of the 99 TPC-DS queries at SF100 between a commit and a base commit, on the partitioned parquet
+# tables in the live AWS Glue catalog (us-east-1) that scripts/benchmarks/create_tpcds_glue.sh created. The tables are
+# only read; the catalog is attached READ_ONLY. Two suites, chosen with the `benchmarks` input (default both):
+#   execution  benchmark/tpcds/cloud_sf100/partitioned/   runs the queries, checking the SF100 answers (8 jobs)
+#   planning   benchmark/tpcds/planning/cloud_sf100/      EXPLAINs them: Glue calls, listings, binding, optimizer (2 jobs)
+# Started by a maintainer only:
+#   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123   PR #123's head merged into the head of the branch it
+#                                                              targets (main, v2.0-cyanoptera, ...) against that head;
+#                                                              a PR with conflicts has to merge the branch first
+#   gh workflow run CloudTPCDSBenchmark.yml --ref my-branch    the head of the selected branch against the same branch
+#                                                              a day ago: its newest first-parent commit older than 24h
+#   gh workflow run CloudTPCDSBenchmark.yml -f pr_number=123 -f benchmarks=planning
+#
+# The 'glue-benchmark' environment (or the repository) provides:
+#   variables  GLUE_CATALOG_ID               the AWS account id of the Glue catalog that holds tpcds_sf100_partitioned
+#              GLUE_REGRESSION_TEST_REGION   its region, e.g. us-east-1
+#              AWS_ROLE_ARN                  optional: an IAM role to assume through GitHub's OIDC provider
+#   secrets    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, when no AWS_ROLE_ARN is given
+# The credentials need glue:GetDatabase(s), GetTable(s) and GetPartitions on that catalog and region,
+# and s3:ListBucket and s3:GetObject on s3://duckdb-aws-glue-benchmark-data/tpcds/. Every byte the queries read leaves
+# AWS (S3 egress to GitHub's runners): each execution query runs 5 times per binary.
+
+name: Cloud TPC-DS benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Number of the pull request whose head commit is benchmarked; empty benchmarks the selected branch
+        required: false
+        type: string
+      benchmarks:
+        description: "Benchmark suites to run, space separated: execution, planning"
+        required: false
+        default: execution planning
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-tpcds-benchmark
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve:
+    name: Resolve commits
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.commits.outputs.sha }}
+      base_sha: ${{ steps.commits.outputs.base_sha }}
+      merge: ${{ steps.commits.outputs.merge }}
+      matrix: ${{ steps.suites.outputs.matrix }}
+    env:
+      PR_NUMBER: ${{ inputs.pr_number }}
+      BENCHMARKS: ${{ inputs.benchmarks }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # the run executes the tested commit's code with the AWS credentials of the 'glue-benchmark' environment
+      - name: Check that a maintainer started the run
+        run: |
+          role=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.triggering_actor }}/permission" --jq .role_name)
+          echo "${{ github.triggering_actor }} has role '$role'"
+          if [ "$role" != "admin" ] && [ "$role" != "maintain" ]; then
+            echo "::error::Only maintainers can run the cloud TPC-DS benchmark"
+            exit 1
+          fi
+
+      # the history of the selected branch, for its commit of a day ago (commits only, no files)
+      - uses: actions/checkout@v5
+        if: inputs.pr_number == ''
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+          persist-credentials: false
+
+      # resolved once: a push to the PR or a branch during the run does not change what is compared
+      - name: Resolve the commits
+        id: commits
+        run: |
+          if [ -z "$PR_NUMBER" ]; then
+            sha="$GITHUB_SHA"
+            echo "Benchmarking $GITHUB_REF_NAME at $sha"
+            # first-parent: the branch's own history (its merge commits), not the commits of the branches merged into it
+            base_sha=$(git rev-list -1 --first-parent --before="24 hours ago" "$sha")
+            if [ -z "$base_sha" ]; then
+              echo "::error::$GITHUB_REF_NAME has no commit older than a day to compare with; benchmark a PR instead"
+              exit 1
+            fi
+            git log -1 --format="Against $GITHUB_REF_NAME a day ago: %h %s (%cr)" "$base_sha"
+          elif [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            pr=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER")
+            sha=$(jq -r .head.sha <<< "$pr")
+            base_ref=$(jq -r .base.ref <<< "$pr")
+            jq -r '"Benchmarking PR #\(.number) (\(.state)) \(.title) at \(.head.sha), merged into \(.base.ref)"' <<< "$pr"
+            base_sha=$(gh api "repos/${{ github.repository }}/commits/$base_ref" --jq .sha)
+            echo "Against the head of $base_ref: $base_sha"
+            # not GitHub's refs/pull/<n>/merge: it can lag behind the target branch, e.g. after the PR's base changed
+            echo "merge=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::pr_number must be a pull request number, got '$PR_NUMBER'"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+      # one matrix entry per shard of each chosen suite
+      - name: Select the benchmark suites
+        id: suites
+        run: |
+          entries=()
+          for suite in ${BENCHMARKS:-execution planning}; do
+            case "$suite" in
+            execution) directory=benchmark/tpcds/cloud_sf100/partitioned shards=8 ;;
+            planning) directory=benchmark/tpcds/planning/cloud_sf100 shards=2 ;;
+            *)
+              echo "::error::Unknown benchmark suite '$suite': expected execution and/or planning"
+              exit 1
+              ;;
+            esac
+            for shard in $(seq 1 "$shards"); do
+              entries+=("{\"suite\":\"$suite\",\"directory\":\"$directory\",\"shard\":$shard,\"shards\":$shards}")
+            done
+          done
+          if [ ${#entries[@]} -eq 0 ]; then
+            echo "::error::No benchmark suite selected"
+            exit 1
+          fi
+          matrix=$(IFS=,; echo "{\"include\":[${entries[*]}]}")
+          echo "$matrix" | jq .
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build-benchmark-runners:
+    name: Build Benchmark Runners
+    needs: resolve
+    # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
+    runs-on: ubuntu-24.04
+    env:
+      GEN: ninja
+      CC: clang-20
+      CXX: clang++-20
+      # lets the base build in base/ hit the ccache entries of the tested build
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      SHA: ${{ needs.resolve.outputs.sha }}
+      BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve.outputs.merge == 'true' && needs.resolve.outputs.base_sha || needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      # PR mode: the tested tree is the PR's head merged into the target branch's head (base_sha)
+      - name: Merge the PR into its target branch
+        if: needs.resolve.outputs.merge == 'true'
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          git fetch --no-tags origin "$SHA"
+          if ! git -c user.name=ci -c user.email=ci@localhost merge --no-ff --no-edit "$SHA"; then
+            echo "::error::The PR conflicts with its target branch: merge the target branch into it, then start the run again"
+            exit 1
+          fi
+          git log -1 --format='Merged %p into %h'
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install tools
+        run: python3 duckdb/scripts/ci/retry.py -- make -C duckdb toolsci
+
+      # restores the cache Regression.yml saves on main
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@main
+        with:
+          key: build-benchmark-runners
+          save: false
+
+      - name: Build Benchmark (release)
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        env:
+          STATIC_LIBCPP: 1
+          ENABLE_EXTENSION_AUTOLOADING: 1
+          ENABLE_EXTENSION_AUTOINSTALL: 1
+          BUILD_BENCHMARK: 1
+        with:
+          build-type: release
+          build: python3 duckdb/scripts/ci/retry.py -- make release
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
+
+      - name: Checkout the base commit
+        run: |
+          rm -rf base
+          git clone . base
+          cd base
+          git checkout "${BASE_SHA}"
+          git submodule update --init --recursive
+
+      - name: Build Base Benchmark (release)
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        env:
+          STATIC_LIBCPP: 1
+          ENABLE_EXTENSION_AUTOLOADING: 1
+          ENABLE_EXTENSION_AUTOINSTALL: 1
+          BUILD_BENCHMARK: 1
+        with:
+          build-type: release
+          build: python3 duckdb/scripts/ci/retry.py -- make -C base release
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
+
+      # the runners load the extensions (httpfs, aws, glue, ...) from the repository directory next to their build
+      - name: Upload benchmark runners
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-tpcds-benchmark-runners
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            build/release/benchmark/benchmark_runner
+            build/release/repository
+            base/build/release/benchmark/benchmark_runner
+            base/build/release/repository
+
+  benchmark:
+    name: TPC-DS SF100 ${{ matrix.suite }} (shard ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: [resolve, build-benchmark-runners]
+    runs-on: ubuntu-24.04
+    environment: glue-benchmark
+    permissions:
+      contents: read
+      # AWS_ROLE_ARN: OIDC token for configure-aws-credentials
+      id-token: write
+    strategy:
+      fail-fast: false
+      # queries are dealt round-robin (q01, q09, q17, ... to shard 1 of 8), so the heavy ones spread over the shards
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    env:
+      # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: ${{ vars.GLUE_REGRESSION_TEST_REGION }}
+      GLUE_CATALOG_ID: ${{ vars.GLUE_CATALOG_ID }}
+      GLUE_REGRESSION_TEST_REGION: ${{ vars.GLUE_REGRESSION_TEST_REGION }}
+      DIRECTORY: ${{ matrix.directory }}
+      SHARD: ${{ matrix.shard }}
+      SHARDS: ${{ matrix.shards }}
+
+    steps:
+      # the benchmark files of the tested commit are run by both runners
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve.outputs.merge == 'true' && needs.resolve.outputs.base_sha || needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      # PR mode: the tested tree is the PR's head merged into the target branch's head (base_sha)
+      - name: Merge the PR into its target branch
+        if: needs.resolve.outputs.merge == 'true'
+        env:
+          SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          git fetch --no-tags origin "$SHA"
+          if ! git -c user.name=ci -c user.email=ci@localhost merge --no-ff --no-edit "$SHA"; then
+            echo "::error::The PR conflicts with its target branch: merge the target branch into it, then start the run again"
+            exit 1
+          fi
+          git log -1 --format='Merged %p into %h'
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Check the configuration
+        run: |
+          missing=0
+          for name in GLUE_CATALOG_ID GLUE_REGRESSION_TEST_REGION; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Variable $name is not set in the 'glue-benchmark' environment or the repository"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      - name: Download benchmark runners
+        uses: actions/download-artifact@v4
+        with:
+          name: cloud-tpcds-benchmark-runners
+
+      - name: Restore permissions
+        run: chmod +x build/release/benchmark/benchmark_runner base/build/release/benchmark/benchmark_runner
+
+      - name: AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          aws-region: ${{ vars.GLUE_REGRESSION_TEST_REGION }}
+
+      # --disable-timeout: a batch of 5 runs of a heavy query at SF100 takes longer than the default 10 minutes
+      - name: Regression Test benchmarks
+        run: |
+          mkdir -p .github/regression
+          find "$DIRECTORY" -name '*.benchmark' | sort \
+            | awk -v shard="$SHARD" -v shards="$SHARDS" '(NR - 1) % shards == shard - 1' > .github/regression/benchmarks.csv
+          cat .github/regression/benchmarks.csv
+          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner \
+            --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/benchmarks.csv \
+            --verbose --threads 4 --samples 5 --disable-timeout \
+            --benchmark-argument "glue_catalog_id=$GLUE_CATALOG_ID" \
+            --benchmark-argument "glue_region=$GLUE_REGRESSION_TEST_REGION"

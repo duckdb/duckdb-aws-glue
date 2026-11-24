@@ -1,0 +1,62 @@
+# name: test/sql/hive/ddl/alter_column/alter_avro_schema_literal.test
+# description: columns of a table with an Avro schema are not changed, as Hive and Athena read the columns from the schema
+# group: [alter_column]
+
+require httpfs
+
+require avro
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.alter_avro_literal;
+
+statement ok
+CREATE TABLE my_datalake.default.alter_avro_literal (id INTEGER, name VARCHAR) WITH (format = 'avro', 'avro.schema.literal' = '{"type":"record","name":"r","fields":[{"name":"id","type":"int"},{"name":"name","type":["null","string"]}]}');
+
+statement error
+ALTER TABLE my_datalake.default.alter_avro_literal ADD COLUMN extra INTEGER;
+----
+its 'avro.schema.literal' defines the columns
+
+statement error
+ALTER TABLE my_datalake.default.alter_avro_literal DROP COLUMN name;
+----
+its 'avro.schema.literal' defines the columns
+
+statement error
+ALTER TABLE my_datalake.default.alter_avro_literal RENAME COLUMN name TO label;
+----
+its 'avro.schema.literal' defines the columns
+
+statement error
+ALTER TABLE my_datalake.default.alter_avro_literal ALTER COLUMN id TYPE BIGINT;
+----
+its 'avro.schema.literal' defines the columns
+
+statement error
+CALL glue_replace_columns('my_datalake.default.alter_avro_literal', {id: 'BIGINT'});
+----
+its 'avro.schema.literal' defines the columns
+
+query TT
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'alter_avro_literal' ORDER BY column_index;
+----
+id	INTEGER
+name	VARCHAR
+
+# comments do not change the columns
+statement ok
+COMMENT ON COLUMN my_datalake.default.alter_avro_literal.id IS 'the id';
+
+statement ok
+DROP TABLE my_datalake.default.alter_avro_literal;

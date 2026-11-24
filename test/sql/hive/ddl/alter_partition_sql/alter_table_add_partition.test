@@ -10,6 +10,8 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 # the partition DDL is a grammar extension registered by the glue extension; it has to be switched on
 statement ok
 SET active_grammar_extensions = ['glue_hive_ddl'];
@@ -18,24 +20,25 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.sql_orders_add;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.sql_orders_add;
 
 statement ok
-CREATE TABLE my_datalake.default.sql_orders_add (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
 
 # data laid out as <key>=<value> directories under the table location, not registered in Glue
 statement ok
-COPY (SELECT 1 AS id, 10.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-05-14/country=IN/data.parquet';
+COPY (SELECT 1 AS id, 10.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_orders_add/dt=2016-05-14/country=IN/data.parquet';
 
 statement ok
-COPY (SELECT 2 AS id, 20.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-05-31/country=IN/data.parquet';
+COPY (SELECT 2 AS id, 20.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_orders_add/dt=2016-05-31/country=IN/data.parquet';
 
 statement ok
-COPY (SELECT 3 AS id, 30.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-06-01/country=IN/data.parquet';
+COPY (SELECT 3 AS id, 30.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_orders_add/dt=2016-06-01/country=IN/data.parquet';
 
 # data at custom locations, outside the table location
 statement ok
@@ -45,7 +48,7 @@ statement ok
 COPY (SELECT 5 AS id, 50.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/INDIA_03_June_2016/data.parquet';
 
 query I
-SELECT count(*) FROM my_datalake.default.sql_orders_add;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.sql_orders_add;
 ----
 0
 
@@ -53,15 +56,15 @@ SELECT count(*) FROM my_datalake.default.sql_orders_add;
 # ALTER TABLE orders ADD PARTITION (dt = '2016-05-14', country = 'IN');
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_add ADD PARTITION (dt = '2016-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD PARTITION (dt = '2016-05-14', country = 'IN');
 
 query III
-SELECT dt, country, location FROM glue_partitions('my_datalake.default.sql_orders_add') ORDER BY dt;
+SELECT dt, country, location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_add') ORDER BY dt;
 ----
-2016-05-14	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_add/dt=2016-05-14/country=IN
+2016-05-14	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_orders_add/dt=2016-05-14/country=IN
 
 query II
-SELECT id, amount FROM my_datalake.default.sql_orders_add ORDER BY id;
+SELECT id, amount FROM my_datalake.{GLUE_TEST_DB}.sql_orders_add ORDER BY id;
 ----
 1	10.0
 
@@ -69,12 +72,12 @@ SELECT id, amount FROM my_datalake.default.sql_orders_add ORDER BY id;
 # several partitions in one statement: ADD PARTITION (...) PARTITION (...)
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_add ADD
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD
     PARTITION (dt = '2016-05-31', country = 'IN')
     PARTITION (dt = '2016-06-01', country = 'IN');
 
 query II
-SELECT dt, country FROM glue_partitions('my_datalake.default.sql_orders_add') ORDER BY dt;
+SELECT dt, country FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_add') ORDER BY dt;
 ----
 2016-05-14	IN
 2016-05-31	IN
@@ -84,19 +87,19 @@ SELECT dt, country FROM glue_partitions('my_datalake.default.sql_orders_add') OR
 # several partitions with their own locations, chained: ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) LOCATION '...'
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_add
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add
     ADD PARTITION (dt = '2016-06-02', country = 'IN') LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/INDIA_02_June_2016/'
     ADD PARTITION (dt = '2016-06-03', country = 'IN') LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}/INDIA_03_June_2016/';
 
 query II
-SELECT dt, location LIKE '%/INDIA_0%_June_2016' FROM glue_partitions('my_datalake.default.sql_orders_add') WHERE dt >= '2016-06-02' ORDER BY dt;
+SELECT dt, location LIKE '%/INDIA_0%_June_2016' FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_add') WHERE dt >= '2016-06-02' ORDER BY dt;
 ----
 2016-06-02	true
 2016-06-03	true
 
 # the partition values of a partition with a custom location come from Glue, not from the path
 query IIII
-SELECT id, amount, dt, country FROM my_datalake.default.sql_orders_add ORDER BY id;
+SELECT id, amount, dt, country FROM my_datalake.{GLUE_TEST_DB}.sql_orders_add ORDER BY id;
 ----
 1	10.0	2016-05-14	IN
 2	20.0	2016-05-31	IN
@@ -105,7 +108,7 @@ SELECT id, amount, dt, country FROM my_datalake.default.sql_orders_add ORDER BY 
 5	50.0	2016-06-03	IN
 
 query I
-SELECT id FROM my_datalake.default.sql_orders_add WHERE dt = '2016-06-03';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.sql_orders_add WHERE dt = '2016-06-03';
 ----
 5
 
@@ -113,34 +116,34 @@ SELECT id FROM my_datalake.default.sql_orders_add WHERE dt = '2016-06-03';
 # ALTER TABLE orders ADD IF NOT EXISTS PARTITION (...)
 #---------------------------------------------------------------------------
 statement error
-ALTER TABLE my_datalake.default.sql_orders_add ADD PARTITION (dt = '2016-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD PARTITION (dt = '2016-05-14', country = 'IN');
 ----
 already exists
 
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_add ADD IF NOT EXISTS PARTITION (dt = '2016-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD IF NOT EXISTS PARTITION (dt = '2016-05-14', country = 'IN');
 
 # IF NOT EXISTS applies to every partition of the statement
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_add ADD IF NOT EXISTS
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD IF NOT EXISTS
     PARTITION (dt = '2016-05-14', country = 'IN')
     PARTITION (dt = '2016-06-04', country = 'IN');
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.sql_orders_add');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_add');
 ----
 6
 
 # a statement that fails registers nothing (the second partition already exists)
 statement error
-ALTER TABLE my_datalake.default.sql_orders_add ADD
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD
     PARTITION (dt = '2016-06-05', country = 'IN')
     PARTITION (dt = '2016-05-14', country = 'IN');
 ----
 already exists
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.sql_orders_add') WHERE dt = '2016-06-05';
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_add') WHERE dt = '2016-06-05';
 ----
 0
 
@@ -148,20 +151,20 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.sql_orders_add') WHERE
 # the partition spec must name every partition key, and only partition keys
 #---------------------------------------------------------------------------
 statement error
-ALTER TABLE my_datalake.default.sql_orders_add ADD PARTITION (dt = '2016-07-01');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD PARTITION (dt = '2016-07-01');
 ----
 
 # id is a data column, not a partition key
 statement error
-ALTER TABLE my_datalake.default.sql_orders_add ADD PARTITION (dt = '2016-07-01', country = 'IN', id = 1);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD PARTITION (dt = '2016-07-01', country = 'IN', id = 1);
 ----
 
 # the partition keys can be given in any order
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_add ADD PARTITION (country = 'US', dt = '2016-07-01');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD PARTITION (country = 'US', dt = '2016-07-01');
 
 query II
-SELECT dt, country FROM glue_partitions('my_datalake.default.sql_orders_add') WHERE country = 'US';
+SELECT dt, country FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_add') WHERE country = 'US';
 ----
 2016-07-01	US
 
@@ -169,24 +172,24 @@ SELECT dt, country FROM glue_partitions('my_datalake.default.sql_orders_add') WH
 # non-string partition values are written the way the key type renders them
 #---------------------------------------------------------------------------
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.sql_by_year;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.sql_by_year;
 
 statement ok
-CREATE TABLE my_datalake.default.sql_by_year (id INTEGER, year INTEGER) PARTITIONED BY (year);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.sql_by_year (id INTEGER, year INTEGER) PARTITIONED BY (year);
 
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_by_year/year=2016/data.parquet';
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_by_year/year=2016/data.parquet';
 
 statement ok
-ALTER TABLE my_datalake.default.sql_by_year ADD PARTITION (year = 2016);
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_by_year ADD PARTITION (year = 2016);
 
 query III
-SELECT year, typeof(year), location FROM glue_partitions('my_datalake.default.sql_by_year');
+SELECT year, typeof(year), location FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_by_year');
 ----
-2016	INTEGER	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_by_year/year=2016
+2016	INTEGER	{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_by_year/year=2016
 
 query II
-SELECT id, year FROM my_datalake.default.sql_by_year WHERE year = 2016;
+SELECT id, year FROM my_datalake.{GLUE_TEST_DB}.sql_by_year WHERE year = 2016;
 ----
 1	2016
 
@@ -204,7 +207,7 @@ statement ok
 RESET active_grammar_extensions;
 
 statement error
-ALTER TABLE my_datalake.default.sql_orders_add ADD PARTITION (dt = '2016-08-01', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add ADD PARTITION (dt = '2016-08-01', country = 'IN');
 ----
 
 statement ok
@@ -215,16 +218,17 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as verify_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query I
-SELECT count(*) FROM glue_partitions('verify_datalake.default.sql_orders_add');
+SELECT count(*) FROM glue_partitions('verify_datalake.{GLUE_TEST_DB}.sql_orders_add');
 ----
 7
 
 statement ok
-DROP TABLE my_datalake.default.sql_orders_add;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_add;
 
 statement ok
-DROP TABLE my_datalake.default.sql_by_year;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.sql_by_year;

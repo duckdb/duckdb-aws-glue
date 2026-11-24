@@ -8,35 +8,38 @@ duckdb_extension_load(glue
 # Linked into unittest, which the test extension under test/extension/glue_test_credentials must share with it
 duckdb_extension_statically_link(glue)
 
-# Avro backed Hive tables (AvroSerDe) are read with read_avro from the avro extension, which the glue extension loads
-# when Glue reports such a table. Pinned to the hash the duckdb submodule pins in
-# .github/config/extensions/avro.cmake, so it is known to build against this duckdb commit, and patched as duckdb builds
-# it (.github/patches/extensions/avro, e.g. linking the vcpkg libraries of the wasm_threads triplet).
 # dbgen / dsdgen for the TPC-H and TPC-DS benchmarks under benchmark/tpch and benchmark/tpcds
 duckdb_extension_load(tpch)
 duckdb_extension_load(tpcds)
 
-# httpfs with S3 requests signed with the secret a file names (duckdb/duckdb-httpfs#521). Takes precedence over the
-# duckdb submodule's .github/config/extensions/httpfs.cmake; without its patches, which this commit already contains.
+# Pinned and patched as the duckdb submodule's .github/config/extensions/httpfs.cmake, until duckdb-httpfs main
+# (with duckdb/duckdb-httpfs#521) builds against duckdb main
 duckdb_extension_load(httpfs
     LOAD_TESTS
     GIT_URL https://github.com/duckdb/duckdb-httpfs
-    GIT_TAG 5b1a46218dd31e811f1eeb0cac539e755cbb79c7
+    GIT_TAG a2485c0fd240cbddc0d467019f30201c9a46cf06
+    APPLY_PATCHES
 )
 
+# Avro backed Hive tables (AvroSerDe) are read with read_avro from the avro extension, which the glue extension loads
+# when Glue reports such a table. Pinned ahead of the duckdb submodule's 4d95356 (.github/config/extensions/avro.cmake)
+# for the Wasm vcpkg triplet linking, the decimal fixed-size sign bit and the avro-c Windows checkout fixes, so without
+# the submodule's .github/patches/extensions/avro, which target 4d95356.
 if (NOT MINGW)
     duckdb_extension_load(avro
         GIT_URL https://github.com/duckdb/duckdb-avro
-        GIT_TAG 4d95356ce9433a14165156dbc6f59dcc91bd4889
+        GIT_TAG 5ef585162ca04de48f2fbfce939dac3322091836
         SUBMODULES "third_party/avro-c"
-        APPLY_PATCHES
     )
 endif()
 
-# Iceberg tables in Glue views are read through an attached Iceberg catalog (ICEBERG_CATALOG); test/sql/cloud_glue
+# Iceberg tables in Glue views are read through an attached Iceberg catalog (ICEBERG_CATALOG); test/sql/cloud_glue.
+# Pinned and patched as the duckdb submodule's .github/config/extensions/iceberg.cmake, until duckdb-iceberg main
+# builds against duckdb main
 if (NOT EMSCRIPTEN AND NOT MINGW)
     duckdb_extension_load(iceberg
         GIT_URL https://github.com/duckdb/duckdb-iceberg
-        GIT_TAG 7246b00586ad00f1c2a6c2c36490734a326056e9
+        GIT_TAG 4c0c0874c48ec82a3e29910554891d04bcc0e988
+        APPLY_PATCHES
     )
 endif()

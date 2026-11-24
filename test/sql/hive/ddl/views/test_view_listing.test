@@ -10,24 +10,27 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.vl_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.vl_view;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.vl_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.vl_orders;
 
 statement ok
-CREATE TABLE my_datalake.default.vl_orders (id INTEGER, amount DOUBLE);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.vl_orders (id INTEGER, amount DOUBLE);
 
 statement ok
-CREATE VIEW my_datalake.default.vl_view AS SELECT id FROM vl_orders;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.vl_view AS SELECT id FROM vl_orders;
 
 # SHOW ALL TABLES walks every entry of every attached catalog, views included
 query I
@@ -53,7 +56,7 @@ SELECT count(*) > 0 FROM duckdb_columns() WHERE database_name = 'my_datalake' AN
 true
 
 statement ok
-DROP VIEW my_datalake.default.vl_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.vl_view;
 
 statement ok
-DROP TABLE my_datalake.default.vl_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.vl_orders;

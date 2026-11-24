@@ -12,17 +12,20 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_zstd compr_avro_bzip2 compr_avro_xz compr_wc_parquet compr_wc_json compr_wc_avro compr_wc_avrozstd compr_wc_override
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.{table};
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.{table};
 
 endloop
 
@@ -30,25 +33,25 @@ endloop
 # write.compression 'GZIP' on a partitioned csv table: gzip files named .csv.gz
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.compr_csv_gzip (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt)
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_csv_gzip (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt)
 WITH (format = 'csv', 'write.compression' = 'GZIP');
 
 statement ok
-INSERT INTO my_datalake.default.compr_csv_gzip VALUES (1, 'a', '2024-01-01'), (2, 'b', '2024-01-02');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_csv_gzip VALUES (1, 'a', '2024-01-01'), (2, 'b', '2024-01-02');
 
 query II
-SELECT count(*), bool_and(file LIKE '%.csv.gz') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_gzip/*/*');
+SELECT count(*), bool_and(file LIKE '%.csv.gz') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_gzip/*/*');
 ----
 2	true
 
 # the files start with the gzip magic bytes
 query I
-SELECT bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_gzip/*/*');
+SELECT bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_gzip/*/*');
 ----
 true
 
 query III
-SELECT id, name, dt FROM my_datalake.default.compr_csv_gzip ORDER BY id;
+SELECT id, name, dt FROM my_datalake.{GLUE_TEST_DB}.compr_csv_gzip ORDER BY id;
 ----
 1	a	2024-01-01
 2	b	2024-01-02
@@ -57,64 +60,64 @@ SELECT id, name, dt FROM my_datalake.default.compr_csv_gzip ORDER BY id;
 # write.compression 'ZSTD' on a json table
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.compr_json_zstd (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'ZSTD');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_json_zstd (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'ZSTD');
 
 statement ok
-INSERT INTO my_datalake.default.compr_json_zstd VALUES (1, 'a');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_json_zstd VALUES (1, 'a');
 
 query II
-SELECT bool_and(filename LIKE '%.json.zst'), bool_and(hex(content)[1:8] = '28B52FFD') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_zstd/*');
+SELECT bool_and(filename LIKE '%.json.zst'), bool_and(hex(content)[1:8] = '28B52FFD') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_json_zstd/*');
 ----
 true	true
 
 query II
-SELECT id, name FROM my_datalake.default.compr_json_zstd;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.compr_json_zstd;
 ----
 1	a
 
 # write.compression 'NONE' writes plain files
 statement ok
-CREATE TABLE my_datalake.default.compr_csv_none (id INTEGER) WITH (format = 'csv', 'write.compression' = 'NONE');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_csv_none (id INTEGER) WITH (format = 'csv', 'write.compression' = 'NONE');
 
 statement ok
-INSERT INTO my_datalake.default.compr_csv_none VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_csv_none VALUES (1);
 
 query I
-SELECT bool_and(file LIKE '%/%.csv') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_none/*');
+SELECT bool_and(file LIKE '%/%.csv') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_none/*');
 ----
 true
 
 # CREATE TABLE ... AS writes with the codec too
 statement ok
-CREATE TABLE my_datalake.default.compr_csv_ctas WITH (format = 'csv', 'write.compression' = 'gzip') AS SELECT 1 AS id;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_csv_ctas WITH (format = 'csv', 'write.compression' = 'gzip') AS SELECT 1 AS id;
 
 query II
-SELECT bool_and(filename LIKE '%.csv.gz'), bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_ctas/*');
+SELECT bool_and(filename LIKE '%.csv.gz'), bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_ctas/*');
 ----
 true	true
 
 query I
-SELECT id FROM my_datalake.default.compr_csv_ctas;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.compr_csv_ctas;
 ----
 1
 
 # the other text codecs DuckDB writes: zstd csv, gzip and plain json
 statement ok
-CREATE TABLE my_datalake.default.compr_csv_zstd (id INTEGER, name VARCHAR) WITH (format = 'csv', 'write.compression' = 'ZSTD');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_csv_zstd (id INTEGER, name VARCHAR) WITH (format = 'csv', 'write.compression' = 'ZSTD');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_json_gzip (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'GZIP');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_json_gzip (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'GZIP');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_json_none (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'NONE');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_json_none (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'NONE');
 
 foreach table compr_csv_zstd compr_json_gzip compr_json_none
 
 statement ok
-INSERT INTO my_datalake.default.{table} VALUES (1, 'a'), (2, 'b');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.{table} VALUES (1, 'a'), (2, 'b');
 
 query II
-SELECT id, name FROM my_datalake.default.{table} ORDER BY id;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.{table} ORDER BY id;
 ----
 1	a
 2	b
@@ -122,17 +125,17 @@ SELECT id, name FROM my_datalake.default.{table} ORDER BY id;
 endloop
 
 query II
-SELECT bool_and(filename LIKE '%.csv.zst'), bool_and(hex(content)[1:8] = '28B52FFD') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_zstd/*');
+SELECT bool_and(filename LIKE '%.csv.zst'), bool_and(hex(content)[1:8] = '28B52FFD') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_zstd/*');
 ----
 true	true
 
 query II
-SELECT bool_and(filename LIKE '%.json.gz'), bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_gzip/*');
+SELECT bool_and(filename LIKE '%.json.gz'), bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_json_gzip/*');
 ----
 true	true
 
 query II
-SELECT bool_and(filename LIKE '%.json'), bool_and(hex(content)[1:2] = '7B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_none/*');
+SELECT bool_and(filename LIKE '%.json'), bool_and(hex(content)[1:2] = '7B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_json_none/*');
 ----
 true	true
 
@@ -141,37 +144,37 @@ true	true
 #---------------------------------------------------------------------------
 # write.compression 'NONE': a gzip file named .csv.gz is still read as gzip
 statement ok
-COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_none/part-00001.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_none/part-00001.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
 
 query I
-SELECT id FROM my_datalake.default.compr_csv_none ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.compr_csv_none ORDER BY id;
 ----
 1
 2
 
 # a table that records gzip (as a Glue crawler does) reads plain files, and gzip files named .csv
 statement ok
-CREATE TABLE my_datalake.default.compr_csv_crawler (id INTEGER) WITH (format = 'csv', 'compressionType' = 'gzip');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_csv_crawler (id INTEGER) WITH (format = 'csv', 'compressionType' = 'gzip');
 
 statement ok
-COPY (SELECT 5 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_crawler/part-00000.csv' (FORMAT csv, HEADER false);
+COPY (SELECT 5 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_crawler/part-00000.csv' (FORMAT csv, HEADER false);
 
 query I
-SELECT id FROM my_datalake.default.compr_csv_crawler;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.compr_csv_crawler;
 ----
 5
 
 # the table's codec is still what INSERT writes with
 statement ok
-INSERT INTO my_datalake.default.compr_csv_crawler VALUES (6);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_csv_crawler VALUES (6);
 
 query I
-SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_crawler/*.csv.gz');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_crawler/*.csv.gz');
 ----
 1
 
 query I
-SELECT id FROM my_datalake.default.compr_csv_crawler ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.compr_csv_crawler ORDER BY id;
 ----
 5
 6
@@ -180,19 +183,19 @@ SELECT id FROM my_datalake.default.compr_csv_crawler ORDER BY id;
 # reads of a table that records no codec: DuckDB tells gzip and zstd files by their extension
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.compr_csv_plain (id INTEGER) WITH (format = 'csv');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_csv_plain (id INTEGER) WITH (format = 'csv');
 
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_plain/part-00000.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_plain/part-00000.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
 
 statement ok
-COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_plain/part-00001.csv' (FORMAT csv, HEADER false);
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_plain/part-00001.csv' (FORMAT csv, HEADER false);
 
 statement ok
-COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_plain/part-00002.csv.zst' (FORMAT csv, HEADER false, COMPRESSION zstd);
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_plain/part-00002.csv.zst' (FORMAT csv, HEADER false, COMPRESSION zstd);
 
 query I
-SELECT id FROM my_datalake.default.compr_csv_plain ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.compr_csv_plain ORDER BY id;
 ----
 1
 2
@@ -200,19 +203,19 @@ SELECT id FROM my_datalake.default.compr_csv_plain ORDER BY id;
 
 # the same for json: one table with gzip, zstd and plain files
 statement ok
-CREATE TABLE my_datalake.default.compr_json_plain (id INTEGER) WITH (format = 'json');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_json_plain (id INTEGER) WITH (format = 'json');
 
 statement ok
-COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_plain/part-00000.json.gz' (FORMAT json, COMPRESSION gzip);
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_json_plain/part-00000.json.gz' (FORMAT json, COMPRESSION gzip);
 
 statement ok
-COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_plain/part-00001.json.zst' (FORMAT json, COMPRESSION zstd);
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_json_plain/part-00001.json.zst' (FORMAT json, COMPRESSION zstd);
 
 statement ok
-COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_plain/part-00002.json' (FORMAT json);
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_json_plain/part-00002.json' (FORMAT json);
 
 query I
-SELECT id FROM my_datalake.default.compr_json_plain ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.compr_json_plain ORDER BY id;
 ----
 1
 2
@@ -220,19 +223,19 @@ SELECT id FROM my_datalake.default.compr_json_plain ORDER BY id;
 
 # a codec DuckDB can not write
 statement ok
-CREATE TABLE my_datalake.default.compr_csv_bzip2 (id INTEGER) WITH (format = 'csv', 'write.compression' = 'BZIP2');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_csv_bzip2 (id INTEGER) WITH (format = 'csv', 'write.compression' = 'BZIP2');
 
 statement error
-INSERT INTO my_datalake.default.compr_csv_bzip2 VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_csv_bzip2 VALUES (1);
 ----
-Can not write to Hive table 'default.compr_csv_bzip2': it records bzip2 compression, DuckDB writes only gzip and zstd compressed csv and json files
+Can not write to Hive table '{GLUE_TEST_DB}.compr_csv_bzip2': it records bzip2 compression, DuckDB writes only gzip and zstd compressed csv and json files
 
 # a codec DuckDB can not write does not stop reads: the files are read by their name
 statement ok
-COPY (SELECT 7 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_bzip2/part-00000.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
+COPY (SELECT 7 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_csv_bzip2/part-00000.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
 
 query I
-SELECT id FROM my_datalake.default.compr_csv_bzip2;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.compr_csv_bzip2;
 ----
 7
 
@@ -240,37 +243,37 @@ SELECT id FROM my_datalake.default.compr_csv_bzip2;
 # parquet.compression and compression_level
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_zstd (id INTEGER) WITH ('parquet.compression' = 'ZSTD', 'compression_level' = '9');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_zstd (id INTEGER) WITH ('parquet.compression' = 'ZSTD', 'compression_level' = '9');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_gzip (id INTEGER) WITH ('parquet.compression' = 'GZIP');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_gzip (id INTEGER) WITH ('parquet.compression' = 'GZIP');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_none (id INTEGER) WITH ('parquet.compression' = 'NONE');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_none (id INTEGER) WITH ('parquet.compression' = 'NONE');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_snappy (id INTEGER) WITH ('parquet.compression' = 'SNAPPY');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_snappy (id INTEGER) WITH ('parquet.compression' = 'SNAPPY');
 
 # DuckDB writes LZ4 as LZ4_RAW
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_lz4 (id INTEGER) WITH ('parquet.compression' = 'LZ4');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_lz4 (id INTEGER) WITH ('parquet.compression' = 'LZ4');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_brotli (id INTEGER) WITH ('parquet.compression' = 'BROTLI');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_brotli (id INTEGER) WITH ('parquet.compression' = 'BROTLI');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_default (id INTEGER);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_default (id INTEGER);
 
 foreach table compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_parquet_default
 
 statement ok
-INSERT INTO my_datalake.default.{table} SELECT range FROM range(100);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.{table} SELECT range FROM range(100);
 
 endloop
 
 query II
 SELECT regexp_extract(file_name, 'compr_parquet_([a-z0-9]+)', 1) AS t, string_agg(DISTINCT compression)
-FROM parquet_metadata('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_parquet_*/*.parquet') GROUP BY t ORDER BY t;
+FROM parquet_metadata('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_parquet_*/*.parquet') GROUP BY t ORDER BY t;
 ----
 brotli	BROTLI
 default	SNAPPY
@@ -283,7 +286,7 @@ zstd	ZSTD
 # the files are named after their codec, as Spark and Hive name them
 query II
 SELECT regexp_extract(file, 'compr_parquet_([a-z0-9]+)/', 1) AS t, string_agg(DISTINCT regexp_extract(file, '[0-9a-f-]{36}(\..*)$', 1))
-FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_parquet_*/*') GROUP BY t ORDER BY t;
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_parquet_*/*') GROUP BY t ORDER BY t;
 ----
 brotli	.br.parquet
 default	.snappy.parquet
@@ -294,53 +297,53 @@ snappy	.snappy.parquet
 zstd	.zstd.parquet
 
 query III
-SELECT (SELECT sum(id) FROM my_datalake.default.compr_parquet_snappy), (SELECT sum(id) FROM my_datalake.default.compr_parquet_lz4),
-    (SELECT sum(id) FROM my_datalake.default.compr_parquet_brotli);
+SELECT (SELECT sum(id) FROM my_datalake.{GLUE_TEST_DB}.compr_parquet_snappy), (SELECT sum(id) FROM my_datalake.{GLUE_TEST_DB}.compr_parquet_lz4),
+    (SELECT sum(id) FROM my_datalake.{GLUE_TEST_DB}.compr_parquet_brotli);
 ----
 4950	4950	4950
 
 query I
-SELECT sum(id) FROM my_datalake.default.compr_parquet_zstd;
+SELECT sum(id) FROM my_datalake.{GLUE_TEST_DB}.compr_parquet_zstd;
 ----
 4950
 
 # compressionType, which Glue crawlers record, is ignored: parquet files carry their own codec
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_crawler (id INTEGER) WITH ('compressionType' = 'gzip');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_crawler (id INTEGER) WITH ('compressionType' = 'gzip');
 
 statement ok
-INSERT INTO my_datalake.default.compr_parquet_crawler VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_parquet_crawler VALUES (1);
 
 query II
-SELECT count(*), bool_and(file LIKE '%.parquet') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_parquet_crawler/*');
+SELECT count(*), bool_and(file LIKE '%.parquet') FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_parquet_crawler/*');
 ----
 1	true
 
 query I
-SELECT id FROM my_datalake.default.compr_parquet_crawler;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.compr_parquet_crawler;
 ----
 1
 
 # compression_level is ignored for codecs other than zstd, whatever its value
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_level (id INTEGER) WITH ('parquet.compression' = 'GZIP', 'compression_level' = 'high');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_level (id INTEGER) WITH ('parquet.compression' = 'GZIP', 'compression_level' = 'high');
 
 statement ok
-INSERT INTO my_datalake.default.compr_parquet_level VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_parquet_level VALUES (1);
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_badlevel (id INTEGER) WITH ('parquet.compression' = 'ZSTD', 'compression_level' = 'high');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_badlevel (id INTEGER) WITH ('parquet.compression' = 'ZSTD', 'compression_level' = 'high');
 
 statement error
-INSERT INTO my_datalake.default.compr_parquet_badlevel VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_parquet_badlevel VALUES (1);
 ----
 Could not convert string 'high' to INT64
 
 statement ok
-CREATE TABLE my_datalake.default.compr_parquet_lzo (id INTEGER) WITH ('parquet.compression' = 'LZO');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_parquet_lzo (id INTEGER) WITH ('parquet.compression' = 'LZO');
 
 statement error
-INSERT INTO my_datalake.default.compr_parquet_lzo VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_parquet_lzo VALUES (1);
 ----
 Expected "compression" argument to be any of
 
@@ -348,30 +351,30 @@ Expected "compression" argument to be any of
 # avro.output.codec
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.compr_avro_snappy (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'snappy');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_avro_snappy (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'snappy');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_avro_deflate (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'deflate');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_avro_deflate (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'deflate');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_avro_none (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'none');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_avro_none (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'none');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_avro_default (id INTEGER) WITH (format = 'avro');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_avro_default (id INTEGER) WITH (format = 'avro');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_avro_bzip2 (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'bzip2');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_avro_bzip2 (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'bzip2');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_avro_zstd (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'zstandard');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_avro_zstd (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'zstandard');
 
 foreach table compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_bzip2 compr_avro_zstd
 
 statement ok
-INSERT INTO my_datalake.default.{table} SELECT range FROM range(100);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.{table} SELECT range FROM range(100);
 
 query I
-SELECT sum(id) FROM my_datalake.default.{table};
+SELECT sum(id) FROM my_datalake.{GLUE_TEST_DB}.{table};
 ----
 4950
 
@@ -385,7 +388,7 @@ SELECT regexp_extract(filename, 'compr_avro_([a-z0-9]+)/', 1) AS t,
          WHEN contains(hex(content), hex('bzip2'::BLOB)) THEN 'bzip2'
          WHEN contains(hex(content), hex('zstandard'::BLOB)) THEN 'zstandard'
          ELSE 'null' END
-FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_avro_*/*') ORDER BY t;
+FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_avro_*/*') ORDER BY t;
 ----
 bzip2	bzip2
 default	null
@@ -396,40 +399,40 @@ zstd	zstandard
 
 # a codec DuckDB can not write
 statement ok
-CREATE TABLE my_datalake.default.compr_avro_xz (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'xz');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_avro_xz (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'xz');
 
 statement error
-INSERT INTO my_datalake.default.compr_avro_xz VALUES (1);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.compr_avro_xz VALUES (1);
 ----
-Can not write to Hive table 'default.compr_avro_xz': it records xz compression, DuckDB writes only snappy, deflate, bzip2 and zstandard compressed avro files
+Can not write to Hive table '{GLUE_TEST_DB}.compr_avro_xz': it records xz compression, DuckDB writes only snappy, deflate, bzip2 and zstandard compressed avro files
 
 #---------------------------------------------------------------------------
 # write_compression, for a table without its format's codec parameter
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.compr_wc_parquet (id INTEGER) WITH ('write_compression' = 'ZSTD');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_wc_parquet (id INTEGER) WITH ('write_compression' = 'ZSTD');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_wc_json (id INTEGER) WITH (format = 'json', 'write_compression' = 'GZIP');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_wc_json (id INTEGER) WITH (format = 'json', 'write_compression' = 'GZIP');
 
 statement ok
-CREATE TABLE my_datalake.default.compr_wc_avro (id INTEGER) WITH (format = 'avro', 'write_compression' = 'SNAPPY');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_wc_avro (id INTEGER) WITH (format = 'avro', 'write_compression' = 'SNAPPY');
 
 # write_compression's ZSTD is Avro's zstandard
 statement ok
-CREATE TABLE my_datalake.default.compr_wc_avrozstd (id INTEGER) WITH (format = 'avro', 'write_compression' = 'ZSTD');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_wc_avrozstd (id INTEGER) WITH (format = 'avro', 'write_compression' = 'ZSTD');
 
 # the format's own parameter wins
 statement ok
-CREATE TABLE my_datalake.default.compr_wc_override (id INTEGER) WITH ('parquet.compression' = 'GZIP', 'write_compression' = 'ZSTD');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.compr_wc_override (id INTEGER) WITH ('parquet.compression' = 'GZIP', 'write_compression' = 'ZSTD');
 
 foreach table compr_wc_parquet compr_wc_json compr_wc_avro compr_wc_avrozstd compr_wc_override
 
 statement ok
-INSERT INTO my_datalake.default.{table} SELECT range FROM range(100);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.{table} SELECT range FROM range(100);
 
 query I
-SELECT sum(id) FROM my_datalake.default.{table};
+SELECT sum(id) FROM my_datalake.{GLUE_TEST_DB}.{table};
 ----
 4950
 
@@ -437,7 +440,7 @@ endloop
 
 query II
 SELECT regexp_extract(file, 'compr_wc_([a-z]+)/', 1) AS t, string_agg(DISTINCT regexp_extract(file, '[0-9a-f-]{36}(\..*)$', 1))
-FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_wc_*/*') GROUP BY t ORDER BY t;
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_wc_*/*') GROUP BY t ORDER BY t;
 ----
 avro	.avro
 avrozstd	.avro
@@ -446,18 +449,18 @@ override	.gz.parquet
 parquet	.zstd.parquet
 
 query I
-SELECT contains(hex(content), hex('snappy'::BLOB)) FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_wc_avro/*');
+SELECT contains(hex(content), hex('snappy'::BLOB)) FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_wc_avro/*');
 ----
 true
 
 query I
-SELECT contains(hex(content), hex('zstandard'::BLOB)) FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_wc_avrozstd/*');
+SELECT contains(hex(content), hex('zstandard'::BLOB)) FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/compr_wc_avrozstd/*');
 ----
 true
 
 foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_zstd compr_avro_bzip2 compr_avro_xz compr_wc_parquet compr_wc_json compr_wc_avro compr_wc_avrozstd compr_wc_override
 
 statement ok
-DROP TABLE my_datalake.default.{table};
+DROP TABLE my_datalake.{GLUE_TEST_DB}.{table};
 
 endloop

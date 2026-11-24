@@ -19,8 +19,20 @@
       "env_value": "123456789012"
     },
     {
+      "env_name": "GLUE_TEST_DB",
+      "env_value": "default"
+    },
+    {
+      "env_name": "GLUE_TEST_DB_SQL",
+      "env_value": "\"default\""
+    },
+    {
       "env_name": "GLUE_ENDPOINT",
       "env_value": "http://localhost:5555"
+    },
+    {
+      "env_name": "GLUE_ENDPOINT_ALIAS",
+      "env_value": "http://127.0.0.1:5555"
     },
     {
       "env_name": "GLUE_FAULT_ENDPOINT",

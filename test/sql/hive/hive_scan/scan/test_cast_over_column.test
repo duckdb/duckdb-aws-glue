@@ -2,6 +2,9 @@
 # description: a cast right above a csv hive_scan() applies to the column as the scan reads it
 # group: [scan]
 
+# Local Hive scans return no rows on Windows.
+require notwindows
+
 require glue
 
 statement ok

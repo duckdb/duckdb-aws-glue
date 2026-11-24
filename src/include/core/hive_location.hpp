@@ -16,6 +16,10 @@ class MultiFileList;
 string ComparableLocation(const string &location);
 //! Whether one comparable location holds the other, so that files of one are files of the other
 bool LocationsOverlap(const string &a, const string &b);
+//! The scheme of a location, lowercased ("s3" for s3://...); empty for a local path
+string LocationScheme(const string &location);
+//! Whether a LocationScheme names S3: s3, s3a or s3n
+bool IsS3Scheme(const string &scheme);
 //! The hive directory of a partition relative to its table: <key>=<value>/..., escaped, with a Glue value of
 //! __HIVE_DEFAULT_PARTITION__ (NULL) kept as is
 Path HivePartitionDirectory(const vector<string> &keys, const vector<string> &values);
