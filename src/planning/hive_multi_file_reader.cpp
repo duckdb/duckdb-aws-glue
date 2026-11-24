@@ -1481,11 +1481,6 @@ static unique_ptr<MultiFileList> FileListWithPathFilters(const HiveMultiFileList
 	return result;
 }
 
-struct PartitionKeyProjection {
-	idx_t projected_column_index;
-	idx_t partition_key_index;
-};
-
 //! The value a partition column reference is replaced by
 using PartitionColumnValue = std::function<Value(const PartitionKeyProjection &, const BoundColumnRefExpression &)>;
 
