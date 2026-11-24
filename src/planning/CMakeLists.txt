@@ -4,6 +4,7 @@ add_library_unity(
   glue_planning
   OBJECT
   glue_hive_insert.cpp
+  glue_partition_expression.cpp
   hive_field_conversion.cpp
   hive_multi_file_reader.cpp
   hive_partition_cache.cpp

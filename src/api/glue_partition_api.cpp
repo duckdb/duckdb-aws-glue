@@ -249,6 +249,17 @@ string GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, co
 	return partition.location;
 }
 
+//! Tags the exception we throw when Glue refuses a GetPartitions expression (see IsPartitionExpressionRejected)
+static constexpr const char *PARTITION_EXPRESSION_REJECTED = "glue_partition_expression_rejected";
+
+unordered_map<string, string> GlueAPI::PartitionExpressionRejectedInfo() {
+	return {{PARTITION_EXPRESSION_REJECTED, "true"}};
+}
+
+bool GlueAPI::IsPartitionExpressionRejected(const ErrorData &error) {
+	return error.Type() == ExceptionType::INVALID_INPUT && error.ExtraInfo().count(PARTITION_EXPRESSION_REJECTED);
+}
+
 //! The partitions Glue returns per request. 1000 is the maximum the API allows.
 static constexpr int GLUE_PARTITIONS_PAGE_SIZE = 1000;
 //! The requests to run at the same time when the catalog is AWS and the setting leaves the choice open
@@ -256,11 +267,12 @@ static constexpr idx_t GLUE_DEFAULT_PARTITION_SEGMENTS = 8;
 //! The maximum Glue accepts for Segment::TotalSegments
 static constexpr idx_t GLUE_MAX_PARTITION_SEGMENTS = 10;
 
-//! One GetPartitions request for segment 'segment_number' of a table (the whole table when 'total_segments' is 1):
-//! appends the page at 'next_token' to 'result' and returns the token of the next page, empty after the last one
+//! One GetPartitions request for segment 'segment_number' of a table (the whole table when 'total_segments' is 1),
+//! limited to the partitions 'expression' matches unless it is empty: appends the page at 'next_token' to 'result' and
+//! returns the token of the next page, empty after the last one
 static Aws::String FetchPartitionPage(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
-                                      const string &database_name, const string &table_name, int segment_number,
-                                      int total_segments, const Aws::String &next_token,
+                                      const string &database_name, const string &table_name, const string &expression,
+                                      int segment_number, int total_segments, const Aws::String &next_token,
                                       vector<GluePartitionInfo> &result) {
 	Aws::Glue::Model::GetPartitionsRequest request;
 	SetCatalogId(request, catalog);
@@ -273,12 +285,26 @@ static Aws::String FetchPartitionPage(Aws::Glue::GlueClient &client, const GlueC
 		segment.SetTotalSegments(total_segments);
 		request.SetSegment(segment);
 	}
+	if (!expression.empty()) {
+		request.SetExpression(expression);
+	}
 	if (!next_token.empty()) {
 		request.SetNextToken(next_token);
 	}
 	auto outcome = client.GetPartitions(request);
 	if (!outcome.IsSuccess()) {
-		ThrowGlueError(outcome, StringUtil::Format("GetPartitions '%s.%s'", database_name, table_name));
+		auto error_type = outcome.GetError().GetErrorType();
+		// InvalidState: a partition value Glue can't compare with the literal, e.g. __HIVE_DEFAULT_PARTITION__
+		if (!expression.empty() && (error_type == Aws::Glue::GlueErrors::INVALID_INPUT ||
+		                            error_type == Aws::Glue::GlueErrors::INVALID_STATE)) {
+			throw InvalidInputException(
+			    GlueAPI::PartitionExpressionRejectedInfo(),
+			    StringUtil::Format("Glue GetPartitions '%s.%s' refused the expression '%s': %s (%s)", database_name,
+			                       table_name, expression, ToStdString(outcome.GetError().GetMessage()),
+			                       ToStdString(outcome.GetError().GetExceptionName())));
+		}
+		ThrowGlueError(outcome, StringUtil::Format("GetPartitions '%s.%s'%s", database_name, table_name,
+		                                           expression.empty() ? "" : " (" + expression + ")"));
 	}
 	auto &partitions = outcome.GetResult();
 	for (auto &partition : partitions.GetPartitions()) {
@@ -314,8 +340,9 @@ struct PartitionSegment {
 //! What the tasks of one TaskExecutor share
 struct PartitionFetchState {
 	PartitionFetchState(Aws::Glue::GlueClient &client, const GlueCatalog &catalog, int total_segments,
-	                    string injected_error)
-	    : client(client), catalog(catalog), total_segments(total_segments), injected_error(std::move(injected_error)) {
+	                    string injected_error, string expression)
+	    : client(client), catalog(catalog), total_segments(total_segments), injected_error(std::move(injected_error)),
+	      expression(std::move(expression)) {
 	}
 
 	Aws::Glue::GlueClient &client;
@@ -323,6 +350,8 @@ struct PartitionFetchState {
 	int total_segments;
 	//! glue_debug_fail_partition_loads: the AWS error each request fails with before it is sent, or empty
 	string injected_error;
+	//! The GetPartitions Expression of every request, or empty for all partitions
+	string expression;
 	//! Guards the error and throttled fields of the tables
 	mutex lock;
 };
@@ -375,7 +404,8 @@ private:
 			                    false, state.injected_error == "ThrottlingException");
 		}
 		return FetchPartitionPage(state.client, state.catalog, segment.table.database_name, segment.table.table_name,
-		                          segment.number, state.total_segments, next_token, segment.partitions);
+		                          state.expression, segment.number, state.total_segments, next_token,
+		                          segment.partitions);
 	}
 
 private:
@@ -458,14 +488,15 @@ static string DebugFailPartitionLoads(ClientContext &context) {
 
 //! Fills in the partitions of the tables whose requests all succeeded; returns the first error, an interrupt is thrown
 static ErrorData FetchPartitionsOfTables(ClientContext &context, GlueCatalog &catalog,
-                                         vector<GluePartitionLoad> &tables, string injected_error) {
+                                         vector<GluePartitionLoad> &tables, string injected_error,
+                                         string expression = string()) {
 	if (tables.empty()) {
 		return ErrorData();
 	}
 	GlueCallScope call_scope(context);
 	auto client = GlueAPI::GetClient(context, catalog);
 	auto total_segments = GetPartitionSegmentCount(context, catalog);
-	PartitionFetchState state(*client, catalog, total_segments, std::move(injected_error));
+	PartitionFetchState state(*client, catalog, total_segments, std::move(injected_error), std::move(expression));
 	vector<unique_ptr<PartitionSegment>> segments;
 	for (auto &table : tables) {
 		for (int segment = 0; segment < total_segments; segment++) {
@@ -499,12 +530,13 @@ void GlueAPI::GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog
 }
 
 vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCatalog &catalog,
-                                                 const string &database_name, const string &table_name) {
+                                                 const string &database_name, const string &table_name,
+                                                 const string &expression) {
 	vector<GluePartitionLoad> tables(1);
 	auto &table = tables[0];
 	table.database_name = database_name;
 	table.table_name = table_name;
-	auto error = FetchPartitionsOfTables(context, catalog, tables, string());
+	auto error = FetchPartitionsOfTables(context, catalog, tables, string(), expression);
 	if (!table.partitions) {
 		if (table.error.HasError()) {
 			table.error.Throw();

@@ -547,8 +547,8 @@ writes them.
 
 Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
 Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so
-`DESCRIBE`, `CREATE VIEW` and `PREPARE` make no `GetPartitions` call; every scan of the table in a query shares one
-fetch. The pages are asked for in parallel with Glue's Segment API:
+`DESCRIBE`, `CREATE VIEW` and `PREPARE` make no `GetPartitions` call; every scan of the table in a query with the same
+partition filters shares one fetch. The pages are asked for in parallel with Glue's Segment API:
 `glue_get_partitions_segments` requests run at the same time, each over a segment of the partitions that does not
 overlap with the others. `0`, the default, uses 8 requests against AWS and 1 against a Glue compatible server given
 with `ENDPOINT` (moto ignores `Segment` and answers every segment with the whole table, so the partitions a segment
@@ -573,6 +573,15 @@ region and endpoint; for `ATTACH ':'` the account Glue reports) for `glue_partit
 300), in any connection: each connection compares the time of the last throttled prefetch with its own setting. Each prefetch is logged as a `GlueScan` event
 `prefetch`, its `detail` naming how many tables it fetched and why the others were not.
 `SET glue_partition_load_parallelism = 1` turns the prefetch off.
+
+With `SET glue_partition_filter_pushdown = true`, the filters on the partition columns that Glue can evaluate are
+given to `GetPartitions` as its `Expression`, so Glue returns only the partitions they match: comparisons (`=`, `<>`,
+`<`, `<=`, `>`, `>=`, `BETWEEN`, `IN`) of a string, integer or date partition key with a constant, combined with `AND`
+and `OR`. String ranges are given only for ASCII literals, where Glue and DuckDB order strings the same. Other filters
+are applied to the partition values Glue returns, as before, and an expression Glue refuses falls back to fetching all
+partitions. Two scans of a table with different filters then make two `GetPartitions` calls, and `EXPLAIN` counts only
+the partitions Glue returned. A scan with a filtered partition list lists each partition it reads instead of the table root, whose other partitions it does not know, and partitions the metadata cache holds already are used without a filtered request. A scan that sends an expression is not prefetched. The setting is off by default: with it on, a partition registered at a location inside
+another partition's location is not yet accounted for when the filter leaves it out.
 
 ## Inspecting tables
 

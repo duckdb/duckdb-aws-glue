@@ -103,6 +103,54 @@ shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::Get(ClientContex
 	});
 }
 
+shared_ptr<const vector<GluePartitionInfo>> HivePartitionCache::GetFiltered(ClientContext &context,
+                                                                            const HiveScanInfo &scan,
+                                                                            const string &expression, bool &filtered) {
+	{
+		annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
+		for (auto &registered : registered_scans) {
+			if (registered.lock().get() == &scan) {
+				registered.reset();
+			}
+		}
+	}
+	filtered = false;
+	auto &catalog = GetGlueCatalog(context, scan);
+	auto entry =
+	    query_cache.GetGlueTable(HiveQueryCache::TableKey(scan.catalog_name, scan.database_name, scan.table_name));
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->partitions) {
+		auto transaction_cache = GlueTransactionCache::Of(context, catalog);
+		if (transaction_cache) {
+			entry->partitions = transaction_cache->CachedPartitions(scan.database_name, scan.table_name);
+		}
+	}
+	if (entry->partitions) {
+		// every partition is at hand: it is the scan's pruning that selects them, not Glue
+		return entry->partitions;
+	}
+	if (entry->refused_expressions.count(expression)) {
+		throw InvalidInputException(
+		    GlueAPI::PartitionExpressionRejectedInfo(),
+		    StringUtil::Format("Glue already refused the expression '%s' in this query", expression));
+	}
+	auto &partitions = entry->filtered_partitions[expression];
+	if (!partitions) {
+		try {
+			partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
+			    GlueAPI::GetPartitions(context, catalog, scan.database_name, scan.table_name, expression));
+		} catch (std::exception &ex) {
+			entry->filtered_partitions.erase(expression);
+			if (GlueAPI::IsPartitionExpressionRejected(ErrorData(ex))) {
+				entry->refused_expressions.insert(expression);
+			}
+			throw;
+		}
+	}
+	filtered = true;
+	return partitions;
+}
+
 void HivePartitionCache::RegisterScan(const shared_ptr<const HiveScanInfo> &scan) {
 	annotated_lock_guard<annotated_mutex> guard(prefetch_lock);
 	registered_scans.push_back(scan);
