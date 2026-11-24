@@ -295,8 +295,8 @@ static Aws::String FetchPartitionPage(Aws::Glue::GlueClient &client, const GlueC
 	if (!outcome.IsSuccess()) {
 		auto error_type = outcome.GetError().GetErrorType();
 		// InvalidState: a partition value Glue can't compare with the literal, e.g. __HIVE_DEFAULT_PARTITION__
-		if (!expression.empty() &&
-		    (error_type == Aws::Glue::GlueErrors::INVALID_INPUT || error_type == Aws::Glue::GlueErrors::INVALID_STATE)) {
+		if (!expression.empty() && (error_type == Aws::Glue::GlueErrors::INVALID_INPUT ||
+		                            error_type == Aws::Glue::GlueErrors::INVALID_STATE)) {
 			throw InvalidInputException(
 			    GlueAPI::PartitionExpressionRejectedInfo(),
 			    StringUtil::Format("Glue GetPartitions '%s.%s' refused the expression '%s': %s (%s)", database_name,
