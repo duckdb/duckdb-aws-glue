@@ -10,7 +10,6 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/logging/logger.hpp"
-#include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -35,9 +34,11 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
+#include "core/helpers.hpp"
 #include "core/hive_location.hpp"
 #include "execution/glue_written_files.hpp"
 #include "execution/hive_copy.hpp"
+#include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
@@ -650,6 +651,20 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	insert.partition_directories = std::move(partition_directories);
 	insert.write_id = std::move(write_id);
 	insert.collect_statistics = collect_statistics;
+	if (collect_statistics) {
+		auto names = GetCopyFunctionReturnNames(return_type);
+		auto column = [&](const string &name) {
+			for (idx_t i = 0; i < names.size(); i++) {
+				if (names[i].GetIdentifierName() == name) {
+					return i;
+				}
+			}
+			throw InternalException("The COPY returning written file statistics has no '%s' column", name);
+		};
+		insert.filename_column = column("filename");
+		insert.count_column = column("count");
+		insert.file_size_column = column("file_size_bytes");
+	}
 	Value max_listings;
 	if (context.TryGetCurrentSetting("glue_write_statistics_max_listings", max_listings) && !max_listings.IsNull()) {
 		insert.max_partition_listings = max_listings.GetValue<idx_t>();
@@ -762,10 +777,10 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
 	lock_guard<mutex> guard(state.lock);
 	if (collect_statistics) {
-		// The COPY reports one row per file written: (filename, count, file_size_bytes, ...)
-		auto files = chunk.data[0].Values<string_t>();
-		auto rows = chunk.data[1].Values<uint64_t>();
-		auto sizes = chunk.data[2].Values<uint64_t>();
+		// The COPY reports one row per file written
+		auto files = chunk.data[filename_column].Values<string_t>();
+		auto rows = chunk.data[count_column].Values<uint64_t>();
+		auto sizes = chunk.data[file_size_column].Values<uint64_t>();
 		for (idx_t r = 0; r < chunk.size(); r++) {
 			auto file = files[r];
 			if (!file.IsValid()) {
@@ -971,39 +986,6 @@ void GlueHiveInsert::AddTableStatistics(ClientContext &context, const vector<Glu
 	}
 }
 
-namespace {
-
-//! Lists the directory of one partition an INSERT created, to tell whether it held data files before
-class ListPartitionDirectoryTask : public BaseExecutorTask {
-public:
-	ListPartitionDirectoryTask(TaskExecutor &executor, FileSystem &fs, GluePartitionStatistics &partition,
-	                           const vector<string> &written)
-	    : BaseExecutorTask(executor), fs(fs), partition(partition), written(written) {
-	}
-
-	void ExecuteTask() override {
-		bool other_files = true;
-		try {
-			other_files = HiveLocation::HasDataFiles(fs, partition.location, written);
-		} catch (std::exception &) {
-			// not known, so neither are the statistics
-		}
-		if (other_files) {
-			partition.statistics.reset();
-		}
-	}
-	string TaskType() const override {
-		return "ListPartitionDirectoryTask";
-	}
-
-private:
-	FileSystem &fs;
-	GluePartitionStatistics &partition;
-	const vector<string> &written;
-};
-
-} // namespace
-
 void GlueHiveInsert::CheckNewPartitionDirectories(ClientContext &context, vector<GluePartitionStatistics> &partitions,
                                                   const unordered_map<string, vector<string>> &written) const {
 	// a directory CREATE TABLE AS writes to held no data files
@@ -1022,17 +1004,25 @@ void GlueHiveInsert::CheckNewPartitionDirectories(ClientContext &context, vector
 		}
 		return;
 	}
-	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
-	vector<unique_ptr<BaseExecutorTask>> tasks;
-	auto &fs = FileSystem::GetFileSystem(context);
-	for (auto &partition : created) {
-		tasks.push_back(
-		    make_uniq<ListPartitionDirectoryTask>(executor, fs, partition.get(), written.at(partition.get().location)));
-	}
-	if (!tasks.empty()) {
-		executor.ScheduleTasks(std::move(tasks));
-		executor.WorkOnTasks();
-	}
+	// the statement's listing, not one kept for the connection (glue_cache_listings), which may miss files added since;
+	// one listed earlier in this statement can only miss the files this write added, which do not count
+	auto cache = HiveQueryCache::Get(context);
+	RunInParallel(context, created.size(), [&](idx_t i) {
+		auto &partition = created[i].get();
+		bool other_files = true;
+		try {
+			if (!LocationHasGlob(partition.location)) {
+				auto listed = cache->GetDirectoryListing(context, partition.location, false)->GetAllFiles();
+				other_files = HiveLocation::HasOtherFiles(
+				    HiveLocation::DataFiles(std::move(listed), partition.location), written.at(partition.location));
+			}
+		} catch (std::exception &) {
+			// not known, so neither are the statistics
+		}
+		if (other_files) {
+			partition.statistics.reset();
+		}
+	});
 }
 
 void GlueHiveInsert::AddPartitionStatistics(ClientContext &context, const GlueHiveInsertGlobalState &state,

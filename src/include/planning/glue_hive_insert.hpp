@@ -101,6 +101,10 @@ public:
 	bool is_ctas = false;
 	//! glue_write_statistics_max_listings when planned
 	idx_t max_partition_listings = 100;
+	//! With collect_statistics: the columns of the copy's filename, count and file_size_bytes
+	idx_t filename_column = 0;
+	idx_t count_column = 0;
+	idx_t file_size_column = 0;
 };
 
 } // namespace duckdb

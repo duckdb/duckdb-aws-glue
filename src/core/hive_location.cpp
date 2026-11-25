@@ -44,23 +44,43 @@ unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location) {
 	return fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
 }
 
-bool HiveLocation::HasDataFiles(FileSystem &fs, const string &location, const vector<string> &except) {
-	if (LocationHasGlob(location)) {
-		return true;
+vector<OpenFileInfo> HiveLocation::DataFiles(vector<OpenFileInfo> listed, const string &location) {
+	auto prefix = location;
+	StringUtil::RTrim(prefix, "/");
+	prefix += "/";
+	vector<OpenFileInfo> result;
+	for (auto &file : listed) {
+		if (IsDataFile(file, prefix)) {
+			result.push_back(std::move(file));
+		}
 	}
+	return result;
+}
+
+vector<OpenFileInfo> HiveLocation::ListDataFiles(FileSystem &fs, const string &location) {
+	auto directory = location;
+	StringUtil::RTrim(directory, "/");
+	return DataFiles(ListLocation(fs, directory)->GetAllFiles(), directory);
+}
+
+bool HiveLocation::HasOtherFiles(const vector<OpenFileInfo> &data_files, const vector<string> &except) {
 	unordered_set<string> skipped;
 	for (auto &path : except) {
 		skipped.insert(ComparableLocation(path));
 	}
-	auto prefix = location;
-	StringUtil::RTrim(prefix, "/");
-	auto listing = ListLocation(fs, prefix);
-	for (auto &file : listing->Files()) {
-		if (IsDataFile(file, prefix + "/") && skipped.find(ComparableLocation(file.path)) == skipped.end()) {
+	for (auto &file : data_files) {
+		if (skipped.find(ComparableLocation(file.path)) == skipped.end()) {
 			return true;
 		}
 	}
 	return false;
+}
+
+bool HiveLocation::HasDataFiles(FileSystem &fs, const string &location, const vector<string> &except) {
+	if (LocationHasGlob(location)) {
+		return true;
+	}
+	return HasOtherFiles(ListDataFiles(fs, location), except);
 }
 
 Path HivePartitionDirectory(const vector<string> &keys, const vector<string> &values) {
