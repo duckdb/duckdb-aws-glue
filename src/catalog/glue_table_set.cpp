@@ -137,13 +137,13 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 		                   schema.GetDatabaseName(), error.RawMessage());
 		return;
 	}
-	// One page per cache instance: misses past the page (a database larger than one page) stay direct instead
-	// of re-reading the same first page
-	bulk_loaded_cache_id = cache.Id();
+	// One page per cache: misses past the page (a database larger than one page) stay direct instead of
+	// re-reading the same first page
+	cache.MarkTablePaged(schema.GetDatabaseName());
 	for (auto &table : tables) {
 		// Warm the metadata cache only - already-cached values win; the entry/Scan story is on the declaration
 		shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
-		cache.GetTable(schema.GetDatabaseName(), table.name, [&info]() { return info; });
+		cache.PutTable(schema.GetDatabaseName(), table.name, info);
 	}
 	if (has_more) {
 		DUCKDB_LOG_INFO(context,
@@ -153,12 +153,21 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 	}
 }
 
+bool GlueTableSet::ShouldFetchTablePage(ClientContext &context, GlueTransactionCache &cache, const string &name,
+                                        transaction_t query) {
+	if (batch_forbidden || direct_lookups == 0 || !BatchTableLookups(context)) {
+		return false;
+	}
+	return cache.NeedsTablePage(schema.GetDatabaseName(), name, query);
+}
+
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
 	auto &name = lookup.GetEntryName();
 	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
 	// is started before entry_lock is taken, the order RetireEntry takes the locks in
 	Transaction::Get(context, catalog);
 	auto cache = GlueTransactionCache::Of(context, catalog);
+	auto query = GlueTransactionCache::ActiveQuery(context);
 	bool cached;
 	string glue_name;
 	{
@@ -168,10 +177,10 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 		// the lookup name may differ in case from the one Glue knows
 		glue_name = cached ? existing->second->name.GetIdentifierName() : name;
 		// The attach's first round-trip miss stays direct: a lone lookup must not enumerate a large database.
-		// From the second round-trip-causing miss on (round trips count across cache instances), one GetTables
-		// page warms the cache, at most once per instance - under the default scope that is once per transaction.
-		if (!cached && cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
-		    BatchTableLookups(context)) {
+		// From the second round-trip-causing miss on (round trips count across caches), one GetTables page warms
+		// the cache, at most once per cache - under the default scope that is once per transaction.
+		// A name the cache already resolved, a known miss included, needs no page.
+		if (!cached && cache && ShouldFetchTablePage(context, *cache, glue_name, query)) {
 			BulkLoadTableInfo(context, *cache);
 		}
 	}
@@ -186,7 +195,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	};
 	// the definition Glue holds, fetched once per transaction (GlueTransactionCache) and outside entry_lock, so that a
 	// Glue round trip does not hold up the lookups of other tables
-	auto table = cache ? cache->GetTable(schema.GetDatabaseName(), glue_name, load) : load();
+	auto table = cache ? cache->GetTable(schema.GetDatabaseName(), glue_name, load, query) : load();
 	lock_guard<mutex> guard(entry_lock);
 	if (!cached && asked_glue) {
 		// counts the round trips of misses, not lookups: a cache hit (including a bulk-warmed one) costs nothing and

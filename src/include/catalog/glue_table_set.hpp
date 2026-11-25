@@ -44,6 +44,10 @@ private:
 	//! One first-page GetTables warming the metadata cache, instead of a GetTable per table. Only warms the
 	//! cache: entries stay per referenced table and Scan still enumerates, so neither outlives the page's truth.
 	void BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache);
+	//! Whether a lookup of 'name' should first fetch a GetTables page: the set's own round-trip state allows one and
+	//! the cache can not answer the lookup. Called with entry_lock held.
+	bool ShouldFetchTablePage(ClientContext &context, GlueTransactionCache &cache, const string &name,
+	                          transaction_t query);
 	static bool BatchTableLookups(ClientContext &context);
 	static void SetTableTypeTag(GlueTable &entry);
 	//! Move an entry out of the set; the transaction manager keeps it alive while a running statement may use it.
@@ -58,8 +62,6 @@ private:
 	const glue_entry_set_id_t id;
 	//! Direct-lookup round trips since the last bulk fetch: bulk pays off from the second one on
 	idx_t direct_lookups = 0;
-	//! The GlueTransactionCache::Id() the last successful bulk fetch warmed (0 = none yet)
-	idx_t bulk_loaded_cache_id = 0;
 	//! GetTables was refused for lack of permission: no more bulk fetches
 	bool batch_forbidden = false;
 };

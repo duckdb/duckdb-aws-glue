@@ -343,6 +343,10 @@ With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the co
 per connection — two connections never share one — so another connection's write stays unseen until something clears
 this connection's cache: a write through it, a rollback, or DETACH.
 
+Under either scope, a table Glue reports missing is only remembered until the statement that looked it up ends, so a
+table another connection creates is found by the next statement, also within an explicit transaction.
+`Connection::TableInfo` runs outside a statement and remembers no miss, unless another query's result is still open.
+
 Listings follow the same rule. `SHOW TABLES`, `SHOW SCHEMAS`, `duckdb_tables()`, `duckdb_schemas()` and the other
 catalog functions list a database's tables, or the catalog's databases, from Glue once per transaction — once per
 connection under `'connection'` scope — and reuse that listing until the cache is cleared. A table another client

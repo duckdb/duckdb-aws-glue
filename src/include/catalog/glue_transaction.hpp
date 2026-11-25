@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -37,6 +38,8 @@ public:
 	static void OnDetach(ClientContext &context, Catalog &catalog);
 	//! Whether glue_metadata_cache_scope is 'connection'
 	static bool ConnectionScoped(ClientContext &context);
+	//! Core's number of the running statement, MAXIMUM_QUERY_ID outside one: a miss only serves the statement it was in
+	static transaction_t ActiveQuery(ClientContext &context);
 	//! Clear the cache when the enclosing Glue mutation returns or throws
 	struct InvalidateOnExit {
 		InvalidateOnExit(ClientContext &context, Catalog &catalog) : context(context), catalog(catalog) {
@@ -48,34 +51,33 @@ public:
 	};
 
 	shared_ptr<const GlueTableInfo> GetTable(const string &database_name, const string &table_name,
-	                                         const std::function<shared_ptr<const GlueTableInfo>()> &load) {
-		shared_ptr<CacheEntry<GlueTableInfo>> entry;
-		{
-			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(tables, TableCacheKey(database_name, table_name));
-		}
-		return Resolve(*entry, load);
-	}
+	                                         const std::function<shared_ptr<const GlueTableInfo>()> &load,
+	                                         transaction_t query = MAXIMUM_QUERY_ID);
 	shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(const string &database_name, const string &table_name,
 	              const std::function<shared_ptr<const vector<GluePartitionInfo>>()> &load) {
 		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(partitions, TableCacheKey(database_name, table_name));
+			entry = FindEntry(partitions, Key(database_name, table_name));
 		}
-		return Resolve(*entry, load);
+		return Resolve(*entry, load, MAXIMUM_QUERY_ID);
 	}
+	//! Store a table Glue just returned: it replaces a kept miss, a cached table stays
+	void PutTable(const string &database_name, const string &table_name, shared_ptr<const GlueTableInfo> table);
+	//! Whether GetTable answers from the cache, a miss of the same query included, without calling Glue
+	bool IsTableResolved(const string &database_name, const string &table_name, transaction_t query = MAXIMUM_QUERY_ID);
+	//! Whether a first GetTables page of the database would help the lookup: no page of this database warmed the
+	//! cache yet and the table is not answered already
+	bool NeedsTablePage(const string &database_name, const string &table_name, transaction_t query);
+	//! Records that a GetTables page of the database warmed this cache; the record ends with the cache's contents
+	void MarkTablePaged(const string &database_name);
 	void Clear() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
 		listed_sets.clear();
-	}
-	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
-	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
-	idx_t Id() const {
-		return id;
+		paged_databases.clear();
 	}
 	//! Whether the entry set with this id was listed from Glue under this cache; the listing holds until the cache is
 	//! cleared
@@ -87,7 +89,7 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		listed_sets.insert(set_id);
 	}
-	//! Monotonic ids, never reused: for cache instances and for the entry sets they track
+	//! Monotonic ids, never reused: for the entry sets a cache tracks
 	static idx_t NextId();
 	static string TableCacheKey(const string &database_name, const string &table_name) {
 		return database_name + "\x1f" + table_name;
@@ -99,29 +101,46 @@ private:
 	template <class T>
 	struct CacheEntry {
 		annotated_mutex load_lock;
-		//! Null until a load succeeds; a failed load leaves it null so the next reference retries
+		//! Null until a load finds the object; a load that throws or finds nothing leaves it null
 		shared_ptr<const T> value DUCKDB_GUARDED_BY(load_lock);
+		atomic<bool> found {false};
+		//! The query whose load found nothing; MAXIMUM_QUERY_ID (outside a statement) matches no query
+		atomic<transaction_t> miss_query {MAXIMUM_QUERY_ID};
+
+		bool IsResolved(transaction_t query) const {
+			return found || (query != MAXIMUM_QUERY_ID && miss_query == query);
+		}
 	};
 
-	//! Keys fold case (Glue database/table names are case-insensitive). The map lock is only held to find or
-	//! create the entry (FindEntry); the entry's own lock is held across 'load' (Resolve) so concurrent references
-	//! to the same key fetch once while different keys load in parallel; 'load' must not call back into this cache
+	//! Glue database and table names are case-insensitive, so keys fold case
+	static string Key(const string &database_name, const string &table_name) {
+		return StringUtil::Lower(TableCacheKey(database_name, table_name));
+	}
+	//! The map lock is only held to find or create the entry (FindEntry); the entry's own lock is held across 'load'
+	//! (Resolve) so concurrent references to the same key fetch once while different keys load in parallel; 'load'
+	//! must not call back into this cache
 	template <class T>
 	shared_ptr<CacheEntry<T>> FindEntry(unordered_map<string, shared_ptr<CacheEntry<T>>> &map, const string &key)
 	    DUCKDB_REQUIRES(lock) {
-		auto &slot = map[StringUtil::Lower(key)];
+		auto &slot = map[key];
 		if (!slot) {
 			slot = make_shared_ptr<CacheEntry<T>>();
 		}
 		return slot;
 	}
 	template <class T>
-	static shared_ptr<const T> Resolve(CacheEntry<T> &entry, const std::function<shared_ptr<const T>()> &load) {
+	static shared_ptr<const T> Resolve(CacheEntry<T> &entry, const std::function<shared_ptr<const T>()> &load,
+	                                   transaction_t query) {
 		annotated_lock_guard<annotated_mutex> guard(entry.load_lock);
-		if (entry.value) {
+		if (entry.IsResolved(query)) {
 			return entry.value;
 		}
 		entry.value = load();
+		if (entry.value) {
+			entry.found = true;
+		} else {
+			entry.miss_query = query;
+		}
 		return entry.value;
 	}
 
@@ -129,7 +148,8 @@ private:
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
 	unordered_set<glue_entry_set_id_t> listed_sets DUCKDB_GUARDED_BY(lock);
-	const idx_t id = NextId();
+	//! The databases whose first GetTables page warmed 'tables'
+	unordered_set<string> paged_databases DUCKDB_GUARDED_BY(lock);
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
@@ -137,6 +157,9 @@ private:
 //! here: a failed statement must not leave metadata it resolved behind.
 class GlueMetadataCacheState : public ClientContextState {
 public:
+	static constexpr const char *NAME = "glue_metadata_cache";
+	static shared_ptr<GlueMetadataCacheState> Get(ClientContext &context);
+
 	shared_ptr<GlueTransactionCache> GetCache(const string &catalog_name, idx_t attach_oid) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		auto &entry = caches[catalog_name];
