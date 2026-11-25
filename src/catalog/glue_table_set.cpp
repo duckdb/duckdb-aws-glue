@@ -68,18 +68,44 @@ void GlueTableSet::LoadEntries(ClientContext &context, GlueTransactionCache &cac
 		return;
 	}
 	vector<GlueTableInfo> tables;
-	try {
-		tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName(), false, nullptr, true);
-	} catch (const GlueException &ex) {
-		if (!ex.access_denied) {
-			throw;
+	// Takes the listing GlueTablePrefetch made ahead of this scan, waiting for one it is making. Otherwise this scan
+	// lists the set and holds the claim meanwhile, so a prefetch does not list it too.
+	struct ListingClaim {
+		GlueTransactionCache &cache;
+		glue_entry_set_id_t id;
+		bool held = false;
+		~ListingClaim() {
+			if (held) {
+				cache.EndPrefetch(id, nullptr);
+			}
 		}
-		// A refused listing says nothing about which tables exist: entries stay and the set is not marked, so the next
-		// transaction asks again
-		ErrorData error(ex);
-		DUCKDB_LOG_WARNING(context, "Not listing the tables of Glue database '%s': %s", schema.GetDatabaseName(),
-		                   error.RawMessage());
-		return;
+	} claim {cache, id};
+	bool prefetched = false;
+	while (true) {
+		cache.WaitForPrefetch(context, id);
+		if (cache.TakePrefetched(id, tables)) {
+			prefetched = true;
+			break;
+		}
+		if (cache.TryBeginPrefetch(id)) {
+			claim.held = true;
+			break;
+		}
+	}
+	if (!prefetched) {
+		try {
+			tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName(), false, nullptr, true);
+		} catch (const GlueException &ex) {
+			if (!ex.access_denied) {
+				throw;
+			}
+			// A refused listing says nothing about which tables exist: entries stay and the set is not marked, so the
+			// next transaction asks again
+			ErrorData error(ex);
+			DUCKDB_LOG_WARNING(context, "Not listing the tables of Glue database '%s': %s", schema.GetDatabaseName(),
+			                   error.RawMessage());
+			return;
+		}
 	}
 	case_insensitive_set_t listed;
 	for (auto &table : tables) {

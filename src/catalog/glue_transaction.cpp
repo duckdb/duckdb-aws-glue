@@ -48,6 +48,7 @@ void GlueTransaction::Commit() {
 			                   write->database_name, write->table_name);
 		}
 	}
+	cache->EndTransaction();
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
@@ -55,6 +56,7 @@ void GlueTransaction::Commit() {
 
 void GlueTransaction::Rollback() {
 	UndoHiveWrite();
+	cache->EndTransaction();
 	if (transaction_state == GlueTransactionState::TRANSACTION_STARTED) {
 		transaction_state = GlueTransactionState::TRANSACTION_FINISHED;
 	}
@@ -102,6 +104,16 @@ void GlueTransaction::UndoHiveWrite() {
 		return;
 	}
 	write->Undo(*client_context, glue_catalog);
+}
+
+void GlueTransactionCache::WaitForPrefetch(ClientContext &context, glue_entry_set_id_t set_id) {
+	std::unique_lock<std::mutex> guard(prefetch_lock);
+	while (prefetching.count(set_id)) {
+		prefetch_changed.wait_for(guard, std::chrono::milliseconds(100));
+		guard.unlock();
+		context.BlockingInterruptCheck();
+		guard.lock();
+	}
 }
 
 idx_t GlueTransactionCache::NextId() {

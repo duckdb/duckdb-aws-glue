@@ -32,6 +32,11 @@ public:
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
 	void RemoveEntry(const string &name);
 
+	//! What GlueTransactionCache tracks this set's listing by
+	glue_entry_set_id_t Id() const {
+		return id;
+	}
+
 	//! Build the catalog entry for a Glue table definition: a GlueView for a VIRTUAL_VIEW, else a GlueTable
 	unique_ptr<CatalogEntry> CreateEntry(const GlueTableInfo &table);
 	//! The definition a table or view entry was built from

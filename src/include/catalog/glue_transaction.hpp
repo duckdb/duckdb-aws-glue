@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalog/glue_table_prefetch.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -8,6 +9,7 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
@@ -15,6 +17,8 @@
 #include "catalog/glue_entry_set.hpp"
 #include "execution/glue_hive_write.hpp"
 
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 
 namespace duckdb {
@@ -71,6 +75,7 @@ public:
 		tables.clear();
 		partitions.clear();
 		listed_sets.clear();
+		prefetched.clear();
 	}
 	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
 	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
@@ -87,11 +92,61 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		listed_sets.insert(set_id);
 	}
+	//! A listing GlueTablePrefetch made ahead of the scan that needs it. It stays until its set loads it, the cache is
+	//! cleared, or the transaction ends (EndTransaction), so a listing nobody reached does not hold its memory.
+	bool HasPrefetched(glue_entry_set_id_t set_id) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		return prefetched.count(set_id) > 0;
+	}
+	//! Claims the set for a prefetch unless it is listed, prefetched or being prefetched.
+	bool TryBeginPrefetch(glue_entry_set_id_t set_id) {
+		std::lock_guard<std::mutex> guard(prefetch_lock);
+		if (prefetching.count(set_id) || HasListed(set_id) || HasPrefetched(set_id)) {
+			return false;
+		}
+		prefetching.insert(set_id);
+		return true;
+	}
+	//! The prefetch of a claimed set is over, whether it listed the set or not
+	void EndPrefetch(glue_entry_set_id_t set_id, vector<GlueTableInfo> *tables) {
+		{
+			std::lock_guard<std::mutex> guard(prefetch_lock);
+			if (tables) {
+				annotated_lock_guard<annotated_mutex> list_guard(lock);
+				prefetched[set_id] = std::move(*tables);
+			}
+			prefetching.erase(set_id);
+		}
+		prefetch_changed.notify_all();
+	}
+	//! Waits while a prefetch is listing the set, so that the scan takes its listing and does not list it again
+	void WaitForPrefetch(ClientContext &context, glue_entry_set_id_t set_id);
+	bool TakePrefetched(glue_entry_set_id_t set_id, vector<GlueTableInfo> &tables) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto entry = prefetched.find(set_id);
+		if (entry == prefetched.end()) {
+			return false;
+		}
+		tables = std::move(entry->second);
+		prefetched.erase(entry);
+		return true;
+	}
+	//! The transaction ends: neither the listings made ahead nor the databases the scans visited are kept
+	void EndTransaction() {
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			prefetched.clear();
+		}
+		prefetch_state.Reset();
+	}
 	//! Monotonic ids, never reused: for cache instances and for the entry sets they track
 	static idx_t NextId();
 	static string TableCacheKey(const string &database_name, const string &table_name) {
 		return database_name + "\x1f" + table_name;
 	}
+
+public:
+	GlueTablePrefetchState prefetch_state;
 
 private:
 	//! One cached value and the lock that guards loading it. The lock is per entry so the Glue calls for
@@ -129,6 +184,11 @@ private:
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
 	unordered_set<glue_entry_set_id_t> listed_sets DUCKDB_GUARDED_BY(lock);
+	unordered_map<glue_entry_set_id_t, vector<GlueTableInfo>> prefetched DUCKDB_GUARDED_BY(lock);
+	//! The sets a prefetch is listing now. Taken before 'lock', never while holding it.
+	std::mutex prefetch_lock;
+	std::condition_variable prefetch_changed;
+	unordered_set<glue_entry_set_id_t> prefetching;
 	const idx_t id = NextId();
 };
 

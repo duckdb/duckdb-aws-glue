@@ -70,6 +70,9 @@ public:
 	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                       bool single_page = false, optional_ptr<bool> has_more = nullptr,
 	                                       bool throw_if_denied = false);
+	//! GetTables of several databases, 'parallelism' at a time; a database whose listing failed is not 'fetched'
+	static vector<GlueDatabaseTables> GetTablesOfDatabases(ClientContext &context, GlueCatalog &catalog,
+	                                                       const vector<string> &database_names, idx_t parallelism);
 	//! Returns false if the database holds no tables (or views), otherwise true with the name of one of them
 	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            string &table_name);

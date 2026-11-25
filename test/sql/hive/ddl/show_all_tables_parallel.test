@@ -1,0 +1,304 @@
+# name: test/sql/hive/ddl/show_all_tables_parallel.test
+# description: listing the tables of many databases at the same time requests each database once
+# group: [ddl]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach schema plist_a plist_b plist_c plist_d plist_e plist_f
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.{schema} CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.{schema};
+
+statement ok
+CREATE TABLE my_datalake.{schema}.t1 (id INTEGER, name VARCHAR);
+
+statement ok
+CREATE TABLE my_datalake.{schema}.t2 (id INTEGER);
+
+endloop
+
+# GetTables requests since the last truncate_duckdb_logs()
+statement ok
+CREATE MACRO get_tables_calls() AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP')
+    WHERE regexp_extract(request.headers['x-amz-target'], 'AWSGlue\.(\w+)', 1) = 'GetTables'
+);
+
+statement ok
+CREATE MACRO plist_count() AS (
+    SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name LIKE 'plist_%'
+);
+
+statement ok
+CREATE MACRO database_count() AS (
+    SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'my_datalake'
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage='memory');
+
+# Whatever the setting, each database is listed once
+foreach parallelism 0 1 2 8 100
+
+statement ok
+SET glue_list_tables_parallelism = {parallelism};
+
+# a fresh attach lists the tables again
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT schema_name, count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name LIKE 'plist_%' GROUP BY schema_name ORDER BY schema_name;
+----
+plist_a	2
+plist_b	2
+plist_c	2
+plist_d	2
+plist_e	2
+plist_f	2
+
+query I
+SELECT get_tables_calls() = plist_count();
+----
+true
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND schema LIKE 'plist_%';
+----
+12
+
+# SHOW ALL TABLES lists one database a second time, also at parallelism 1
+query I
+SELECT get_tables_calls() BETWEEN database_count() AND database_count() + 1;
+----
+true
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT table_name, count(*) FROM duckdb_columns() WHERE database_name = 'my_datalake' AND schema_name LIKE 'plist_%' GROUP BY table_name ORDER BY table_name;
+----
+t1	12
+t2	6
+
+query I
+SELECT get_tables_calls() = plist_count();
+----
+true
+
+endloop
+
+# Statements that visit one or two databases list only those
+statement ok
+SET glue_list_tables_parallelism = 8;
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = 'plist_c';
+----
+2
+
+query I
+SELECT get_tables_calls();
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name IN ('plist_a', 'plist_b');
+----
+4
+
+query I
+SELECT get_tables_calls();
+----
+2
+
+# A database whose listing fails is listed again when the scan reaches it, which reports the Glue error, also when the
+# databases are listed ahead of the scan
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.fault_invalid_input_plist;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach parallelism 1 2 8
+
+statement ok
+SET glue_list_tables_parallelism = {parallelism};
+
+statement error
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'fault_dl';
+----
+<REGEX>:.*Glue GetTables \(database 'fault_invalid_input_plist'\) failed.*
+
+endloop
+
+statement ok
+DETACH fault_dl;
+
+statement ok
+DROP SCHEMA my_datalake.fault_invalid_input_plist;
+
+statement ok
+SET glue_list_tables_parallelism = 8;
+
+# The suggestions for a missing table search only the tables already seen, so they list no database, whatever the
+# parallelism
+statement ok
+SET catalog_error_max_schemas = 4;
+
+foreach parallelism 1 2 8
+
+statement ok
+SET glue_list_tables_parallelism = {parallelism};
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT * FROM no_such_table_xyz;
+----
+does not exist
+
+query I
+SELECT get_tables_calls();
+----
+0
+
+endloop
+
+statement ok
+RESET catalog_error_max_schemas;
+
+# Concurrent connections each list the catalog
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+concurrentloop i 0 8
+
+statement ok
+SET glue_list_tables_parallelism = 8;
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name LIKE 'plist_%';
+----
+12
+
+endloop
+
+statement error
+SET glue_list_tables_parallelism = -1;
+----
+<REGEX>:.*Failed to cast value: Type INT32 with value -1 can't be cast because the value is out of range for the destination type UINT64.*
+
+statement error
+SET glue_list_tables_parallelism = 'many';
+----
+<REGEX>:.*Failed to cast value: Could not convert string 'many' to UINT64.*
+
+statement ok
+SET glue_list_tables_parallelism = 8;
+
+foreach schema plist_a plist_b plist_c plist_d plist_e plist_f
+
+statement ok
+DROP TABLE my_datalake.{schema}.t1;
+
+statement ok
+DROP TABLE my_datalake.{schema}.t2;
+
+statement ok
+DROP SCHEMA my_datalake.{schema};
+
+endloop

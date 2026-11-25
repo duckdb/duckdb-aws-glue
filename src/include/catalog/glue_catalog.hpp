@@ -8,6 +8,7 @@
 
 #include "catalog/glue_options.hpp"
 #include "catalog/glue_schema_set.hpp"
+#include "catalog/glue_table_prefetch.hpp"
 
 #include <memory>
 
@@ -81,6 +82,9 @@ public:
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();
+	GlueTablePrefetch &TablePrefetch() {
+		return table_prefetch;
+	}
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
 	//! The S3 location a new table gets when none is given: <default_location>/<database>/<table> when the catalog
@@ -147,6 +151,7 @@ private:
 
 private:
 	GlueSchemaSet schemas;
+	GlueTablePrefetch table_prefetch;
 	mutex reported_id_lock;
 	//! empty until Glue reports one: not cached as none, the catalog may get a database of its own later
 	string reported_catalog_id;

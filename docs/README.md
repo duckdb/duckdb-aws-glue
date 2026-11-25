@@ -351,6 +351,10 @@ is one `GetTables` per listed database per statement: an unfiltered `duckdb_tabl
 `SHOW ALL TABLES` lists every database of the catalog on every statement. `SET glue_metadata_cache_scope = 'connection'`
 keeps the listing for the connection, as before.
 
+`SHOW ALL TABLES`, `duckdb_tables()` and `duckdb_columns()` list the tables of the databases they visit
+`glue_list_tables_parallelism` at a time (8 by default, at most 32; 0 and 1 list them one after another), from the
+second database on. A database whose listing fails is listed again when the scan reaches it, so the error appears there.
+
 ## Views
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...` and `CREATE SECURE VIEW` create a Glue

@@ -81,6 +81,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_list_tables_parallelism",
+	                          "How many databases to list at the same time when a statement lists the tables of many "
+	                          "(SHOW ALL TABLES, duckdb_tables()). 0 and 1 list one after another. At most 32.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(8));
+
 	config.AddExtensionOption("glue_partition_load_parallelism",
 	                          "The number of partitioned Glue tables a statement scans whose partitions are loaded "
 	                          "concurrently, when the first of its scans needs partitions. 1 loads each table's "

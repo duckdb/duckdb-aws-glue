@@ -167,6 +167,11 @@ private:
 	string GetOpenCSVCharacter(const string &key, const string &fallback) const;
 };
 
+struct GlueDatabaseTables {
+	bool fetched = false;
+	vector<GlueTableInfo> tables;
+};
+
 //! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB
 struct GlueViewInfo {
 	//! The Glue database (a DuckDB schema) the view lives in
