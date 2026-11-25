@@ -8,36 +8,39 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.names_orders;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.names_orders;
 
 statement ok
-DROP VIEW IF EXISTS my_datalake.default.names_view;
+DROP VIEW IF EXISTS my_datalake.{GLUE_TEST_DB}.names_view;
 
 statement ok
-CREATE TABLE my_datalake.default.names_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.names_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-CREATE VIEW my_datalake.default.names_view AS SELECT 1 AS one;
+CREATE VIEW my_datalake.{GLUE_TEST_DB}.names_view AS SELECT 1 AS one;
 
 statement ok
 CREATE TABLE memory.main.names_local (id INTEGER);
 
 statement ok
-USE my_datalake.default;
+USE my_datalake.{GLUE_TEST_DB};
 
 statement ok
 CALL glue_add_partition('names_orders', {dt: 'a'});
 
 statement ok
-CALL glue_add_partition('default.names_orders', {dt: 'b'});
+CALL glue_add_partition('{GLUE_TEST_DB}.names_orders', {dt: 'b'});
 
 query I
 SELECT dt FROM glue_partitions('names_orders') ORDER BY dt;
@@ -46,7 +49,7 @@ a
 b
 
 query I
-SELECT dt FROM glue_partitions('default.names_orders') ORDER BY dt;
+SELECT dt FROM glue_partitions('{GLUE_TEST_DB}.names_orders') ORDER BY dt;
 ----
 a
 b
@@ -63,7 +66,7 @@ SELECT dt, location FROM glue_partitions('names_orders') WHERE dt = 'c';
 c	{DEFAULT_S3_LOCATION}/{TEST_DIR}/names_moved
 
 statement ok
-CALL glue_drop_partition('default.names_orders', {dt: 'a'});
+CALL glue_drop_partition('{GLUE_TEST_DB}.names_orders', {dt: 'a'});
 
 statement ok
 CALL glue_alter_table('names_orders',
@@ -93,7 +96,7 @@ statement ok
 ALTER TABLE names_orders ADD PARTITION (dt = 'e');
 
 statement ok
-ALTER TABLE "default".names_orders DROP PARTITION (dt = 'c');
+ALTER TABLE "{GLUE_TEST_DB}".names_orders DROP PARTITION (dt = 'c');
 
 query I
 SELECT dt FROM glue_partitions('names_orders') ORDER BY dt;
@@ -133,7 +136,7 @@ SELECT * FROM glue_partitions('names_orders');
 does not exist
 
 statement ok
-DROP VIEW my_datalake.default.names_view;
+DROP VIEW my_datalake.{GLUE_TEST_DB}.names_view;
 
 statement ok
-DROP TABLE my_datalake.default.names_orders;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.names_orders;

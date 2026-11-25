@@ -18,7 +18,8 @@
 
 namespace duckdb {
 
-GlueTableSet::GlueTableSet(GlueSchemaEntry &schema) : schema(schema), catalog(schema.catalog.Cast<GlueCatalog>()) {
+GlueTableSet::GlueTableSet(GlueSchemaEntry &schema)
+    : schema(schema), catalog(schema.catalog.Cast<GlueCatalog>()), id(GlueTransactionCache::NextId()) {
 }
 
 unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
@@ -62,67 +63,84 @@ bool GlueTableSet::BatchTableLookups(ClientContext &context) {
 	return true;
 }
 
-void GlueTableSet::LoadEntries(ClientContext &context) {
-	if (is_loaded) {
+void GlueTableSet::LoadEntries(ClientContext &context, GlueTransactionCache &cache) {
+	if (cache.HasListed(id)) {
 		return;
 	}
-	auto cache = GlueTransactionCache::Of(context, catalog);
 	vector<GlueTableInfo> tables;
-	if (prefetched && prefetched_generation == catalog.TablePrefetch().Generation()) {
-		tables = std::move(*prefetched);
-	} else {
-		tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName());
-	}
-	prefetched.reset();
-	for (auto &table : tables) {
-		if (cache) {
-			// Without this the per reference GetEntry re-fetches every table this one request
-			// already returned, which makes the bulk round trip pure added cost
-			shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
-			cache->GetTable(schema.GetDatabaseName(), table.name, [&info]() { return info; });
+	// Takes the listing GlueTablePrefetch made ahead of this scan, waiting for one it is making. Otherwise this scan
+	// lists the set and holds the claim meanwhile, so a prefetch does not list it too.
+	struct ListingClaim {
+		GlueTransactionCache &cache;
+		glue_entry_set_id_t id;
+		bool held = false;
+		~ListingClaim() {
+			if (held) {
+				cache.EndPrefetch(id, nullptr);
+			}
 		}
-		auto existing = entries.find(table.name);
-		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(table)) {
-			// already loaded through a direct lookup, and still what Glue holds
+	} claim {cache, id};
+	bool prefetched = false;
+	while (true) {
+		cache.WaitForPrefetch(context, id);
+		if (cache.TakePrefetched(id, tables)) {
+			prefetched = true;
+			break;
+		}
+		if (cache.TryBeginPrefetch(id)) {
+			claim.held = true;
+			break;
+		}
+	}
+	if (!prefetched) {
+		try {
+			tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName(), false, nullptr, true);
+		} catch (const GlueException &ex) {
+			if (!ex.access_denied) {
+				throw;
+			}
+			// A refused listing says nothing about which tables exist: entries stay and the set is not marked, so the
+			// next transaction asks again
+			ErrorData error(ex);
+			DUCKDB_LOG_WARNING(context, "Not listing the tables of Glue database '%s': %s", schema.GetDatabaseName(),
+			                   error.RawMessage());
+			return;
+		}
+	}
+	case_insensitive_set_t listed;
+	for (auto &table : tables) {
+		listed.insert(table.name);
+		// The definition this transaction's lookups see: one the cache already holds wins, otherwise the listed one is
+		// cached so the per reference GetEntry does not re-fetch what this one request returned
+		shared_ptr<const GlueTableInfo> listed_info = make_shared_ptr<const GlueTableInfo>(table);
+		auto info = cache.GetTable(schema.GetDatabaseName(), table.name, [&listed_info]() { return listed_info; });
+		auto existing = entries.find(info->name);
+		if (existing != entries.end() && GetTableInfo(*existing->second).IsSameVersion(*info)) {
+			// already loaded, and still what Glue holds
 			continue;
 		}
 		unique_ptr<CatalogEntry> entry;
 		try {
-			entry = CreateEntry(table);
+			entry = CreateEntry(*info);
 		} catch (std::exception &ex) {
 			// A table whose Glue definition we can not turn into a DuckDB table (e.g. an unsupported column type)
 			// must not break listing the other tables: leave it out and log why. Looking the table up by name
 			// still reports the error to the user.
 			ErrorData error(ex);
-			DUCKDB_LOG_ERROR(context, "Glue table '%s.%s' is not listed: %s", schema.GetDatabaseName(), table.name,
-			                 error.RawMessage());
+			DUCKDB_LOG_ERROR(
+			    context, "Glue table '%s.%s' could not be converted from the GetTables response and is not listed: %s",
+			    schema.GetDatabaseName(), info->name, error.RawMessage());
+			RetireEntry(info->name);
 			continue;
 		}
-		RetireEntry(table.name);
-		entries.emplace(table.name, std::move(entry));
+		RetireEntry(info->name);
+		entries.emplace(info->name, std::move(entry));
 	}
-	is_loaded = true;
-}
-
-bool GlueTableSet::NeedsListing(idx_t generation) {
-	lock_guard<mutex> guard(entry_lock);
-	return !is_loaded && !(prefetched && prefetched_generation == generation);
-}
-
-void GlueTableSet::DropListing(idx_t generation) {
-	lock_guard<mutex> guard(entry_lock);
-	if (prefetched_generation == generation) {
-		prefetched.reset();
+	// what Glue no longer returns was dropped by another client
+	for (auto &name : UnlistedNames(entries, listed)) {
+		RetireEntry(name);
 	}
-}
-
-void GlueTableSet::SetListing(idx_t generation, vector<GlueTableInfo> tables) {
-	lock_guard<mutex> guard(entry_lock);
-	if (is_loaded) {
-		return;
-	}
-	prefetched = make_uniq<vector<GlueTableInfo>>(std::move(tables));
-	prefetched_generation = generation;
+	cache.MarkListed(id);
 }
 
 void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCache &cache) {
@@ -227,9 +245,16 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 	// tables and views share the set and a scan of either type yields both, as in DuckDB's own schema: the catalog
 	// functions filter by entry type themselves, and duckdb_columns() collects the columns of views through a
 	// TABLE_ENTRY scan
-	Transaction::Get(context, catalog);
+	auto &transaction = GlueTransaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
-	LoadEntries(context);
+	LoadEntries(context, *transaction.cache);
+	for (auto &entry : entries) {
+		callback(*entry.second);
+	}
+}
+
+void GlueTableSet::ScanLoaded(const std::function<void(CatalogEntry &)> &callback) {
+	lock_guard<mutex> guard(entry_lock);
 	for (auto &entry : entries) {
 		callback(*entry.second);
 	}
@@ -237,8 +262,6 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 
 optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> entry) {
 	lock_guard<mutex> guard(entry_lock);
-	// a pending listing predates this change
-	prefetched.reset();
 	auto name = entry->name.GetIdentifierName();
 	RetireEntry(name);
 	auto result = entries.emplace(name, std::move(entry));
@@ -247,7 +270,6 @@ optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> en
 
 void GlueTableSet::RemoveEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
-	prefetched.reset();
 	RetireEntry(name);
 }
 

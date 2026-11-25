@@ -144,6 +144,9 @@ public:
 	string GetCompressionLevel() const;
 	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
 	string GetNullFormat() const;
+	//! Throws when the table or its SerDe holds an Avro schema (avro.schema.literal or avro.schema.url), which
+	//! Hive and Athena read the columns from and DuckDB does not update
+	void ThrowIfAvroSchemaDefined(const string &action) const;
 	//! skip.header.line.count, 0 without
 	idx_t GetHeaderLineCount() const;
 	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
@@ -196,7 +199,7 @@ struct GluePartitionInfo {
 	vector<string> values;
 	string location;
 	//! The partition's own StorageDescriptor.InputFormat and SerdeInfo, which Hive reads its files with and which can
-	//! differ from the table's; empty when not known (a hive_scan, a deserialized plan)
+	//! differ from the table's; empty when not known (a hive_scan)
 	string input_format;
 	string serde_library;
 	unordered_map<string, string> serde_parameters;

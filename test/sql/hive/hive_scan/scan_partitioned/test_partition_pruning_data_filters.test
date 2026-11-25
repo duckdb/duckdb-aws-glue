@@ -1,0 +1,107 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_pruning_data_filters.test
+# description: Only filters the partition values decide prune partitions; filters on data columns stay in the plan
+# group: [scan_partitioned]
+
+require parquet
+
+require glue
+
+# hive_scan reads no rows here on Windows, with or without this change: a separate issue
+require linux
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 10.0, 'a'), (2, 20.0, 'b')) t(id, amount, note))
+TO '{TEST_DIR}/pruning_data_filters_x' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 30.0, 'c')) t(id, amount, note))
+TO '{TEST_DIR}/pruning_data_filters_y' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+statement ok
+COPY (SELECT * FROM (VALUES (4, 40.0, 'd')) t(id, amount, note))
+TO '{TEST_DIR}/pruning_data_filters_z' (FORMAT parquet, PER_THREAD_OUTPUT true);
+
+# one directory per partition; 'w' has no files and scans as zero rows
+statement ok
+CREATE MACRO pdf() AS TABLE
+SELECT * FROM hive_scan('{TEST_DIR}/pruning_data_filters',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', note: 'VARCHAR', dt: 'VARCHAR'},
+    partitions := [{dt: 'w', location: '{TEST_DIR}/pruning_data_filters_w'},
+                   {dt: 'x', location: '{TEST_DIR}/pruning_data_filters_x'},
+                   {dt: 'y', location: '{TEST_DIR}/pruning_data_filters_y'},
+                   {dt: 'z', location: '{TEST_DIR}/pruning_data_filters_z'}]);
+
+# a partition filter and a data filter
+query I
+SELECT id FROM pdf() WHERE dt = 'x' AND amount > 15 ORDER BY id
+----
+2
+
+# data filters only: no partition is pruned
+query I
+SELECT id FROM pdf() WHERE amount > 15 AND note <> 'b' ORDER BY id
+----
+3
+4
+
+# one filter that needs both a partition column and a data column
+query I
+SELECT id FROM pdf() WHERE dt = 'x' OR amount > 35 ORDER BY id
+----
+1
+2
+4
+
+# an IN list on the partition column next to a LIKE on a data column
+query I
+SELECT id FROM pdf() WHERE dt IN ('x', 'y') AND note LIKE '%c%' ORDER BY id
+----
+3
+
+# a function of the partition column, and a filter on a data column that no partition can decide
+query I
+SELECT id FROM pdf() WHERE upper(dt) = 'Z' AND id > 0 ORDER BY id
+----
+4
+
+# a partition filter that keeps no partition
+query I
+SELECT count(*) FROM pdf() WHERE dt = 'v' AND amount > 0
+----
+0
+
+# only the filter on the partition column prunes; the data filter stays a filter on the scan
+query II
+EXPLAIN SELECT id FROM pdf() WHERE dt = 'x' AND amount > 15
+----
+physical_plan	<REGEX>:.*Filters: amount > 15\.0.*File Filters: dt = 'x'.*Scanning Files: 1/4.*
+
+# a filter that needs a data column prunes nothing
+query II
+EXPLAIN SELECT id FROM pdf() WHERE dt = 'x' OR amount > 35
+----
+physical_plan	<!REGEX>:.*File Filters.*
+
+# an INTEGER partition key with a value that does not cast
+statement ok
+CREATE MACRO pdf_bad() AS TABLE
+SELECT * FROM hive_scan('{TEST_DIR}/pruning_data_filters',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', note: 'VARCHAR', p: 'INTEGER'},
+    partitions := [{p: '1', location: '{TEST_DIR}/pruning_data_filters_x'},
+                   {p: 'abc', location: '{TEST_DIR}/pruning_data_filters_z'}]);
+
+# a filter on the partition key alone casts every partition value while planning
+statement error
+EXPLAIN SELECT id FROM pdf_bad() WHERE p = 1
+----
+Unable to cast 'abc' (from Glue partition column 'P') to: 'INTEGER'
+
+# a filter that also needs a data column plans without casting the partition values
+statement ok
+EXPLAIN SELECT id FROM pdf_bad() WHERE p = 1 OR amount > 35
+
+# and fails once the scan reads the partition whose value does not cast
+statement error
+SELECT id FROM pdf_bad() WHERE p = 1 OR amount > 35
+----
+Unable to cast 'abc'

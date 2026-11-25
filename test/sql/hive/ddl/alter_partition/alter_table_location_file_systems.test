@@ -1,0 +1,48 @@
+# name: test/sql/hive/ddl/alter_partition/alter_table_location_file_systems.test
+# description: a partition location is on the file system of the table location, and the table location may move to S3
+# group: [alter_partition]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_TEST_DB
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as local_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS local_dl.{GLUE_TEST_DB}.location_file_systems;
+
+statement ok
+CREATE TABLE local_dl.{GLUE_TEST_DB}.location_file_systems (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+# a table on the local file system takes local paths and file:// URIs, not S3 locations
+statement ok
+CALL glue_add_partition('local_dl.{GLUE_TEST_DB}.location_file_systems', {k: 'x'}, location := 'file:///tmp/{TEST_DIR}/k=x');
+
+statement error
+CALL glue_add_partition('local_dl.{GLUE_TEST_DB}.location_file_systems', {k: 'y'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/k=y');
+----
+<REGEX>:.*Binder Error.*the location must be on the file system of the table location.*
+
+# the table location itself may move to S3
+statement ok
+CALL glue_set_table_location('local_dl.{GLUE_TEST_DB}.location_file_systems', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved');
+
+statement ok
+CALL glue_add_partition('local_dl.{GLUE_TEST_DB}.location_file_systems', {k: 'z'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved/k=z');
+
+statement error
+CALL glue_add_partition('local_dl.{GLUE_TEST_DB}.location_file_systems', {k: 'w'}, location := 'file:///tmp/{TEST_DIR}/k=w');
+----
+<REGEX>:.*Binder Error.*the location must be an S3 location.*
+
+statement ok
+DROP TABLE local_dl.{GLUE_TEST_DB}.location_file_systems;

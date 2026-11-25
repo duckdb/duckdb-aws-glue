@@ -11,130 +11,133 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.formats_csv_pipe;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.formats_csv_pipe;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.formats_csv_tab;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.formats_csv_tab;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.formats_csv_semicolon;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.formats_csv_semicolon;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.formats_csv_quoted;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.formats_csv_quoted;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.formats_csv_squote;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.formats_csv_squote;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.formats_csv_dquote;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.formats_csv_dquote;
 
 #---------------------------------------------------------------------------
 # delimiters: '|', tab and ';' (Hive's "ROW FORMAT DELIMITED FIELDS TERMINATED BY ...")
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_pipe (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv', delimiter = '|');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_pipe (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv', delimiter = '|');
 
 query IIII
 SELECT serde_library, serde_parameters['field.delim'], serde_parameters['serialization.format'], parameters['delimiter']
-FROM glue_get_table_response('my_datalake.default.formats_csv_pipe');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.formats_csv_pipe');
 ----
 org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe	|	|	|
 
 # a comma is a plain character now. LazySimpleSerDe does not quote, so a value holding the delimiter can not be
 # written: Hive would split it into two fields
 statement ok
-INSERT INTO my_datalake.default.formats_csv_pipe VALUES (1, 'a,b', '2016-05-14'), (2, 'x"y', '2016-05-14'), (3, 'c', '2016-05-15');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_pipe VALUES (1, 'a,b', '2016-05-14'), (2, 'x"y', '2016-05-14'), (3, 'c', '2016-05-15');
 
 statement error
-INSERT INTO my_datalake.default.formats_csv_pipe VALUES (4, 'x|y', '2016-05-14');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_pipe VALUES (4, 'x|y', '2016-05-14');
 ----
 holds the field delimiter '|' or a line break
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_pipe/dt=2016-05-14/*.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_pipe/dt=2016-05-14/*.csv');
 ----
 1|a,b<nl>2|x"y<nl>
 
 query II
-SELECT id, name FROM read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_pipe/dt=2016-05-14/*.csv', header = false, delim = '|', quote = '', columns = {id: 'INTEGER', name: 'VARCHAR'}) ORDER BY id;
+SELECT id, name FROM read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_pipe/dt=2016-05-14/*.csv', header = false, delim = '|', quote = '', columns = {id: 'INTEGER', name: 'VARCHAR'}) ORDER BY id;
 ----
 1	a,b
 2	x"y
 
 query III
-SELECT id, name, dt FROM my_datalake.default.formats_csv_pipe ORDER BY id;
+SELECT id, name, dt FROM my_datalake.{GLUE_TEST_DB}.formats_csv_pipe ORDER BY id;
 ----
 1	a,b	2016-05-14
 2	x"y	2016-05-14
 3	c	2016-05-15
 
 query I
-SELECT id FROM my_datalake.default.formats_csv_pipe WHERE dt = '2016-05-15';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.formats_csv_pipe WHERE dt = '2016-05-15';
 ----
 3
 
 # tab
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_tab (id INTEGER, name VARCHAR) WITH (format = 'csv', delimiter = chr(9));
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_tab (id INTEGER, name VARCHAR) WITH (format = 'csv', delimiter = chr(9));
 
 query III
 SELECT serde_library, serde_parameters['field.delim'] = chr(9), parameters['delimiter'] = chr(9)
-FROM glue_get_table_response('my_datalake.default.formats_csv_tab');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.formats_csv_tab');
 ----
 org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe	true	true
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_tab VALUES (1, 'a,b'), (2, 'x y');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_tab VALUES (1, 'a,b'), (2, 'x y');
 
 statement error
-INSERT INTO my_datalake.default.formats_csv_tab VALUES (3, 'x' || chr(9) || 'y');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_tab VALUES (3, 'x' || chr(9) || 'y');
 ----
 holds the field delimiter '\011' or a line break
 
 query I
-SELECT replace(replace(content, chr(10), '<nl>'), chr(9), '<tab>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_tab/*.csv');
+SELECT replace(replace(content, chr(10), '<nl>'), chr(9), '<tab>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_tab/*.csv');
 ----
 1<tab>a,b<nl>2<tab>x y<nl>
 
 query II
-SELECT id, name FROM my_datalake.default.formats_csv_tab ORDER BY id;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.formats_csv_tab ORDER BY id;
 ----
 1	a,b
 2	x y
 
 # ';' with a header line in every file (Hive's TBLPROPERTIES ('skip.header.line.count' = '1'))
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_semicolon (id INTEGER, name VARCHAR) WITH (format = 'csv', delimiter = ';', header = true);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_semicolon (id INTEGER, name VARCHAR) WITH (format = 'csv', delimiter = ';', header = true);
 
 query IIII
 SELECT serde_library, serde_parameters['field.delim'], parameters['delimiter'], parameters['skip.header.line.count']
-FROM glue_get_table_response('my_datalake.default.formats_csv_semicolon');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.formats_csv_semicolon');
 ----
 org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe	;	;	1
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_semicolon VALUES (1, 'a');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_semicolon VALUES (1, 'a');
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_semicolon VALUES (2, 'b,c');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_semicolon VALUES (2, 'b,c');
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_semicolon/*.csv') ORDER BY 1;
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_semicolon/*.csv') ORDER BY 1;
 ----
 id;name<nl>1;a<nl>
 id;name<nl>2;b,c<nl>
 
 # the header lines are skipped, not read as rows
 query II
-SELECT id, name FROM my_datalake.default.formats_csv_semicolon ORDER BY id;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.formats_csv_semicolon ORDER BY id;
 ----
 1	a
 2	b,c
@@ -144,32 +147,32 @@ SELECT id, name FROM my_datalake.default.formats_csv_semicolon ORDER BY id;
 # and NULL is \N. A value holding the delimiter or a line break can not be written, Hive would split it
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_quoted (id INTEGER, name VARCHAR, note VARCHAR) WITH (format = 'csv');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_quoted (id INTEGER, name VARCHAR, note VARCHAR) WITH (format = 'csv');
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_quoted VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_quoted VALUES
     (1, 'plain', 'plain'),
     (2, 'say "hi"', ''),
     (3, '"quoted"', NULL),
     (4, ' padded ', '"');
 
 statement error
-INSERT INTO my_datalake.default.formats_csv_quoted VALUES (5, 'a,b', NULL);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_quoted VALUES (5, 'a,b', NULL);
 ----
 holds the field delimiter ',' or a line break
 
 statement error
-INSERT INTO my_datalake.default.formats_csv_quoted VALUES (5, NULL, 'two' || chr(10) || 'lines');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_quoted VALUES (5, NULL, 'two' || chr(10) || 'lines');
 ----
 holds the field delimiter ',' or a line break
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_quoted/*.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_quoted/*.csv');
 ----
 1,plain,plain<nl>2,say "hi",<nl>3,"quoted",\N<nl>4, padded ,"<nl>
 
 query IIII
-SELECT id, name, note, note IS NULL FROM my_datalake.default.formats_csv_quoted ORDER BY id;
+SELECT id, name, note, note IS NULL FROM my_datalake.{GLUE_TEST_DB}.formats_csv_quoted ORDER BY id;
 ----
 1	plain	plain	false
 2	say "hi"	(empty)	false
@@ -181,26 +184,26 @@ SELECT id, name, note, note IS NULL FROM my_datalake.default.formats_csv_quoted 
 # 'org.apache.hadoop.hive.serde2.OpenCSVSerde' WITH SERDEPROPERTIES (...)")
 #---------------------------------------------------------------------------
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_squote (id INTEGER, name VARCHAR) WITH (format = 'csv', quote = '''', escape = '\');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_squote (id INTEGER, name VARCHAR) WITH (format = 'csv', quote = '''', escape = '\');
 
 query IIIII
 SELECT serde_library, serde_parameters['separatorChar'], serde_parameters['quoteChar'], serde_parameters['escapeChar'], parameters['classification']
-FROM glue_get_table_response('my_datalake.default.formats_csv_squote');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.formats_csv_squote');
 ----
 org.apache.hadoop.hive.serde2.OpenCSVSerde	,	'	\	csv
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_squote VALUES (1, 'it''s'), (2, 'a,b'), (3, 'say "hi"'), (4, 'back\slash');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_squote VALUES (1, 'it''s'), (2, 'a,b'), (3, 'say "hi"'), (4, 'back\slash');
 
 # every value is quoted, as Hive's OpenCSVSerde writes: an escape character is then escaped too, where unquoted
 # OpenCSVSerde would drop it (opencsv only honors an escape character before a quote or another escape)
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_squote/*.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_squote/*.csv');
 ----
 '1','it\'s'<nl>'2','a,b'<nl>'3','say "hi"'<nl>'4','back\\slash'<nl>
 
 query II
-SELECT id, name FROM my_datalake.default.formats_csv_squote ORDER BY id;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.formats_csv_squote ORDER BY id;
 ----
 1	it's
 2	a,b
@@ -209,24 +212,24 @@ SELECT id, name FROM my_datalake.default.formats_csv_squote ORDER BY id;
 
 # only a quote character: the escape character defaults to it, and the delimiter can be combined
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_dquote (id INTEGER, name VARCHAR) WITH (format = 'csv', delimiter = '|', quote = '"');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_dquote (id INTEGER, name VARCHAR) WITH (format = 'csv', delimiter = '|', quote = '"');
 
 query IIII
 SELECT serde_library, serde_parameters['separatorChar'], serde_parameters['quoteChar'], serde_parameters['escapeChar']
-FROM glue_get_table_response('my_datalake.default.formats_csv_dquote');
+FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.formats_csv_dquote');
 ----
 org.apache.hadoop.hive.serde2.OpenCSVSerde	|	"	"
 
 statement ok
-INSERT INTO my_datalake.default.formats_csv_dquote VALUES (1, 'x|y'), (2, 'say "hi"');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.formats_csv_dquote VALUES (1, 'x|y'), (2, 'say "hi"');
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_dquote/*.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_dquote/*.csv');
 ----
 "1"|"x|y"<nl>"2"|"say ""hi"""<nl>
 
 query II
-SELECT id, name FROM my_datalake.default.formats_csv_dquote ORDER BY id;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.formats_csv_dquote ORDER BY id;
 ----
 1	x|y
 2	say "hi"
@@ -235,16 +238,16 @@ SELECT id, name FROM my_datalake.default.formats_csv_dquote ORDER BY id;
 # combination the parallel scanner refuses. The writer refuses such values, so the file is written directly
 statement ok
 COPY (SELECT '3|"two' || chr(10) || 'lines"' AS l UNION ALL SELECT '4|after' UNION ALL SELECT '5')
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_dquote/external.csv' (FORMAT csv, HEADER false, QUOTE '');
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_dquote/external.csv' (FORMAT csv, HEADER false, QUOTE '');
 
 query I
-SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_dquote/external.csv');
+SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_dquote/external.csv');
 ----
 3|"two<nl>lines"<nl>4|after<nl>5<nl>
 
 # by default the scan fails as read_csv does
 statement error
-SELECT * FROM my_datalake.default.formats_csv_dquote ORDER BY id;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.formats_csv_dquote ORDER BY id;
 ----
 <REGEX>:.*parallel scanner does not support null_padding in conjunction with quoted new lines.*
 
@@ -254,7 +257,7 @@ statement ok
 SET hive_csv_parallel = false;
 
 query IIII
-SELECT id, replace(name, chr(10), '<nl>'), length(name), name IS NULL FROM my_datalake.default.formats_csv_dquote ORDER BY id;
+SELECT id, replace(name, chr(10), '<nl>'), length(name), name IS NULL FROM my_datalake.{GLUE_TEST_DB}.formats_csv_dquote ORDER BY id;
 ----
 1	x|y	3	false
 2	say "hi"	8	false
@@ -263,7 +266,7 @@ SELECT id, replace(name, chr(10), '<nl>'), length(name), name IS NULL FROM my_da
 5	NULL	NULL	true
 
 query I
-SELECT count(*) FROM my_datalake.default.formats_csv_dquote;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.formats_csv_dquote;
 ----
 5
 
@@ -271,7 +274,7 @@ statement ok
 RESET hive_csv_parallel;
 
 statement error
-SELECT * FROM my_datalake.default.formats_csv_dquote ORDER BY id;
+SELECT * FROM my_datalake.{GLUE_TEST_DB}.formats_csv_dquote ORDER BY id;
 ----
 <REGEX>:.*parallel scanner does not support null_padding in conjunction with quoted new lines.*
 
@@ -279,12 +282,12 @@ SELECT * FROM my_datalake.default.formats_csv_dquote ORDER BY id;
 # errors: Hive SerDes take single characters
 #---------------------------------------------------------------------------
 statement error
-CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', delimiter = '||');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_bad (id INTEGER) WITH (format = 'csv', delimiter = '||');
 ----
 CREATE TABLE option 'delimiter' must be a single character
 
 statement error
-CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', quote = '');
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_bad (id INTEGER) WITH (format = 'csv', quote = '');
 ----
 CREATE TABLE option 'quote' must be a single character
 
@@ -295,7 +298,7 @@ statement ok
 DETACH my_datalake;
 
 query III
-SELECT id, name, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_pipe', format := 'csv', delim := '|', quote := '',
+SELECT id, name, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_pipe', format := 'csv', delim := '|', quote := '',
     schema := {id: 'INTEGER', name: 'VARCHAR', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
 ORDER BY id;
@@ -305,7 +308,7 @@ ORDER BY id;
 3	c	2016-05-15
 
 query II
-SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_semicolon', format := 'csv', delim := ';', header := true,
+SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_semicolon', format := 'csv', delim := ';', header := true,
     schema := {id: 'INTEGER', name: 'VARCHAR'})
 ORDER BY id;
 ----
@@ -313,7 +316,7 @@ ORDER BY id;
 2	b,c
 
 query II
-SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_squote', format := 'csv', quote := '''', escape := '\',
+SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/formats_csv_squote', format := 'csv', quote := '''', escape := '\',
     schema := {id: 'INTEGER', name: 'VARCHAR'})
 ORDER BY id;
 ----
@@ -326,53 +329,54 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE my_datalake.default.formats_csv_pipe;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_pipe;
 
 statement ok
-DROP TABLE my_datalake.default.formats_csv_tab;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_tab;
 
 statement ok
-DROP TABLE my_datalake.default.formats_csv_semicolon;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_semicolon;
 
 statement ok
-DROP TABLE my_datalake.default.formats_csv_quoted;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_quoted;
 
 statement ok
-DROP TABLE my_datalake.default.formats_csv_squote;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_squote;
 
 statement ok
-DROP TABLE my_datalake.default.formats_csv_dquote;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_dquote;
 
 # CREATE TABLE AS writes its files in the dialect the new table records
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_ctas WITH (format = 'csv') AS SELECT 1 AS id, 'a' AS name;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_ctas WITH (format = 'csv') AS SELECT 1 AS id, 'a' AS name;
 
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_ctas_pipe WITH (format = 'csv', delimiter = '|') AS SELECT 1 AS id, 'a' AS name;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_ctas_pipe WITH (format = 'csv', delimiter = '|') AS SELECT 1 AS id, 'a' AS name;
 
 statement ok
-CREATE TABLE my_datalake.default.formats_csv_ctas_quoted WITH (format = 'csv', quote = '"') AS SELECT 1 AS id, 'a,b' AS name;
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_ctas_quoted WITH (format = 'csv', quote = '"') AS SELECT 1 AS id, 'a,b' AS name;
 
 foreach table formats_csv_ctas formats_csv_ctas_pipe
 
 query II
-SELECT id, name FROM my_datalake.default.{table};
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.{table};
 ----
 1	a
 
 statement ok
-DROP TABLE my_datalake.default.{table};
+DROP TABLE my_datalake.{GLUE_TEST_DB}.{table};
 
 endloop
 
 query II
-SELECT id, name FROM my_datalake.default.formats_csv_ctas_quoted;
+SELECT id, name FROM my_datalake.{GLUE_TEST_DB}.formats_csv_ctas_quoted;
 ----
 1	a,b
 
 statement ok
-DROP TABLE my_datalake.default.formats_csv_ctas_quoted;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.formats_csv_ctas_quoted;

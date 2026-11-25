@@ -10,6 +10,8 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_FAULT_ENDPOINT
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -181,78 +183,41 @@ SELECT get_tables_calls();
 ----
 2
 
-# A database whose listing failed is listed again when the scan reaches it
-foreach parallelism 2 8
+# A database whose listing fails is listed again when the scan reaches it, which reports the Glue error, also when the
+# databases are listed ahead of the scan
+statement ok
+CREATE SCHEMA IF NOT EXISTS my_datalake.fault_invalid_input_plist;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach parallelism 1 2 8
 
 statement ok
 SET glue_list_tables_parallelism = {parallelism};
 
-statement ok
-SET glue_debug_fail_list_tables = 'plist_d';
-
-statement ok
-DETACH my_datalake;
-
-statement ok
-attach '{GLUE_CATALOG_ID}' as my_datalake (
-    TYPE glue,
-    ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
-);
-
-statement ok
-CALL truncate_duckdb_logs();
-
-query II
-SELECT schema_name, count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name LIKE 'plist_%' GROUP BY schema_name ORDER BY schema_name;
+statement error
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'fault_dl';
 ----
-plist_a	2
-plist_b	2
-plist_c	2
-plist_d	2
-plist_e	2
-plist_f	2
-
-query I
-SELECT get_tables_calls() = plist_count() + 1;
-----
-true
+<REGEX>:.*Glue GetTables \(database 'fault_invalid_input_plist'\) failed.*
 
 endloop
 
 statement ok
-SET glue_list_tables_parallelism = 1;
+DETACH fault_dl;
 
 statement ok
-DETACH my_datalake;
+DROP SCHEMA my_datalake.fault_invalid_input_plist;
 
 statement ok
-attach '{GLUE_CATALOG_ID}' as my_datalake (
-    TYPE glue,
-    ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
-);
+SET glue_list_tables_parallelism = 8;
 
-statement ok
-CALL truncate_duckdb_logs();
-
-query I
-SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name LIKE 'plist_%';
-----
-12
-
-query I
-SELECT get_tables_calls() = plist_count();
-----
-true
-
-statement ok
-SET glue_debug_fail_list_tables = '';
-
-# The suggestions for a missing table list only the databases they search
-statement ok
-CREATE TABLE missing_table_calls (parallelism INTEGER, calls INTEGER);
-
+# The suggestions for a missing table search only the tables already seen, so they list no database, whatever the
+# parallelism
 statement ok
 SET catalog_error_max_schemas = 4;
 
@@ -272,9 +237,6 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 );
 
 statement ok
-USE my_datalake.default;
-
-statement ok
 CALL truncate_duckdb_logs();
 
 statement error
@@ -282,24 +244,17 @@ SELECT * FROM no_such_table_xyz;
 ----
 does not exist
 
-statement ok
-USE memory;
-
-statement ok
-INSERT INTO missing_table_calls VALUES ({parallelism}, get_tables_calls());
+query I
+SELECT get_tables_calls();
+----
+0
 
 endloop
-
-query I
-SELECT count(*) FROM missing_table_calls m, missing_table_calls one
-WHERE one.parallelism = 1 AND m.calls = one.calls;
-----
-3
 
 statement ok
 RESET catalog_error_max_schemas;
 
-# Concurrent connections share listings instead of each listing every database
+# Concurrent connections each list the catalog
 statement ok
 DETACH my_datalake;
 
@@ -309,9 +264,6 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     ENDPOINT '{GLUE_ENDPOINT}',
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
-
-statement ok
-CALL truncate_duckdb_logs();
 
 concurrentloop i 0 8
 
@@ -324,11 +276,6 @@ SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND sch
 12
 
 endloop
-
-query I
-SELECT get_tables_calls() < 2 * plist_count();
-----
-true
 
 statement error
 SET glue_list_tables_parallelism = -1;

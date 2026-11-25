@@ -30,27 +30,30 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.esc;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.esc;
 
 statement ok
-CREATE TABLE my_datalake.default.esc (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.esc (id INTEGER, k VARCHAR) PARTITIONED BY (k);
 
 # three values that differ only in how they escape: the raw one, the one whose escape is valid, and a plain value
 statement ok
-INSERT INTO my_datalake.default.esc VALUES (1, 'a%20b'), (2, 'a b'), (3, 'plain');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.esc VALUES (1, 'a%20b'), (2, 'a b'), (3, 'plain');
 
 # ---- what Glue holds ---------------------------------------------------------------------------------
 # each value is registered as itself. 'a%20b' and 'a b' are two DIFFERENT values and so two partitions
 query I
-SELECT k FROM glue_partitions('my_datalake.default.esc') ORDER BY k;
+SELECT k FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.esc') ORDER BY k;
 ----
 a b
 a%20b
@@ -59,7 +62,7 @@ plain
 # ---- what the scan emits ----------------------------------------------------------------------------
 # the value must round-trip. Before the fix row 1 came back as 'a b', colliding with row 2
 query II
-SELECT id, k FROM my_datalake.default.esc ORDER BY id;
+SELECT id, k FROM my_datalake.{GLUE_TEST_DB}.esc ORDER BY id;
 ----
 1	a%20b
 2	a b
@@ -68,19 +71,19 @@ SELECT id, k FROM my_datalake.default.esc ORDER BY id;
 # ---- what a filter prunes on -----------------------------------------------------------------------
 # the row must be findable by its real value. Before the fix this was 0
 query I
-SELECT id FROM my_datalake.default.esc WHERE k = 'a%20b';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.esc WHERE k = 'a%20b';
 ----
 1
 
 # and the space-separated value finds its own row, not both
 query I
-SELECT id FROM my_datalake.default.esc WHERE k = 'a b';
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.esc WHERE k = 'a b';
 ----
 2
 
 # a value that exists nowhere finds nothing
 query I
-SELECT count(*) FROM my_datalake.default.esc WHERE k = 'a%2520b';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.esc WHERE k = 'a%2520b';
 ----
 0
 
@@ -91,17 +94,17 @@ SET glue_enable_partition_key_statistics = true;
 # three distinct partition values, so at most three groups. This is the Mod 1 path: it builds min/max and the
 # distinct count from the same conversion, so a disagreement here would prune a partition that holds rows
 query II
-EXPLAIN SELECT k, count(*) FROM my_datalake.default.esc GROUP BY k;
+EXPLAIN SELECT k, count(*) FROM my_datalake.{GLUE_TEST_DB}.esc GROUP BY k;
 ----
 physical_plan	<REGEX>:.*Hash Group By.*~[0-9] rows.*
 
 # and every row is still returned when grouping -- the assertion that catches statistics deleting rows
 query II
-SELECT k, count(*) FROM my_datalake.default.esc GROUP BY k ORDER BY k;
+SELECT k, count(*) FROM my_datalake.{GLUE_TEST_DB}.esc GROUP BY k ORDER BY k;
 ----
 a b	1
 a%20b	1
 plain	1
 
 statement ok
-DROP TABLE my_datalake.default.esc;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.esc;

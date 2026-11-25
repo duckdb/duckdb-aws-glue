@@ -8,33 +8,36 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.list_a;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.list_a;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.list_b;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.list_b;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.list_parts;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.list_parts;
 
 statement ok
-CREATE TABLE my_datalake.default.list_a AS SELECT range AS id FROM range(100);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.list_a AS SELECT range AS id FROM range(100);
 
 statement ok
-CREATE TABLE my_datalake.default.list_b AS SELECT range AS id FROM range(10);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.list_b AS SELECT range AS id FROM range(10);
 
 statement ok
-CREATE TABLE my_datalake.default.list_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.list_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
 
 statement ok
-INSERT INTO my_datalake.default.list_parts VALUES (1, 'a'), (2, 'b'), (3, 'c');
+INSERT INTO my_datalake.{GLUE_TEST_DB}.list_parts VALUES (1, 'a'), (2, 'b'), (3, 'c');
 
 statement ok
 CREATE MACRO s3_listings(tbl) AS (
@@ -54,7 +57,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT (SELECT count(*) FROM my_datalake.default.list_a) + (SELECT count(*) FROM my_datalake.default.list_a x, my_datalake.default.list_a y WHERE x.id = y.id);
+SELECT (SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_a) + (SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_a x, my_datalake.{GLUE_TEST_DB}.list_a y WHERE x.id = y.id);
 ----
 200
 
@@ -68,7 +71,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.list_a;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_a;
 ----
 100
 
@@ -89,7 +92,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.list_a;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_a;
 ----
 100
 
@@ -102,7 +105,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.list_a x, my_datalake.default.list_a y WHERE x.id = y.id;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_a x, my_datalake.{GLUE_TEST_DB}.list_a y WHERE x.id = y.id;
 ----
 100
 
@@ -113,10 +116,10 @@ SELECT s3_listings('list_a');
 
 # a write through this connection clears it: the new file is listed
 statement ok
-INSERT INTO my_datalake.default.list_a SELECT range AS id FROM range(5);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.list_a SELECT range AS id FROM range(5);
 
 query I
-SELECT count(*) FROM my_datalake.default.list_a;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_a;
 ----
 105
 
@@ -125,12 +128,12 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.list_parts WHERE dt = 'b';
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_parts WHERE dt = 'b';
 ----
 1
 
 query I
-SELECT count(*) FROM my_datalake.default.list_parts WHERE dt IN ('a', 'b');
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_parts WHERE dt IN ('a', 'b');
 ----
 2
 
@@ -141,18 +144,18 @@ SELECT count(*), count(DISTINCT request.url) FROM duckdb_logs_parsed('HTTP') WHE
 
 # a write from another connection is not seen: the listing is served until this connection's cache clears
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 10
 
 statement ok con2
-INSERT INTO my_datalake.default.list_b VALUES (10);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.list_b VALUES (10);
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 10
 
@@ -166,7 +169,7 @@ statement ok
 BEGIN;
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 10
 
@@ -177,7 +180,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 11
 
@@ -191,13 +194,13 @@ statement ok
 SET glue_metadata_cache_scope = 'transaction';
 
 statement ok
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 11
 
@@ -215,13 +218,13 @@ statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/list_a', format := 'parquet',
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/list_a', format := 'parquet',
     schema := {id: 'BIGINT'});
 ----
 105
 
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/list_a', format := 'parquet',
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/list_a', format := 'parquet',
     schema := {id: 'BIGINT'});
 ----
 105
@@ -232,15 +235,15 @@ SELECT s3_listings('list_a');
 2
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 11
 
 statement ok con2
-INSERT INTO my_datalake.default.list_b VALUES (11);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.list_b VALUES (11);
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 11
 
@@ -251,14 +254,15 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 12
 
@@ -271,10 +275,10 @@ statement ok
 SET glue_cache_listings = false;
 
 statement ok con2
-INSERT INTO my_datalake.default.list_b VALUES (12);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.list_b VALUES (12);
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 13
 
@@ -282,7 +286,7 @@ statement ok
 SET glue_cache_listings = true;
 
 query I
-SELECT count(*) FROM my_datalake.default.list_b;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_b;
 ----
 13
 
@@ -295,12 +299,12 @@ CALL truncate_duckdb_logs();
 
 # ids 0-4 are in both files of list_a: 95 + 5 * 4
 query I
-SELECT count(*) FROM my_datalake.default.list_a x, my_datalake.default.list_a y WHERE x.id = y.id;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_a x, my_datalake.{GLUE_TEST_DB}.list_a y WHERE x.id = y.id;
 ----
 115
 
 query I
-SELECT count(*) FROM my_datalake.default.list_a;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.list_a;
 ----
 105
 
@@ -310,10 +314,10 @@ SELECT s3_listings('list_a');
 2
 
 statement ok
-DROP TABLE my_datalake.default.list_a;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.list_a;
 
 statement ok
-DROP TABLE my_datalake.default.list_b;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.list_b;
 
 statement ok
-DROP TABLE my_datalake.default.list_parts;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.list_parts;

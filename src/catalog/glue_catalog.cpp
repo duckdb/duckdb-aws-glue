@@ -306,9 +306,15 @@ void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaC
 
 vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
                                                                      const SchemaScanFilters &filters) {
+	optional_ptr<CatalogEntry> entry;
 	string name;
-	if (filters.GetSchemaOid() ||
-	    !TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
+	idx_t oid;
+	if (TryGetOidEquality(filters.GetSchemaOid(), "GlueCatalog::GetSchemasForScan", oid)) {
+		entry = schemas.GetEntryByOid(context, oid);
+	} else if (!filters.GetSchemaOid() &&
+	           TryGetNameEquality(filters.GetSchemaName(), "GlueCatalog::GetSchemasForScan", name)) {
+		entry = schemas.GetEntry(context, name);
+	} else {
 		auto scanned = Catalog::GetSchemasForScan(context, filters);
 		// the scan visits only what the filters kept
 		vector<string> names;
@@ -319,11 +325,11 @@ vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientConte
 		return scanned;
 	}
 	vector<reference<SchemaCatalogEntry>> result;
-	auto entry = schemas.GetEntry(context, name);
 	if (entry) {
 		result.push_back(entry->Cast<SchemaCatalogEntry>());
 	}
-	table_prefetch.RememberScannedSchemas(context, entry ? vector<string> {name} : vector<string>());
+	table_prefetch.RememberScannedSchemas(context,
+	                                      entry ? vector<string> {entry->name.GetIdentifierName()} : vector<string>());
 	return result;
 }
 
@@ -486,6 +492,12 @@ string GlueCatalog::KnownCatalogId() {
 		}
 	}
 	return StartsWithAccountId(options.catalog_id) ? options.catalog_id : string();
+}
+
+string GlueCatalog::GlueCatalogIdentity(ClientContext &context) {
+	// ':' is the credentials' default catalog: the id Glue reports names it like an explicit attach does
+	auto catalog_id = options.catalog_id.empty() ? FetchCatalogId(context) : options.catalog_id;
+	return catalog_id + "\x1f" + options.region + "\x1f" + options.endpoint;
 }
 
 string GlueCatalog::FetchCatalogId(ClientContext &context) {

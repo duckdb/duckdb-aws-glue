@@ -23,14 +23,22 @@
 # fault_already_exists* database, which is carried out and then answered with AlreadyExistsException (a lost race),
 # UpdateTable on a fault_concurrent_update* database, which another client's update precedes (a lost update),
 # BatchCreatePartition on a fault_partition_elsewhere* database, which another client's registration of the same
-# partitions at other locations precedes, and CreatePartition on a fault_noncanonical_values* database, which
-# registers each value with a leading '0'. GetTable on a table named fault_denied_* fails with AccessDeniedException,
-# and GetTables leaves such tables out, as Lake Formation does for a table the caller may not describe. GetTables is
-# delayed on a fault_slow_listing* database. BatchCreatePartition is delayed on a fault_slow_partitions* database (a
-# timeout lands during registration) and, on a fault_recreated_during_write* database, finds the table dropped and
-# created again by another client and then fails.
+# partitions at other locations precedes, BatchCreatePartition on a fault_noncanonical_values* database, which
+# registers each value with a leading '0', and BatchDeletePartition on a fault_partition_dropped* database, which
+# another client's drop of the same partitions precedes. GetTable on a table named fault_denied_* fails with
+# AccessDeniedException, and GetTables leaves such tables out, as Lake Formation does for a table the caller may not
+# describe. GetTables is delayed on a fault_slow_listing* database. BatchCreatePartition is delayed on a
+# fault_slow_partitions* database (a timeout lands during registration) and, on a fault_recreated_during_write*
+# database, finds the table dropped and created again by another client and then fails.
 # 'link-proxy' (port 5557, GLUE_LINK_PROXY_ENDPOINT) forwards to moto as Glue answers through a database resource link
 # link_db whose target is target_db (scripts/resource_link_proxy.py).
+# 's3-fault-proxy' (port 9102, GLUE_S3_FAULT_ENDPOINT) forwards to S3, except the first ListObjectsV2 of a prefix whose
+# last path segment contains fault_once, which fails with a 500 (scripts/s3_fault_proxy.py).
+# 'glue-latency-proxy' (port 5558) and 's3-latency-proxy' (port 9101) forward to moto and S3 after a delay per request
+# (scripts/latency_proxy.py), for the planning benchmarks in benchmark/tpcds/planning/local_sf1: GLUE_LATENCY_MS
+# (default 40), GLUE_MAX_CONCURRENCY (requests delayed at the same time, default 10) and S3_LATENCY_MS (default 15),
+# fitted to the planning times of the AWS Glue catalog from a GitHub runner. They keep the answers to reads: restart
+# them after changing what they read through moto or S3 directly.
 # Ports are published on 127.0.0.1 only, so the servers are not reachable from other machines.
 # 'fixture_partition_columns' (parquet) and 'fixture_partition_columns_csv' have partitions whose columns differ from
 # their table's, as another engine leaves them after it changes the table's columns (the parquet files are written by
@@ -67,6 +75,39 @@ services:
     volumes:
       - ./resource_link_proxy.py:/resource_link_proxy.py:ro
     entrypoint: ["python3", "/resource_link_proxy.py", "--host", "0.0.0.0", "--port", "5557", "--upstream", "http://moto:5000"]
+  glue-latency-proxy:
+    image: motoserver/moto:5.2.3
+    container_name: glue-latency-proxy
+    depends_on:
+      - moto
+    ports:
+      - "127.0.0.1:5558:5558"
+    volumes:
+      - ./latency_proxy.py:/latency_proxy.py:ro
+    entrypoint: ["python3", "/latency_proxy.py", "--port", "5558", "--upstream", "http://moto:5000", "--cache",
+                 "--latency-ms", "${GLUE_LATENCY_MS:-40}",
+                 "--max-concurrency", "${GLUE_MAX_CONCURRENCY:-10}"]
+  s3-latency-proxy:
+    image: motoserver/moto:5.2.3
+    container_name: s3-latency-proxy
+    depends_on:
+      - s3
+    ports:
+      - "127.0.0.1:9101:9101"
+    volumes:
+      - ./latency_proxy.py:/latency_proxy.py:ro
+    entrypoint: ["python3", "/latency_proxy.py", "--port", "9101", "--upstream", "http://s3:8333", "--cache",
+                 "--latency-ms", "${S3_LATENCY_MS:-15}"]
+  s3-fault-proxy:
+    image: motoserver/moto:5.2.3
+    container_name: s3-fault-proxy
+    depends_on:
+      - s3
+    ports:
+      - "127.0.0.1:9102:9102"
+    volumes:
+      - ./s3_fault_proxy.py:/s3_fault_proxy.py:ro
+    entrypoint: ["python3", "/s3_fault_proxy.py", "--port", "9102", "--upstream", "http://s3:8333"]
   s3:
     image: chrislusf/seaweedfs:4.47
     container_name: glue-s3

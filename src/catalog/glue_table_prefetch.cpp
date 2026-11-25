@@ -17,35 +17,28 @@ void GlueTablePrefetchState::SetScannedSchemas(vector<string> names) {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	scanned_schemas = std::move(names);
 	scanned_table_scans = 0;
+	in_window.clear();
 }
 
-bool GlueTablePrefetchState::TakeSchemasToPrefetch(const string &current, vector<string> &names) {
+vector<string> GlueTablePrefetchState::TakeWindow(const string &current, idx_t window) {
 	annotated_lock_guard<annotated_mutex> guard(lock);
-	if (++scanned_table_scans < 2) {
-		return false;
+	vector<string> names;
+	if (++scanned_table_scans < 2 || in_window.count(current)) {
+		return names;
 	}
 	auto position = std::find(scanned_schemas.begin(), scanned_schemas.end(), current);
-	if (position == scanned_schemas.end()) {
-		return false;
+	for (; position != scanned_schemas.end() && names.size() < window; ++position) {
+		in_window.insert(*position);
+		names.push_back(*position);
 	}
-	names.assign(position, scanned_schemas.end());
-	return true;
+	return names;
 }
 
-void GlueTablePrefetchState::AddPrefetched(const vector<string> &names, idx_t generation) {
-	annotated_lock_guard<annotated_mutex> guard(lock);
-	for (auto &name : names) {
-		prefetched.push_back(GluePrefetchedListing {name, generation});
-	}
-}
-
-vector<GluePrefetchedListing> GlueTablePrefetchState::Reset() {
+void GlueTablePrefetchState::Reset() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	scanned_schemas.clear();
 	scanned_table_scans = 0;
-	vector<GluePrefetchedListing> result;
-	std::swap(result, prefetched);
-	return result;
+	in_window.clear();
 }
 
 GlueTablePrefetch::GlueTablePrefetch(GlueCatalog &catalog) : catalog(catalog) {
@@ -73,49 +66,38 @@ void GlueTablePrefetch::PrefetchTables(ClientContext &context, const string &sch
 		return;
 	}
 	parallelism = MinValue<idx_t>(parallelism, GLUE_MAX_LIST_TABLES_PARALLELISM);
-	vector<string> names;
-	// a statement on one database lists only that one
-	if (!cache->prefetch_state.TakeSchemasToPrefetch(schema_name, names)) {
-		return;
-	}
-	lock_guard<mutex> guard(lock);
-	// before listing: a write meanwhile makes the listing stale
-	auto listing_generation = Generation();
+	// The transaction's own state, held only while the window is chosen: the Glue calls below run without a lock, so
+	// another connection's scan does not wait for them, and this scan can be interrupted
+	auto window = cache->prefetch_state.TakeWindow(schema_name, parallelism);
 	auto &schemas = catalog.GetSchemas();
 	vector<string> to_list;
-	for (auto &name : names) {
-		if (to_list.size() >= parallelism) {
-			break;
-		}
+	vector<glue_entry_set_id_t> set_ids;
+	for (auto &name : window) {
 		auto entry = schemas.GetCachedEntry(name);
-		bool needs_listing = entry && entry->Cast<GlueSchemaEntry>().tables.NeedsListing(listing_generation);
-		if (to_list.empty() && !needs_listing) {
-			return;
+		if (!entry) {
+			continue;
 		}
-		if (needs_listing) {
+		auto set_id = entry->Cast<GlueSchemaEntry>().tables.Id();
+		// Claimed, so that a scan reaching it meanwhile waits for this listing and does not repeat it
+		if (cache->TryBeginPrefetch(set_id)) {
 			to_list.push_back(name);
+			set_ids.push_back(set_id);
 		}
 	}
-	if (to_list.size() < 2) {
+	if (to_list.empty()) {
 		return;
 	}
-	auto listed = GlueAPI::GetTablesOfDatabases(context, catalog, to_list, parallelism);
-	cache->prefetch_state.AddPrefetched(to_list, listing_generation);
-	for (idx_t i = 0; i < to_list.size(); i++) {
-		auto entry = schemas.GetCachedEntry(to_list[i]);
-		if (listed[i].fetched && entry) {
-			entry->Cast<GlueSchemaEntry>().tables.SetListing(listing_generation, std::move(listed[i].tables));
+	vector<GlueDatabaseTables> listed;
+	try {
+		listed = GlueAPI::GetTablesOfDatabases(context, catalog, to_list, parallelism);
+	} catch (...) {
+		for (auto set_id : set_ids) {
+			cache->EndPrefetch(set_id, nullptr);
 		}
+		throw;
 	}
-}
-
-void GlueTablePrefetch::EndTransaction(GlueTablePrefetchState &state) {
-	auto &schemas = catalog.GetSchemas();
-	for (auto &listing : state.Reset()) {
-		auto entry = schemas.GetCachedEntry(listing.database_name);
-		if (entry) {
-			entry->Cast<GlueSchemaEntry>().tables.DropListing(listing.generation);
-		}
+	for (idx_t i = 0; i < to_list.size(); i++) {
+		cache->EndPrefetch(set_ids[i], listed[i].fetched ? &listed[i].tables : nullptr);
 	}
 }
 

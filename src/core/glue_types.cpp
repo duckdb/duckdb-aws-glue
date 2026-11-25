@@ -1,7 +1,5 @@
 #include "core/glue_types.hpp"
 
-#include "catalog/glue_schema_entry.hpp"
-
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -259,8 +257,8 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	case LogicalTypeId::DOUBLE:
 		return "double";
 	case LogicalTypeId::DECIMAL: {
-		uint8_t width;
-		uint8_t scale;
+		uint32_t width;
+		uint32_t scale;
 		type.GetDecimalProperties(width, scale);
 		return StringUtil::Format("decimal(%d,%d)", width, scale);
 	}
@@ -392,8 +390,39 @@ Value GlueTypes::PartitionValue(ClientContext &context, const string &key, const
 	return std::move(*cast);
 }
 
+bool GlueTypes::IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to) {
+	if (from == to) {
+		return true;
+	}
+	auto rank = [](LogicalTypeId id) -> int {
+		switch (id) {
+		case LogicalTypeId::TINYINT:
+			return 1;
+		case LogicalTypeId::SMALLINT:
+			return 2;
+		case LogicalTypeId::INTEGER:
+			return 3;
+		case LogicalTypeId::BIGINT:
+			return 4;
+		default:
+			return 0;
+		}
+	};
+	if (rank(from.id()) > 0 && rank(to.id()) > 0) {
+		return rank(to.id()) > rank(from.id());
+	}
+	if (from.id() == LogicalTypeId::FLOAT && to.id() == LogicalTypeId::DOUBLE) {
+		return true;
+	}
+	if (to.id() == LogicalTypeId::VARCHAR) {
+		// everything can be read as a string
+		return true;
+	}
+	return false;
+}
+
 bool GlueTypes::CanReadPartitionTypeAs(ClientContext &context, const LogicalType &from, const LogicalType &to) {
-	if (from.IsNested() || to.IsNested() || GlueSchemaEntry::IsAllowedHiveTypeChange(from, to)) {
+	if (from.IsNested() || to.IsNested() || IsAllowedHiveTypeChange(from, to)) {
 		return true;
 	}
 	if (from.id() == LogicalTypeId::DECIMAL && to.id() == LogicalTypeId::DECIMAL) {

@@ -10,21 +10,24 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.nested_view_base;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.nested_view_base;
 
 statement ok
-CREATE TABLE my_datalake.default.nested_view_base (id BIGINT);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.nested_view_base (id BIGINT);
 
 statement ok
-INSERT INTO my_datalake.default.nested_view_base VALUES (1), (2), (3);
+INSERT INTO my_datalake.{GLUE_TEST_DB}.nested_view_base VALUES (1), (2), (3);
 
 # not attached: the error names the ATTACH to run
 statement error
@@ -54,4 +57,4 @@ SELECT sum(id) FROM my_datalake.default.fixture_nested_view;
 6
 
 statement ok
-DROP TABLE my_datalake.default.nested_view_base;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.nested_view_base;

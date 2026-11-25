@@ -2,6 +2,9 @@
 # description: A parquet scan of at most hive_footer_statistics_max_files files gives each data column the statistics of its files' footers, merged over all of them, and none when a footer can not say what the scan reads; its row count is the sum of the footers'
 # group: [scan]
 
+# Local Hive scans return no rows on Windows.
+require notwindows
+
 require parquet
 
 require glue

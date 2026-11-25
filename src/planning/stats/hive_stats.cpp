@@ -20,6 +20,8 @@
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
+#include <cmath>
+
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
@@ -116,8 +118,9 @@ static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const 
 	if (lines == 0) {
 		return optional_idx();
 	}
-	auto bytes_per_line = static_cast<double>(sample_size) / static_cast<double>(lines);
-	auto rows = static_cast<idx_t>(static_cast<double>(file_size) / bytes_per_line);
+	// rounded, not truncated: a file the sample reads whole has exactly its lines, which the division can miss by one
+	auto rows = static_cast<idx_t>(
+	    std::llround(static_cast<double>(file_size) * static_cast<double>(lines) / static_cast<double>(sample_size)));
 	rows = rows > header_lines ? rows - header_lines : 0;
 	return MaxValue<idx_t>(rows, 1);
 }
@@ -331,12 +334,16 @@ vector<shared_ptr<BaseUnionData>> HiveScanInfo::ReadFooters(ClientContext &conte
 	return std::move(reading->union_readers);
 }
 
-string HiveScanInfo::FootersCacheKey() const {
+string HiveScanInfo::FootersCacheKey(bool path_filtered) const {
 	// the footers are read with the scan's binary_as_string, which follows its schema
 	auto key = CacheKey();
 	auto binary_as_string = reader_parameters.find("binary_as_string");
 	if (binary_as_string != reader_parameters.end()) {
 		key += "\x1f" + binary_as_string->second.ToString();
+	}
+	// Different path filters read different files, whose footer bounds cannot be shared between scans.
+	if (path_filtered) {
+		key += StringUtil::Format("\x1fpath_filters\x1f%llu", scan_id);
 	}
 	return key;
 }
@@ -346,7 +353,8 @@ unique_ptr<MultiFileBindData> HiveScanInfo::FooterStatisticsBindData(ClientConte
 	if (!ReadsFooterStatistics()) {
 		return nullptr;
 	}
-	auto entry = HiveQueryCache::Get(context)->GetFooters(FootersCacheKey());
+	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
+	auto entry = HiveQueryCache::Get(context)->GetFooters(FootersCacheKey(hive_list.HasPathFilters()));
 	vector<shared_ptr<BaseUnionData>> footers;
 	{
 		annotated_lock_guard<annotated_mutex> guard(entry->lock);

@@ -10,6 +10,8 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+require-env GLUE_TEST_DB
+
 statement ok
 SET active_grammar_extensions = ['glue_hive_ddl'];
 
@@ -17,18 +19,19 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.sql_orders_drop;
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.sql_orders_drop;
 
 statement ok
-CREATE TABLE my_datalake.default.sql_orders_drop (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
 
 # INSERT registers the partitions it writes
 statement ok
-INSERT INTO my_datalake.default.sql_orders_drop VALUES
+INSERT INTO my_datalake.{GLUE_TEST_DB}.sql_orders_drop VALUES
     (1, 10.0, '2014-05-14', 'IN'),
     (2, 20.0, '2014-05-15', 'IN'),
     (3, 30.0, '2014-05-16', 'IN'),
@@ -36,7 +39,7 @@ INSERT INTO my_datalake.default.sql_orders_drop VALUES
     (5, 50.0, '2014-05-17', 'US');
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.sql_orders_drop');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_drop');
 ----
 5
 
@@ -44,10 +47,10 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.sql_orders_drop');
 # ALTER TABLE orders DROP PARTITION (dt = '2014-05-14', country = 'IN');
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_drop DROP PARTITION (dt = '2014-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop DROP PARTITION (dt = '2014-05-14', country = 'IN');
 
 query II
-SELECT dt, country FROM glue_partitions('my_datalake.default.sql_orders_drop') ORDER BY dt, country;
+SELECT dt, country FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_drop') ORDER BY dt, country;
 ----
 2014-05-15	IN
 2014-05-16	IN
@@ -56,7 +59,7 @@ SELECT dt, country FROM glue_partitions('my_datalake.default.sql_orders_drop') O
 
 # the data of a dropped partition is no longer read ...
 query I
-SELECT id FROM my_datalake.default.sql_orders_drop ORDER BY id;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.sql_orders_drop ORDER BY id;
 ----
 2
 3
@@ -65,7 +68,7 @@ SELECT id FROM my_datalake.default.sql_orders_drop ORDER BY id;
 
 # ... but its files stay in S3
 query I
-SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_orders_drop/dt=2014-05-14/country=IN/*.parquet');
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/{GLUE_TEST_DB}/sql_orders_drop/dt=2014-05-14/country=IN/*.parquet');
 ----
 1
 
@@ -73,29 +76,29 @@ SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/sql_
 # ALTER TABLE orders DROP PARTITION (...), PARTITION (...);   (comma separated)
 #---------------------------------------------------------------------------
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_drop DROP
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop DROP
     PARTITION (dt = '2014-05-15', country = 'IN'),
     PARTITION (dt = '2014-05-16', country = 'IN');
 
 query II
-SELECT dt, country FROM glue_partitions('my_datalake.default.sql_orders_drop') ORDER BY dt, country;
+SELECT dt, country FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_drop') ORDER BY dt, country;
 ----
 2014-05-16	US
 2014-05-17	US
 
 # chained form
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_drop
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop
     DROP PARTITION (dt = '2014-05-16', country = 'US')
     DROP PARTITION (dt = '2014-05-17', country = 'US');
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.sql_orders_drop');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_drop');
 ----
 0
 
 query I
-SELECT count(*) FROM my_datalake.default.sql_orders_drop;
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.sql_orders_drop;
 ----
 0
 
@@ -103,43 +106,43 @@ SELECT count(*) FROM my_datalake.default.sql_orders_drop;
 # ALTER TABLE orders DROP IF EXISTS PARTITION (...)
 #---------------------------------------------------------------------------
 statement error
-ALTER TABLE my_datalake.default.sql_orders_drop DROP PARTITION (dt = '2014-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop DROP PARTITION (dt = '2014-05-14', country = 'IN');
 ----
 does not exist
 
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_drop DROP IF EXISTS PARTITION (dt = '2014-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop DROP IF EXISTS PARTITION (dt = '2014-05-14', country = 'IN');
 
 # a statement that fails drops nothing
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_drop ADD PARTITION (dt = '2014-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop ADD PARTITION (dt = '2014-05-14', country = 'IN');
 
 statement error
-ALTER TABLE my_datalake.default.sql_orders_drop DROP
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop DROP
     PARTITION (dt = '2014-05-14', country = 'IN'),
     PARTITION (dt = '2099-01-01', country = 'IN');
 ----
 does not exist
 
 query I
-SELECT count(*) FROM glue_partitions('my_datalake.default.sql_orders_drop');
+SELECT count(*) FROM glue_partitions('my_datalake.{GLUE_TEST_DB}.sql_orders_drop');
 ----
 1
 
 # the partition spec must name every partition key (there is no syntax for dropping a range of partitions)
 statement error
-ALTER TABLE my_datalake.default.sql_orders_drop DROP PARTITION (dt = '2014-05-14');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop DROP PARTITION (dt = '2014-05-14');
 ----
 
 # a dropped partition can be added again, its files are then read again
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_drop DROP PARTITION (dt = '2014-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop DROP PARTITION (dt = '2014-05-14', country = 'IN');
 
 statement ok
-ALTER TABLE my_datalake.default.sql_orders_drop ADD PARTITION (dt = '2014-05-14', country = 'IN');
+ALTER TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop ADD PARTITION (dt = '2014-05-14', country = 'IN');
 
 query I
-SELECT id FROM my_datalake.default.sql_orders_drop;
+SELECT id FROM my_datalake.{GLUE_TEST_DB}.sql_orders_drop;
 ----
 1
 
@@ -147,13 +150,14 @@ statement ok
 attach '{GLUE_CATALOG_ID}' as verify_datalake (
     TYPE glue,
     ENDPOINT '{GLUE_ENDPOINT}',
-    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
 );
 
 query II
-SELECT dt, country FROM glue_partitions('verify_datalake.default.sql_orders_drop');
+SELECT dt, country FROM glue_partitions('verify_datalake.{GLUE_TEST_DB}.sql_orders_drop');
 ----
 2014-05-14	IN
 
 statement ok
-DROP TABLE my_datalake.default.sql_orders_drop;
+DROP TABLE my_datalake.{GLUE_TEST_DB}.sql_orders_drop;
