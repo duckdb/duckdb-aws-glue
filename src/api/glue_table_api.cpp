@@ -16,7 +16,9 @@
 #include <aws/glue/model/SerDeInfo.h>
 #include <aws/glue/model/UpdateTableRequest.h>
 
+#include <chrono>
 #include <functional>
+#include <thread>
 
 namespace duckdb {
 
@@ -258,7 +260,8 @@ static Aws::Glue::Model::TableInput ToViewTableInput(const GlueViewInfo &view) {
 
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
                             const GlueTableInfo &bound,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify);
+                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify,
+                            bool skip_archive = false);
 
 GlueCreateOutcome GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
@@ -297,10 +300,10 @@ void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const Glu
 }
 
 //! UpdateTable replaces the whole definition: build the TableInput from the Table 'bound' was fetched as, let
-//! 'modify' change it, and send it back
+//! 'modify' change it, and send it back. With 'skip_archive' Glue keeps no version of the definition it replaces.
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
                             const GlueTableInfo &bound,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
+                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify, bool skip_archive) {
 	auto &table = FetchedTable(bound);
 
 	Aws::Glue::Model::TableInput table_input;
@@ -348,6 +351,9 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 	// Glue refuses the update if the table changed since it was fetched, instead of overwriting that change
 	if (table.VersionIdHasBeenSet()) {
 		update_request.SetVersionId(table.GetVersionId());
+	}
+	if (skip_archive) {
+		update_request.SetSkipArchive(true);
 	}
 	auto update_outcome = client->UpdateTable(update_request);
 	if (!update_outcome.IsSuccess()) {
@@ -414,7 +420,84 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetLocation(location);
 		table_input.SetStorageDescriptor(storage_descriptor);
+		// the statistics count the files at the old location
+		auto parameters = ToStdMap(table_input.GetParameters());
+		GlueBasicStatistics::RemoveFrom(parameters);
+		table_input.SetParameters(ToAwsMap(parameters));
 	});
+}
+
+//! Fetch the table and send it back with the parameters 'modify' changes (nothing is sent when it returns false);
+//! fetched again when another client changed the table in between. False when every attempt lost to such a change.
+//! Keeps no table version: Glue allows 100,000 per table, and one per INSERT would use them up, after which every
+//! UpdateTable of the table fails, the DDL of other engines included.
+static bool UpdateTableParametersWithRetry(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                           const string &table_name,
+                                           const std::function<bool(unordered_map<string, string> &)> &modify) {
+	constexpr idx_t MAX_ATTEMPTS = 4;
+	for (idx_t attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+		if (attempt > 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(100 << (2 * (attempt - 1))));
+		}
+		GlueTableInfo current;
+		if (!GlueAPI::GetTable(context, catalog, database_name, table_name, current)) {
+			return true;
+		}
+		auto parameters = ToStdMap(FetchedTable(current).GetParameters());
+		if (!modify(parameters)) {
+			return true;
+		}
+		GlueCallScope call_scope(context);
+		auto client = GlueAPI::GetClient(context, catalog);
+		try {
+			UpdateGlueTable(
+			    client, catalog, current,
+			    [&](Aws::Glue::Model::TableInput &table_input) { table_input.SetParameters(ToAwsMap(parameters)); },
+			    true);
+			return true;
+		} catch (TransactionException &) {
+			// another client changed the table since it was fetched
+		}
+	}
+	return false;
+}
+
+void GlueAPI::AddTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                 const string &table_name, const GlueBasicStatistics &statistics) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdateTable");
+	auto added = UpdateTableParametersWithRetry(context, catalog, database_name, table_name,
+	                                            [&](unordered_map<string, string> &parameters) {
+		                                            GlueBasicStatistics total;
+		                                            if (!GlueBasicStatistics::TryRead(parameters, total)) {
+			                                            // unknown statistics stay unknown
+			                                            return false;
+		                                            }
+		                                            if (total.TryAdd(statistics)) {
+			                                            total.WriteTo(parameters);
+		                                            } else {
+			                                            // a count past 64 bits is not one
+			                                            GlueBasicStatistics::RemoveFrom(parameters);
+		                                            }
+		                                            return true;
+	                                            });
+	if (!added) {
+		RemoveTableStatistics(context, catalog, database_name, table_name);
+	}
+}
+
+void GlueAPI::RemoveTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                    const string &table_name) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdateTable");
+	auto removed = UpdateTableParametersWithRetry(
+	    context, catalog, database_name, table_name,
+	    [&](unordered_map<string, string> &parameters) { return GlueBasicStatistics::RemoveFrom(parameters); });
+	if (!removed) {
+		throw TransactionException("Glue table \"%s.%s\" kept being changed by another client, so its numRows, "
+		                           "numFiles and totalSize could not be removed",
+		                           database_name, table_name);
+	}
 }
 
 void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,

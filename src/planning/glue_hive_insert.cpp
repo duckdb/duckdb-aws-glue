@@ -9,6 +9,7 @@
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -33,9 +34,11 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
+#include "core/helpers.hpp"
 #include "core/hive_location.hpp"
 #include "execution/glue_written_files.hpp"
 #include "execution/hive_copy.hpp"
+#include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
@@ -598,7 +601,12 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 
 	// Glue catalogs have no catalog version, so every execution plans again and gets its own write id
 	auto write_id = UUID::ToString(UUIDv7::GenerateRandomUUID());
-	auto return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST);
+	// only some writers (parquet) report the rows and size of each file
+	auto collect_statistics = copy_function->function.copy_to_get_written_statistics != nullptr;
+	auto return_type = collect_statistics ? CopyFunctionReturnType::WRITTEN_FILE_STATISTICS
+	                                      : CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST;
+	auto return_types = GetCopyFunctionReturnLogicalTypes(return_type);
+	insert.is_ctas = create_info != nullptr;
 	auto &copy = planner
 	                 .Make<GlueHiveCopy>(std::move(return_types), copy_function->function, std::move(function_data),
 	                                     op.estimated_cardinality, insert.catalog, create_schema,
@@ -634,7 +642,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	}
 	copy.file_extension = bind_input.file_extension;
 	copy.overwrite_mode = CopyOverwriteMode::COPY_OVERWRITE_OR_IGNORE;
-	copy.return_type = CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST;
+	copy.return_type = return_type;
 	copy.names = copy_names;
 	copy.expected_types = copy_types;
 	copy.children.push_back(*source);
@@ -642,6 +650,25 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	insert.planned_locations = std::move(planned_locations);
 	insert.partition_directories = std::move(partition_directories);
 	insert.write_id = std::move(write_id);
+	insert.collect_statistics = collect_statistics;
+	if (collect_statistics) {
+		auto names = GetCopyFunctionReturnNames(return_type);
+		auto column = [&](const string &name) {
+			for (idx_t i = 0; i < names.size(); i++) {
+				if (names[i].GetIdentifierName() == name) {
+					return i;
+				}
+			}
+			throw InternalException("The COPY returning written file statistics has no '%s' column", name);
+		};
+		insert.filename_column = column("filename");
+		insert.count_column = column("count");
+		insert.file_size_column = column("file_size_bytes");
+	}
+	Value max_listings;
+	if (context.TryGetCurrentSetting("glue_write_statistics_max_listings", max_listings) && !max_listings.IsNull()) {
+		insert.max_partition_listings = max_listings.GetValue<idx_t>();
+	}
 	insert.children.push_back(copy);
 }
 
@@ -738,6 +765,8 @@ struct GlueHiveInsertGlobalState : public GlobalSinkState {
 	mutex lock;
 	idx_t insert_count = 0;
 	vector<string> written_files;
+	//! With collect_statistics: the rows and size of each of 'written_files'
+	vector<GlueBasicStatistics> file_statistics;
 };
 
 unique_ptr<GlobalSinkState> GlueHiveInsert::GetGlobalSinkState(ClientContext &context) const {
@@ -747,6 +776,26 @@ unique_ptr<GlobalSinkState> GlueHiveInsert::GetGlobalSinkState(ClientContext &co
 SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
 	lock_guard<mutex> guard(state.lock);
+	if (collect_statistics) {
+		// The COPY reports one row per file written
+		auto files = chunk.data[filename_column].Values<string_t>();
+		auto rows = chunk.data[count_column].Values<uint64_t>();
+		auto sizes = chunk.data[file_size_column].Values<uint64_t>();
+		for (idx_t r = 0; r < chunk.size(); r++) {
+			auto file = files[r];
+			if (!file.IsValid()) {
+				continue;
+			}
+			GlueBasicStatistics statistics;
+			statistics.num_rows = rows[r].GetValue();
+			statistics.num_files = 1;
+			statistics.total_size = sizes[r].GetValue();
+			state.insert_count += statistics.num_rows;
+			state.written_files.push_back(file.GetValue().GetString());
+			state.file_statistics.push_back(statistics);
+		}
+		return SinkResultType::NEED_MORE_INPUT;
+	}
 	// The COPY reports (rows written, files written)
 	for (idx_t r = 0; r < chunk.size(); r++) {
 		state.insert_count += chunk.GetValue(0, r).GetValue<idx_t>();
@@ -819,6 +868,9 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		transaction.CompleteHiveWrite(write_id);
 		RecordWrittenFiles(context, state.written_files);
+		if (collect_statistics && table_info.partition_keys.empty() && !state.file_statistics.empty()) {
+			AddTableStatistics(context, state.file_statistics);
+		}
 		return SinkFinalizeType::READY;
 	}
 
@@ -860,6 +912,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	for (auto &entry : partitions) {
 		to_register.push_back(entry.second);
 	}
+	vector<GluePartitionInput> already_existing;
 	try {
 		// an INSERT registers against the table definition it bound; a CREATE TABLE AS planned from the definition
 		// it was about to create, so the table is fetched as created
@@ -875,7 +928,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		// a cancel or timeout during registration would fail the statement with its rows in the table: undo the write
 		// instead. BlockingInterruptCheck: InterruptCheck only looks at the deadline every 256 calls
 		context.BlockingInterruptCheck();
-		auto already_existing = GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
+		already_existing = GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
 		CheckExistingPartitionLocations(context, already_existing);
 		context.BlockingInterruptCheck();
 	} catch (std::exception &ex) {
@@ -904,7 +957,133 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	}
 	transaction.CompleteHiveWrite(write_id);
 	RecordWrittenFiles(context, state.written_files);
+	if (collect_statistics) {
+		AddPartitionStatistics(context, state, to_register, already_existing);
+	}
 	return SinkFinalizeType::READY;
+}
+
+void GlueHiveInsert::AddTableStatistics(ClientContext &context, const vector<GlueBasicStatistics> &files) const {
+	GlueBasicStatistics written;
+	for (auto &file : files) {
+		if (!written.TryAdd(file)) {
+			// a count past 64 bits is not one
+			RemoveStatistics(context, {});
+			return;
+		}
+	}
+	GlueBasicStatistics bound;
+	// a table bound without statistics has none to add to
+	if (!is_ctas && !GlueBasicStatistics::TryRead(table_info.parameters, bound)) {
+		return;
+	}
+	try {
+		GlueAPI::AddTableStatistics(context, catalog, table_info.schema_name, table_info.name, written);
+	} catch (std::exception &ex) {
+		DUCKDB_LOG_WARNING(context, "Could not add the statistics of the files written to Hive table '%s.%s': %s",
+		                   table_info.schema_name, table_info.name, ErrorData(ex).RawMessage());
+		RemoveStatistics(context, {});
+	}
+}
+
+void GlueHiveInsert::CheckNewPartitionDirectories(ClientContext &context, vector<GluePartitionStatistics> &partitions,
+                                                  const unordered_map<string, vector<string>> &written) const {
+	// a directory CREATE TABLE AS writes to held no data files
+	if (is_ctas) {
+		return;
+	}
+	vector<reference<GluePartitionStatistics>> created;
+	for (auto &partition : partitions) {
+		if (partition.created && partition.statistics) {
+			created.push_back(partition);
+		}
+	}
+	if (created.size() > max_partition_listings) {
+		for (auto &partition : created) {
+			partition.get().statistics.reset();
+		}
+		return;
+	}
+	// the statement's listing, not one kept for the connection (glue_cache_listings), which may miss files added since;
+	// one listed earlier in this statement can only miss the files this write added, which do not count
+	auto cache = HiveQueryCache::Get(context);
+	RunInParallel(context, created.size(), [&](idx_t i) {
+		auto &partition = created[i].get();
+		bool other_files = true;
+		try {
+			if (!LocationHasGlob(partition.location)) {
+				vector<OpenFileInfo> listed;
+				cache->ReadDirectoryListing(context, partition.location, false,
+				                            [&](MultiFileList &listing) { listed = listing.GetAllFiles(); });
+				other_files = HiveLocation::HasOtherFiles(
+				    HiveLocation::DataFiles(std::move(listed), partition.location), written.at(partition.location));
+			}
+		} catch (std::exception &) {
+			// not known, so neither are the statistics
+		}
+		if (other_files) {
+			partition.statistics.reset();
+		}
+	});
+}
+
+void GlueHiveInsert::AddPartitionStatistics(ClientContext &context, const GlueHiveInsertGlobalState &state,
+                                            const vector<GluePartitionInput> &registered,
+                                            const vector<GluePartitionInput> &already_existing) const {
+	unordered_map<string, vector<string>> directory_files;
+	unordered_map<string, optional<GlueBasicStatistics>> directory_statistics;
+	for (idx_t i = 0; i < state.file_statistics.size(); i++) {
+		auto &file = state.written_files[i];
+		auto directory = file.substr(0, file.find_last_of('/'));
+		directory_files[directory].push_back(file);
+		auto entry = directory_statistics.emplace(directory, GlueBasicStatistics()).first;
+		if (entry->second && !entry->second->TryAdd(state.file_statistics[i])) {
+			// a count past 64 bits is not one
+			entry->second.reset();
+		}
+	}
+	set<vector<string>> existed;
+	for (auto &partition : already_existing) {
+		existed.insert(partition.values);
+	}
+	vector<GluePartitionStatistics> partitions;
+	vector<vector<string>> touched;
+	for (auto &partition : registered) {
+		GluePartitionStatistics entry;
+		entry.values = partition.values;
+		entry.location = partition.location;
+		entry.created = existed.find(partition.values) == existed.end();
+		auto statistics = directory_statistics.find(partition.location);
+		if (statistics != directory_statistics.end()) {
+			entry.statistics = statistics->second;
+		}
+		partitions.push_back(std::move(entry));
+		touched.push_back(partition.values);
+	}
+	try {
+		CheckNewPartitionDirectories(context, partitions, directory_files);
+		GlueAPI::AddPartitionStatistics(context, catalog, table_info.schema_name, table_info.name, partitions);
+	} catch (std::exception &ex) {
+		DUCKDB_LOG_WARNING(context, "Could not add the statistics of the files written to Hive table '%s.%s': %s",
+		                   table_info.schema_name, table_info.name, ErrorData(ex).RawMessage());
+		RemoveStatistics(context, touched);
+	}
+}
+
+void GlueHiveInsert::RemoveStatistics(ClientContext &context, const vector<vector<string>> &partitions) const {
+	auto &database_name = table_info.schema_name;
+	auto &table_name = table_info.name;
+	try {
+		if (table_info.partition_keys.empty()) {
+			GlueAPI::RemoveTableStatistics(context, catalog, database_name, table_name);
+		} else {
+			GlueAPI::RemovePartitionStatistics(context, catalog, database_name, table_name, partitions);
+		}
+	} catch (std::exception &ex) {
+		DUCKDB_LOG_WARNING(context,
+		                   "Could not remove the statistics of Hive table '%s.%s', which miss the files written: %s",
+		                   database_name, table_name, ErrorData(ex).RawMessage());
+	}
 }
 
 SourceResultType GlueHiveInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,

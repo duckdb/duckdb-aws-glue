@@ -110,6 +110,14 @@ public:
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
 	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
 	                             const string &location);
+	//! Add 'statistics' to the numRows, numFiles and totalSize parameters of the table, as Glue has them now. A table
+	//! without all three set to a count keeps them as they are. When every attempt loses to another client's update,
+	//! the three are removed instead: a count that misses these files must not stay.
+	static void AddTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                               const string &table_name, const GlueBasicStatistics &statistics);
+	//! Remove numRows, numFiles and totalSize from the table (UpdateTable, retried on another client's update)
+	static void RemoveTableStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                  const string &table_name);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
 	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
@@ -138,6 +146,15 @@ public:
 	static map<vector<string>, string> PartitionLocations(ClientContext &context, GlueCatalog &catalog,
 	                                                      const string &database_name, const string &table_name,
 	                                                      const vector<vector<string>> &partitions);
+	//! Record the statistics of the files written to each of 'partitions' in one BatchGetPartition +
+	//! BatchUpdatePartition pass: a created partition gets them, an existing one with all three set to a count gets
+	//! them added, an existing one without keeps its parameters. They are removed where they can not be exact: no
+	//! statistics given, a sum past 64 bits, or a partition registered at another location than the files.
+	static void AddPartitionStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                   const string &table_name, const vector<GluePartitionStatistics> &partitions);
+	//! Remove numRows, numFiles and totalSize from those of 'partitions' that have them (BatchUpdatePartition)
+	static void RemovePartitionStatistics(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                      const string &table_name, const vector<vector<string>> &partitions);
 	//! Change the values of a partition, keeping its location and everything else (UpdatePartition). 'partition'
 	//! is the partition as fetched; the caller has checked that no partition has 'new_values'. Returns the
 	//! location, which the rename keeps.
@@ -151,8 +168,9 @@ public:
 	//! stops the requests not yet sent and is kept on its table; only an interrupt is thrown
 	static void GetPartitionsOfTables(ClientContext &context, GlueCatalog &catalog, vector<GluePartitionLoad> &tables);
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
-	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
-	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.
+	//! as fetched, with each partition's location, and no parameters. Partitions that already
+	//! exist are skipped and returned, wherever they are registered; throws for the first partition Glue refuses, after
+	//! retrying the errors that may pass.
 	static vector<GluePartitionInput> BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
 	                                                        const GlueTableInfo &table,
 	                                                        const vector<GluePartitionInput> &partitions);

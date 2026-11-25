@@ -13,6 +13,7 @@ namespace duckdb {
 class GlueCatalog;
 class GlueSchemaEntry;
 class GlueTable;
+struct GlueHiveInsertGlobalState;
 
 //! Writes rows into a Hive table registered in Glue: a COPY into the table location (one <key=value> directory level
 //! per partition key, or the location of an existing partition), then the new partition directories are registered in
@@ -65,6 +66,22 @@ private:
 	//! Throws when a partition registration skipped as existing is registered at another location than its files
 	void CheckExistingPartitionLocations(ClientContext &context,
 	                                     const vector<GluePartitionInput> &already_existing) const;
+	//! Adds the statistics of the written files to the table's. A sum past 64 bits, or a failure, removes them
+	//! instead: the rows are in the table by now, so a failure is logged.
+	void AddTableStatistics(ClientContext &context, const vector<GlueBasicStatistics> &files) const;
+	//! Records the statistics of the files written to each of the 'registered' partitions, which were created unless
+	//! 'already_existing' (GlueAPI::AddPartitionStatistics). A failure is logged, and removes them from those
+	//! partitions.
+	void AddPartitionStatistics(ClientContext &context, const GlueHiveInsertGlobalState &state,
+	                            const vector<GluePartitionInput> &registered,
+	                            const vector<GluePartitionInput> &already_existing) const;
+	//! An INSERT's created partitions may lie in a directory a dropped partition left its files in: lists each
+	//! (up to max_partition_listings) and unsets the statistics of those holding other data files, or of all of them
+	//! when there are more. 'written' are the files written, by directory.
+	void CheckNewPartitionDirectories(ClientContext &context, vector<GluePartitionStatistics> &partitions,
+	                                  const unordered_map<string, vector<string>> &written) const;
+	//! Removes numRows, numFiles and totalSize from the table, or from 'partitions'; a failure is logged
+	void RemoveStatistics(ClientContext &context, const vector<vector<string>> &partitions) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).
@@ -77,6 +94,17 @@ public:
 	unordered_map<string, vector<string>> partition_directories;
 	//! Names the files of this write, and its entry in the Glue transaction
 	string write_id;
+	//! Whether the copy reports the rows and size of each file it wrote (parquet), kept as numRows, numFiles and
+	//! totalSize
+	bool collect_statistics = false;
+	//! CREATE TABLE AS, whose table and partitions start out without data files
+	bool is_ctas = false;
+	//! glue_write_statistics_max_listings when planned
+	idx_t max_partition_listings = 100;
+	//! With collect_statistics: the columns of the copy's filename, count and file_size_bytes
+	idx_t filename_column = 0;
+	idx_t count_column = 0;
+	idx_t file_size_column = 0;
 };
 
 } // namespace duckdb

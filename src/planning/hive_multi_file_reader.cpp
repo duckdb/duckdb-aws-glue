@@ -1,4 +1,5 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "core/helpers.hpp"
 #include "planning/hive_partition_pruning.hpp"
 #include "core/hive_location.hpp"
 #include "planning/hive_query_cache.hpp"
@@ -21,7 +22,6 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/type_visitor.hpp"
-#include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
@@ -302,41 +302,14 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 	if (directory.empty()) {
 		return;
 	}
-	auto prefix = directory + "/";
 	vector<OpenFileInfo> listed;
 	HiveQueryCache::Get(context)->ReadDirectoryListing(context, directory, cached,
 	                                                   [&](MultiFileList &listing) { listed = listing.GetAllFiles(); });
-	for (auto &file : listed) {
-		if (!IsDataFile(file, prefix)) {
-			continue;
-		}
+	for (auto &file : HiveLocation::DataFiles(std::move(listed), directory)) {
 		CarryFileSecret(file, file_secret);
 		files.push_back(std::move(file));
 	}
 }
-
-//! Lists the data files of one partition location
-class ListPartitionTask : public BaseExecutorTask {
-public:
-	ListPartitionTask(TaskExecutor &executor, ClientContext &context, bool cached, const string &location,
-	                  vector<OpenFileInfo> &files)
-	    : BaseExecutorTask(executor), context(context), cached(cached), location(location), files(files) {
-	}
-
-	//! without the file secret: AddFile carries it
-	void ExecuteTask() override {
-		ListDataFiles(context, cached, location, string(), files);
-	}
-	string TaskType() const override {
-		return "ListPartitionTask";
-	}
-
-private:
-	ClientContext &context;
-	bool cached;
-	const string &location;
-	vector<OpenFileInfo> &files;
-};
 
 //===--------------------------------------------------------------------===//
 // HiveMultiFileList
@@ -580,14 +553,9 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 	// first error stops the listings not yet started and is thrown
 	vector<vector<OpenFileInfo>> listed(locations.size());
 	auto cached = CacheListings(client_context, *scan_info);
-	// as tasks on DuckDB's threads
-	TaskExecutor executor(client_context);
-	vector<unique_ptr<BaseExecutorTask>> tasks;
-	for (idx_t i = 0; i < locations.size(); i++) {
-		tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i], listed[i]));
-	}
-	executor.ScheduleTasks(std::move(tasks));
-	executor.WorkOnTasks();
+	// without the file secret: AddFile carries it
+	RunInParallel(client_context, locations.size(),
+	              [&](idx_t i) { ListDataFiles(client_context, cached, locations[i], string(), listed[i]); });
 	PathFilterEvaluator path_evaluator(client_context, path_filters);
 	BuildPartitionLocations();
 	unordered_set<idx_t> reading(partition_indexes.begin(), partition_indexes.end());

@@ -2,22 +2,25 @@
 assigns to it: GetTables on fault_access_denied* / fault_invalid_input* fails outright, while CreateDatabase and
 CreateTable of fault_already_exists* are forwarded (so the object does exist afterwards) and then answered with
 AlreadyExistsException, as Glue answers a client that lost the race to create the same object. What the other client
-created differs from what was asked for, so a test can tell the winner from a replacement: the database carries
-the description 'created by another client', a table one more column 'created_by_another_client', a view reads
-'SELECT 2 AS one'. An UpdateTable on a fault_concurrent_update* database is preceded by another client's update,
-which sets the table parameter 'changed_by_another_client', and is then refused with ConcurrentModificationException
-if its VersionId is not the table's current one, as Glue does (moto ignores VersionId); without a VersionId it is
-forwarded and overwrites the other client's change. A BatchCreatePartition on a fault_partition_elsewhere* database is
-preceded by another client's registration of the same partitions at '<location>_by_another_client', so that each is
-refused with AlreadyExistsException while its files are not where Glue points. A BatchCreatePartition on a
-fault_noncanonical_values* database registers each value with a leading '0', as another engine may spell an integer
-('01' for 1). A BatchDeletePartition on a fault_partition_dropped* database is preceded by another client's drop of
-the same partitions, so that Glue reports each as EntityNotFoundException. A BatchCreatePartition on a
-fault_slow_partitions* database is forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
-partitions are registered; one on a fault_recreated_during_write* database finds the table dropped and created again
-by another client, and then fails with InternalServiceException, so the write that registers them fails with a table
-that is no longer its own. A request on a fault_throttled* database is answered with ThrottlingException on its first
-attempt (the SDK's amz-sdk-request header) and forwarded when the SDK retries it."""
+created differs from what was asked for, so a test can tell the winner from a replacement: the database carries the
+description 'created by another client', a table one more column 'created_by_another_client', a view reads 'SELECT 2
+AS one'. An UpdateTable on a fault_concurrent_update* database is preceded by another client's update, which sets the
+table parameter 'changed_by_another_client', and is then refused with ConcurrentModificationException if its VersionId
+is not the table's current one, as Glue does (moto ignores VersionId); without a VersionId it is forwarded and
+overwrites the other client's change. On a fault_statistics_race* database only an UpdateTable that sets numRows to a
+count races so, one that removes it is forwarded. On a fault_archive_counted* database an UpdateTable without
+SkipArchive is refused with InvalidInputException, so a test tells which updates keep a table version. A
+BatchCreatePartition on a fault_partition_elsewhere* database is preceded by another client's registration of the same
+partitions at '<location>_by_another_client', so that each is refused with AlreadyExistsException while its files are
+not where Glue points. A BatchCreatePartition on a fault_noncanonical_values* database registers each value with a
+leading '0', as another engine may spell an integer ('01' for 1). A BatchDeletePartition on a fault_partition_dropped*
+database is preceded by another client's drop of the same partitions, so that Glue reports each as
+EntityNotFoundException. A BatchCreatePartition on a fault_slow_partitions* database is forwarded only after
+SLOW_PARTITIONS_SECONDS, so a statement timeout lands while partitions are registered; one on a
+fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
+with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
+request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
+amz-sdk-request header) and forwarded when the SDK retries it."""
 
 import argparse
 import http.client
@@ -36,6 +39,10 @@ DENIED_TABLE_PREFIX = "fault_denied_"
 RACED_CREATE_PREFIX = "fault_already_exists"
 # UpdateTable on a database with this prefix races another client's update of the same table
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
+# UpdateTable on a database with this prefix races another client's update when it sets numRows to a count
+RACED_STATISTICS_PREFIX = "fault_statistics_race"
+# UpdateTable without SkipArchive on a database with this prefix is refused
+ARCHIVE_COUNTED_PREFIX = "fault_archive_counted"
 # the first attempt of a request on a database with this prefix is throttled, its retries are not
 THROTTLED_PREFIX = "fault_throttled"
 # BatchCreatePartition on a database with this prefix is forwarded after a delay
@@ -107,8 +114,17 @@ def is_throttled(database, sdk_request):
     return database.startswith(THROTTLED_PREFIX) and "attempt=1" in attempts
 
 
-def is_raced_update(target, database):
-    return target == "AWSGlue.UpdateTable" and database.startswith(RACED_UPDATE_PREFIX)
+def is_raced_update(target, database, request):
+    if target != "AWSGlue.UpdateTable":
+        return False
+    if database.startswith(RACED_STATISTICS_PREFIX):
+        return request.get("TableInput", {}).get("Parameters", {}).get("numRows", "").isdigit()
+    return database.startswith(RACED_UPDATE_PREFIX)
+
+
+def keeps_table_version(target, database, request):
+    return (target == "AWSGlue.UpdateTable" and database.startswith(ARCHIVE_COUNTED_PREFIX)
+            and not request.get("SkipArchive", False))
 
 
 def is_slow_partitions(target, database):
@@ -166,6 +182,8 @@ class Handler(BaseHTTPRequestHandler):
             error = "AccessDeniedException"
         if not error and is_throttled(database, self.headers.get("amz-sdk-request")):
             error = "ThrottlingException"
+        if not error and keeps_table_version(target, database, request):
+            error = "InvalidInputException"
         if error:
             self.reply_error(error)
             return
@@ -175,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
             self.recreate_as_other_client(database, request["TableName"])
             self.reply_error("InternalServiceException")
             return
-        if is_raced_update(target, database):
+        if is_raced_update(target, database, request):
             current_version = self.update_as_other_client(database, request["TableInput"]["Name"])
             if "VersionId" in request and request["VersionId"] != current_version:
                 self.reply_error("ConcurrentModificationException")

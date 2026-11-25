@@ -26,7 +26,9 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 
 #include "core/glue_types.hpp"
+#include "core/hive_location.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -541,6 +543,31 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
 	D_ASSERT(table.schema_name == database_info.name);
+	// writes keep these current; a partitioned table keeps them per partition
+	auto has_statistics_parameter =
+	    table.parameters.count("numRows") || table.parameters.count("numFiles") || table.parameters.count("totalSize");
+	if (table.file_format == HiveFileFormat::PARQUET && table.partition_keys.empty() && !has_statistics_parameter) {
+		// CREATE TABLE AS has checked its location holds no data files; files a dropped table left would not be
+		// counted
+		auto is_ctas = resolved_table_info != nullptr;
+		auto location_empty = is_ctas;
+		if (!is_ctas) {
+			try {
+				location_empty = !HiveLocation::HasDataFiles(FileSystem::GetFileSystem(context), table.location);
+			} catch (std::exception &ex) {
+				ErrorData error(ex);
+				if (error.Type() == ExceptionType::INTERRUPT) {
+					error.Throw();
+				}
+				// e.g. no s3:ListBucket, or no bucket yet: the table is created without them
+				DUCKDB_LOG_WARNING(context, "Could not list the location '%s' of Hive table '%s.%s': %s",
+				                   table.location, table.schema_name, table.name, error.RawMessage());
+			}
+		}
+		if (location_empty) {
+			GlueBasicStatistics().WriteTo(table.parameters);
+		}
+	}
 	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {
 		// another client created the table since the lookup above: take its entry
 		auto raced = tables.GetEntry(context, lookup);

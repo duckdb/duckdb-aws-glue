@@ -37,4 +37,16 @@ bool LocationHasGlob(const string &location);
 //! Every file below a location, recursively; empty when there are none. Check LocationHasGlob first
 unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location);
 
+struct HiveLocation {
+	//! The data files (IsDataFile) among the files 'listed' below 'location'
+	static vector<OpenFileInfo> DataFiles(vector<OpenFileInfo> listed, const string &location);
+	//! The data files below a location, recursively. Check LocationHasGlob first
+	static vector<OpenFileInfo> ListDataFiles(FileSystem &fs, const string &location);
+	//! Whether 'data_files' hold one that is not among the files 'except' names
+	static bool HasOtherFiles(const vector<OpenFileInfo> &data_files, const vector<string> &except);
+	//! Whether a location holds data files other than the files 'except' names; true for a location with a glob
+	//! character, which can not be listed
+	static bool HasDataFiles(FileSystem &fs, const string &location, const vector<string> &except = {});
+};
+
 } // namespace duckdb

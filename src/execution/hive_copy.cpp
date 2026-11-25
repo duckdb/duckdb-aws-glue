@@ -66,12 +66,8 @@ static void ClearLocation(ClientContext &context, GlueSchemaEntry &schema, const
 		                            table_info.schema_name, table_info.name, location);
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto listing = ListLocation(fs, location);
 	vector<string> data_files;
-	for (auto &file : listing->Files()) {
-		if (!IsDataFile(file, location + "/")) {
-			continue;
-		}
+	for (auto &file : HiveLocation::ListDataFiles(fs, location)) {
 		if (!overwrite) {
 			throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
 			                            "already holds files (e.g. '%s'), such as those of a dropped table, which "

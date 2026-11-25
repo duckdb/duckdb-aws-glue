@@ -8,6 +8,8 @@
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/operator/add.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
@@ -438,6 +440,56 @@ optional_idx GluePartitionInfo::FindColumnTypeMismatch(const vector<GlueColumn> 
 		}
 	}
 	return optional_idx();
+}
+
+static constexpr const char *NUM_ROWS_PARAMETER = "numRows";
+static constexpr const char *NUM_FILES_PARAMETER = "numFiles";
+static constexpr const char *TOTAL_SIZE_PARAMETER = "totalSize";
+
+static bool TryGetCount(const unordered_map<string, string> &parameters, const char *key, idx_t &result) {
+	auto entry = parameters.find(key);
+	if (entry == parameters.end()) {
+		return false;
+	}
+	// -1 is the usual spelling of unknown, and does not cast
+	uint64_t count;
+	if (!TryCast::Operation(string_t(entry->second), count, true)) {
+		return false;
+	}
+	result = count;
+	return true;
+}
+
+bool GlueBasicStatistics::TryAdd(const GlueBasicStatistics &other) {
+	uint64_t rows, files, size;
+	if (!TryAddOperator::Operation(num_rows, other.num_rows, rows) ||
+	    !TryAddOperator::Operation(num_files, other.num_files, files) ||
+	    !TryAddOperator::Operation(total_size, other.total_size, size)) {
+		return false;
+	}
+	num_rows = rows;
+	num_files = files;
+	total_size = size;
+	return true;
+}
+
+bool GlueBasicStatistics::TryRead(const unordered_map<string, string> &parameters, GlueBasicStatistics &result) {
+	return TryGetCount(parameters, NUM_ROWS_PARAMETER, result.num_rows) &&
+	       TryGetCount(parameters, NUM_FILES_PARAMETER, result.num_files) &&
+	       TryGetCount(parameters, TOTAL_SIZE_PARAMETER, result.total_size);
+}
+
+void GlueBasicStatistics::WriteTo(unordered_map<string, string> &parameters) const {
+	parameters[NUM_ROWS_PARAMETER] = to_string(num_rows);
+	parameters[NUM_FILES_PARAMETER] = to_string(num_files);
+	parameters[TOTAL_SIZE_PARAMETER] = to_string(total_size);
+}
+
+bool GlueBasicStatistics::RemoveFrom(unordered_map<string, string> &parameters) {
+	auto removed = parameters.erase(NUM_ROWS_PARAMETER);
+	removed += parameters.erase(NUM_FILES_PARAMETER);
+	removed += parameters.erase(TOTAL_SIZE_PARAMETER);
+	return removed > 0;
 }
 
 } // namespace duckdb

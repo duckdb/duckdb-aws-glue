@@ -1,0 +1,89 @@
+# name: test/sql/hive/dml/insert/insert_statistics_race.test
+# description: when every attempt to add an INSERT's files to numRows, numFiles and totalSize loses to another client's update of the table, the three are removed instead of left missing those files; recording them keeps no table version
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fault proxy precedes each UpdateTable on a fault_statistics_race* database that sets numRows to a count with
+# another client's update of the table, so it is refused with ConcurrentModificationException; one that removes
+# numRows is forwarded
+statement ok
+attach '{GLUE_CATALOG_ID}' as raced_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_statistics_race CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_statistics_race;
+
+statement ok
+CREATE TABLE my_datalake.fault_statistics_race.t (id INTEGER);
+
+query III
+SELECT parameters['numRows'], parameters['numFiles'], parameters['totalSize']
+FROM glue_get_table_response('my_datalake.fault_statistics_race.t');
+----
+0	0	0
+
+statement ok
+INSERT INTO raced_dl.fault_statistics_race.t VALUES (1), (2), (3);
+
+query I
+SELECT count(*) FROM my_datalake.fault_statistics_race.t;
+----
+3
+
+# unknown instead of 0, and the other client's change stays
+query IIII
+SELECT parameters['numRows'], parameters['numFiles'], parameters['totalSize'], parameters['changed_by_another_client']
+FROM glue_get_table_response('my_datalake.fault_statistics_race.t');
+----
+NULL	NULL	NULL	true
+
+statement ok
+DROP SCHEMA my_datalake.fault_statistics_race CASCADE;
+
+# the fault proxy refuses an UpdateTable without SkipArchive on a fault_archive_counted* database: recording the
+# statistics keeps no table version, of which Glue allows 100,000 per table, while DDL still keeps one
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_archive_counted CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_archive_counted;
+
+statement ok
+CREATE TABLE my_datalake.fault_archive_counted.t (id INTEGER);
+
+statement ok
+INSERT INTO raced_dl.fault_archive_counted.t VALUES (1), (2);
+
+query II
+SELECT parameters['numRows'], parameters['numFiles']
+FROM glue_get_table_response('my_datalake.fault_archive_counted.t');
+----
+2	1
+
+statement error
+ALTER TABLE raced_dl.fault_archive_counted.t SET (owner = 'analytics');
+----
+InvalidInputException
+
+statement ok
+DROP SCHEMA my_datalake.fault_archive_counted CASCADE;
