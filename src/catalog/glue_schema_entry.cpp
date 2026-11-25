@@ -717,37 +717,6 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateType(CatalogTransaction transa
 	throw BinderException("Glue databases do not support creating types");
 }
 
-bool GlueSchemaEntry::IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to) {
-	if (from == to) {
-		return true;
-	}
-	auto rank = [](LogicalTypeId id) -> int {
-		switch (id) {
-		case LogicalTypeId::TINYINT:
-			return 1;
-		case LogicalTypeId::SMALLINT:
-			return 2;
-		case LogicalTypeId::INTEGER:
-			return 3;
-		case LogicalTypeId::BIGINT:
-			return 4;
-		default:
-			return 0;
-		}
-	};
-	if (rank(from.id()) > 0 && rank(to.id()) > 0) {
-		return rank(to.id()) > rank(from.id());
-	}
-	if (from.id() == LogicalTypeId::FLOAT && to.id() == LogicalTypeId::DOUBLE) {
-		return true;
-	}
-	if (to.id() == LogicalTypeId::VARCHAR) {
-		// everything can be read as a string
-		return true;
-	}
-	return false;
-}
-
 //! The parameters GlueTableInfo::GetFormat() derives the table format from can not be set or reset: changing
 //! table_type on a Hive table would relabel it as Iceberg or Delta without a metadata file behind it.
 static void CheckTablePropertyChangeable(const string &key) {
@@ -900,6 +869,18 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		                   [&](const GlueColumn &column) { return StringUtil::CIEquals(column.name, name); });
 	};
 
+	auto type = alter_table.alter_table_type;
+	switch (type) {
+	case AlterTableType::ADD_COLUMN:
+	case AlterTableType::REMOVE_COLUMN:
+	case AlterTableType::RENAME_COLUMN:
+	case AlterTableType::ALTER_COLUMN_TYPE:
+		current.ThrowIfAvroSchemaDefined("change the columns of");
+		break;
+	default:
+		break;
+	}
+
 	auto columns = current.columns;
 	switch (alter_table.alter_table_type) {
 	case AlterTableType::ADD_COLUMN: {
@@ -999,7 +980,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		}
 
 		auto from = GlueTypes::ToLogicalType(column->type);
-		if (!IsAllowedHiveTypeChange(from, change.target_type)) {
+		if (!GlueTypes::IsAllowedHiveTypeChange(from, change.target_type)) {
 			throw CatalogException("Can not change column \"%s\" of table \"%s\" from %s to %s: existing parquet "
 			                       "files keep their types, only widening changes (e.g. INTEGER to BIGINT, FLOAT to "
 			                       "DOUBLE, anything to VARCHAR) are supported for Hive tables",

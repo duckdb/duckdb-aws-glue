@@ -145,6 +145,9 @@ public:
 	string GetCompressionLevel() const;
 	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
 	string GetNullFormat() const;
+	//! Throws when the table or its SerDe holds an Avro schema (avro.schema.literal or avro.schema.url), which
+	//! Hive and Athena read the columns from and DuckDB does not update
+	void ThrowIfAvroSchemaDefined(const string &action) const;
 	//! skip.header.line.count, 0 without
 	idx_t GetHeaderLineCount() const;
 	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...

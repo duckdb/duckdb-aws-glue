@@ -241,6 +241,7 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 	result->target = ResolveGlueTable(context, "glue_replace_columns", input.inputs[0], false);
 	GlueCatalog::ThrowIfInExplicitTransaction(context, "glue_replace_columns");
 	auto &table = result->target.table;
+	table.ThrowIfAvroSchemaDefined("replace the columns of");
 	auto &columns = input.inputs[1];
 	if (!IsStringStruct(columns) || StructType::GetChildCount(columns.type()) == 0) {
 		throw BinderException("glue_replace_columns: the columns must be a struct of column name to type, e.g. "
@@ -303,7 +304,7 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 				column.comment = previous->comment;
 			}
 			auto from = GlueTypes::ToLogicalType(previous->type);
-			if (!GlueSchemaEntry::IsAllowedHiveTypeChange(from, type)) {
+			if (!GlueTypes::IsAllowedHiveTypeChange(from, type)) {
 				throw BinderException("glue_replace_columns: can not change column '%s' of table '%s' from %s to %s: "
 				                      "existing files keep their types, only widening changes are supported",
 				                      previous->name, result->target.TableName(), from.ToString(), type.ToString());

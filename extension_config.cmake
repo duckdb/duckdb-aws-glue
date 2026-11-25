@@ -22,9 +22,9 @@ duckdb_extension_load(httpfs
 )
 
 # Avro backed Hive tables (AvroSerDe) are read with read_avro from the avro extension, which the glue extension loads
-# when Glue reports such a table. Pinned to the hash the duckdb submodule pins in
-# .github/config/extensions/avro.cmake, so it is known to build against this duckdb commit, and patched as duckdb builds
-# it (.github/patches/extensions/avro, e.g. linking the vcpkg libraries of the wasm_threads triplet).
+# when Glue reports such a table. Pinned ahead of the duckdb submodule's 4d95356 (.github/config/extensions/avro.cmake)
+# for the Wasm vcpkg triplet linking, the decimal fixed-size sign bit and the avro-c Windows checkout fixes, so without
+# the submodule's .github/patches/extensions/avro, which target 4d95356.
 if (NOT MINGW)
     duckdb_extension_load(avro
         GIT_URL https://github.com/duckdb/duckdb-avro

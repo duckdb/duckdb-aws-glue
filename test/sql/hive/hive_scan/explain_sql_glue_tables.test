@@ -283,7 +283,7 @@ INSERT INTO my_datalake.{GLUE_TEST_DB}.es_bytes VALUES (1, '\xC3\xBC'::BLOB, '20
 query II
 EXPLAIN (SQL) SELECT id, b FROM my_datalake.{GLUE_TEST_DB}.es_bytes WHERE dt = '2016-05-15';
 ----
-sql	<REGEX>:.*FROM my_datalake\."?\w+"?\.es_bytes AS r\d+\(column0, column1, column2\)\s+WHERE \(r\d+\.column2 = CAST\('2016-05-15' AS VARCHAR\)\).*
+sql	<REGEX>:.*FROM my_datalake\."?\w+"?\.es_bytes AS r\d+\(\s*column0,\s*column1,\s*column2\s*\)\s+WHERE \(r\d+\.column2 = CAST\('2016-05-15' AS VARCHAR\)\).*
 
 query II
 EXPLAIN (SQL) SELECT id, b FROM my_datalake.{GLUE_TEST_DB}.es_bytes WHERE dt = '2016-05-15';
@@ -294,7 +294,7 @@ sql	<!REGEX>:.*read_parquet.*
 query II
 EXPLAIN (SQL) SELECT id, "$path" FROM my_datalake.{GLUE_TEST_DB}.es_events WHERE n = 1;
 ----
-sql	<REGEX>:.*r\d+\."\$path".*FROM my_datalake\."?\w+"?\.es_events AS r\d+\(column0, column1, column2, column3, column4\)\s+WHERE \(r\d+\.column4 = CAST\(1 AS INTEGER\)\).*
+sql	<REGEX>:.*r\d+\."\$path".*FROM my_datalake\."?\w+"?\.es_events AS r\d+\(\s*column0,\s*column1,\s*column2,\s*column3,\s*column4\s*\)\s+WHERE \(r\d+\.column4 = CAST\(1 AS INTEGER\)\).*
 
 foreach mode none explain_sql_strict
 
