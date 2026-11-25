@@ -272,7 +272,9 @@ their codec themselves.
   `CREATE TABLE` when its location holds no data files. That makes a parquet `CREATE TABLE` list its location; when
   the listing fails (no `s3:ListBucket`, no bucket yet) the table is created without them, and a warning is logged.
   Every write adds to them (UpdateTable, read again and retried with a backoff when another client changed the table
-  in between, and the three removed when every attempt loses). Tables and partitions without all three set to a
+  in between, and the three removed when every attempt loses). These UpdateTable calls set `SkipArchive`, so they
+  keep no table version: Glue allows 100,000 per table, and one per write would use them up; DDL still keeps one.
+  Tables and partitions without all three set to a
   count (created by another client without them, added with `glue_add_partition` or `glue_repair_table`, `-1` for
   unknown, or given only in part to `CREATE TABLE`) are left as they are, and `glue_set_table_location` /
   `glue_set_partition_location` remove them, as does a sum that does not fit in 64 bits. A write rolled back after
