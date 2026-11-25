@@ -1,0 +1,22 @@
+# name: benchmark/partition_filter_pruning.benchmark
+# description: plan a hive_scan of 200,000 partitions pruned by filters on a VARCHAR and an INTEGER partition key
+# group: [file_pruning_benchmarks]
+
+name Prune 200,000 partitions on a VARCHAR and an INTEGER partition key
+group file_pruning_benchmarks
+subgroup partition_pruning
+
+require parquet
+
+require glue
+
+load
+COPY (SELECT range::INTEGER AS id, 'p' || (range % 3) AS dt, (range % 3)::INTEGER AS n FROM range(30))
+TO '${BENCHMARK_DIR}/partition_filter_pruning' (FORMAT parquet, PARTITION_BY (dt, n), OVERWRITE);
+SET VARIABLE parts = (
+    SELECT list({dt: 'p' || range, n: range::VARCHAR, location: NULL::VARCHAR} ORDER BY range) FROM range(200000));
+
+run
+EXPLAIN SELECT id FROM hive_scan('${BENCHMARK_DIR}/partition_filter_pruning',
+    schema := {id: 'INTEGER', dt: 'VARCHAR', n: 'INTEGER'}, partitions := getvariable('parts'))
+WHERE dt IN ('p0', 'p1', 'p2') AND n BETWEEN 0 AND 2;

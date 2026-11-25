@@ -1,4 +1,5 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "planning/hive_partition_pruning.hpp"
 #include "core/hive_location.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
@@ -1439,111 +1440,6 @@ static unique_ptr<MultiFileList> FileListWithPathFilters(const HiveMultiFileList
 	return result;
 }
 
-struct PartitionKeyProjection {
-	idx_t projected_column_index;
-	idx_t partition_key_index;
-};
-
-//! The value a partition column reference is replaced by
-using PartitionColumnValue = std::function<Value(const PartitionKeyProjection &, const BoundColumnRefExpression &)>;
-
-//! Replace references to partition columns of the scanned table by the value 'value_of' gives for them
-static void ReplacePartitionColumnRefs(unique_ptr<Expression> &expr, TableIndex table_index,
-                                       const vector<PartitionKeyProjection> &projections,
-                                       const PartitionColumnValue &value_of) {
-	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
-	    expr, [&](BoundColumnRefExpression &colref, unique_ptr<Expression> &ref) {
-		    if (colref.Binding().table_index != table_index) {
-			    return;
-		    }
-		    auto column_index = colref.Binding().column_index.GetIndex();
-		    for (auto &projection : projections) {
-			    if (projection.projected_column_index == column_index) {
-				    ref = make_uniq<BoundConstantExpression>(value_of(projection, colref));
-				    return;
-			    }
-		    }
-	    });
-}
-
-//! Replace references to partition columns of the scanned table by the partition's values
-static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expression> &expr, TableIndex table_index,
-                                       const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info,
-                                       const GluePartitionInfo &partition) {
-	ReplacePartitionColumnRefs(expr, table_index, projections,
-	                           [&](const PartitionKeyProjection &projection, const BoundColumnRefExpression &colref) {
-		                           auto &key = info.partition_keys[projection.partition_key_index];
-		                           auto &partition_value = partition.values[projection.partition_key_index];
-		                           return GlueTypes::PartitionValue(context, key, partition_value,
-		                                                            colref.GetReturnType());
-	                           });
-}
-
-//! Whether the partition values alone can decide 'filter': with its partition columns replaced, it folds to a
-//! constant. That depends on the shape of the filter, not on the values, so it is asked once per filter.
-static bool DecidableByPartitionValues(const Expression &filter, TableIndex table_index,
-                                       const vector<PartitionKeyProjection> &projections) {
-	auto probe = filter.Copy();
-	ReplacePartitionColumnRefs(probe, table_index, projections,
-	                           [](const PartitionKeyProjection &, const BoundColumnRefExpression &colref) {
-		                           return Value(colref.GetReturnType());
-	                           });
-	return probe->IsScalar() && probe->IsFoldable();
-}
-
-//! The partitions among 'candidates' that no filter rules out, each filter evaluated with the partition's values in
-//! place of its partition columns. A filter that needs data columns is skipped. 'decided_filters' are those true of
-//! every partition kept.
-static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo &info,
-                                      const vector<GluePartitionInfo> &partitions, const vector<idx_t> &candidates,
-                                      TableIndex table_index, const vector<PartitionKeyProjection> &projections,
-                                      const vector<unique_ptr<Expression>> &filters,
-                                      unordered_set<idx_t> &pruning_filters, unordered_set<idx_t> &decided_filters) {
-	vector<idx_t> kept;
-	vector<idx_t> true_in_kept(filters.size(), 0);
-	vector<idx_t> decidable_filters;
-	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
-		if (DecidableByPartitionValues(*filters[filter_index], table_index, projections)) {
-			decidable_filters.push_back(filter_index);
-		}
-	}
-	if (decidable_filters.empty()) {
-		return candidates;
-	}
-	for (auto partition_index : candidates) {
-		auto &partition = partitions[partition_index];
-		bool keep = true;
-		vector<idx_t> true_here;
-		for (auto filter_index : decidable_filters) {
-			auto filter_copy = filters[filter_index]->Copy();
-			ReplacePartitionColumnRefs(context, filter_copy, table_index, projections, info, partition);
-			Value result;
-			if (!ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
-				// evaluation failed, e.g. on a cast error: the scan applies this filter instead
-				continue;
-			}
-			if (result.IsNull() || !result.GetValue<bool>()) {
-				keep = false;
-				pruning_filters.insert(filter_index);
-				break;
-			}
-			true_here.push_back(filter_index);
-		}
-		if (keep) {
-			kept.push_back(partition_index);
-			for (auto filter_index : true_here) {
-				true_in_kept[filter_index]++;
-			}
-		}
-	}
-	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
-		if (!kept.empty() && true_in_kept[filter_index] == kept.size()) {
-			decided_filters.insert(filter_index);
-		}
-	}
-	return kept;
-}
-
 //! Which projected columns ('column_ids' into 'column_names') are partition keys
 static vector<PartitionKeyProjection> PartitionKeyProjections(const HiveScanInfo &info,
                                                               const vector<column_t> &column_ids,
@@ -1631,8 +1527,8 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	auto partitions = info.Partitions(context);
 	unordered_set<idx_t> pruning_filters;
 	unordered_set<idx_t> decided_filters;
-	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
-	                             filters, pruning_filters, decided_filters);
+	HivePartitionPruner pruner(context, info, *partitions, pushdown_info.table_index, projections);
+	auto partitions_to_read = pruner.PartitionsToRead(*candidates, filters, pruning_filters, decided_filters);
 	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);
 	if (!pushdown_info.extra_info.total_files.IsValid()) {
 		pushdown_info.extra_info.file_filter_expressions = vector<unique_ptr<Expression>>();
@@ -1648,11 +1544,11 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	filters = std::move(remaining_filters);
 	// reported as files in EXPLAIN, but these are partitions: nothing has been listed yet
 	pushdown_info.extra_info.total_files = candidates->size();
-	pushdown_info.extra_info.filtered_files = kept.size();
-	if (kept.size() == candidates->size()) {
+	pushdown_info.extra_info.filtered_files = partitions_to_read.size();
+	if (partitions_to_read.size() == candidates->size()) {
 		return FileListWithPathFilters(hive_list, std::move(path_filters));
 	}
-	auto result = make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));
+	auto result = make_uniq<HiveMultiFileList>(context, scan_info, std::move(partitions_to_read));
 	result->SetPathFilters(std::move(path_filters));
 	return std::move(result);
 }
