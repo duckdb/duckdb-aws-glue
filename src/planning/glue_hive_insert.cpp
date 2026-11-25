@@ -1012,7 +1012,9 @@ void GlueHiveInsert::CheckNewPartitionDirectories(ClientContext &context, vector
 		bool other_files = true;
 		try {
 			if (!LocationHasGlob(partition.location)) {
-				auto listed = cache->GetDirectoryListing(context, partition.location, false)->GetAllFiles();
+				vector<OpenFileInfo> listed;
+				cache->ReadDirectoryListing(context, partition.location, false,
+				                            [&](MultiFileList &listing) { listed = listing.GetAllFiles(); });
 				other_files = HiveLocation::HasOtherFiles(
 				    HiveLocation::DataFiles(std::move(listed), partition.location), written.at(partition.location));
 			}
