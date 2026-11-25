@@ -303,7 +303,10 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 		return;
 	}
 	auto prefix = directory + "/";
-	for (auto &file : HiveQueryCache::Get(context)->GetDirectoryListing(context, directory, cached)->GetAllFiles()) {
+	vector<OpenFileInfo> listed;
+	HiveQueryCache::Get(context)->ReadDirectoryListing(context, directory, cached,
+	                                                   [&](MultiFileList &listing) { listed = listing.GetAllFiles(); });
+	for (auto &file : listed) {
 		if (!IsDataFile(file, prefix)) {
 			continue;
 		}
@@ -628,9 +631,10 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 	// one recursive listing of the root: on S3 a flat ListObjectsV2 over the prefix, 1000 keys per request, continued
 	// from the pages the sample fetched
-	auto files = HiveQueryCache::Get(client_context)
-	                 ->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info))
-	                 ->GetAllFiles();
+	vector<OpenFileInfo> files;
+	HiveQueryCache::Get(client_context)
+	    ->ReadDirectoryListing(client_context, root, CacheListings(client_context, *scan_info),
+	                           [&](MultiFileList &listing) { files = listing.GetAllFiles(); });
 	unordered_set<idx_t> reading;
 	auto all = scan_info->Partitions(client_context);
 	for (auto partition_index : partitions) {
@@ -804,8 +808,6 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	StringUtil::RTrim(root, "/");
 	auto root_prefix = root + "/";
 	auto comparable_root_size = ComparableLocation(root).size() + 1;
-	auto listing = HiveQueryCache::Get(client_context)
-	                   ->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info));
 	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
 	BuildPartitionLocations();
 	auto all = scan_info->Partitions(client_context);
@@ -817,51 +819,57 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	idx_t last_partition_start = 0;
 	vector<OpenFileInfo> files;
 	vector<idx_t> file_partitions;
-	MultiFileListScanData scan;
-	listing->InitializeScan(scan);
 	PathFilterEvaluator path_evaluator(client_context, path_filters);
-	// the pages fetched so far, and more only to find a partition the scan reads or while it may continue
-	scan.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
-	OpenFileInfo file;
-	while (true) {
-		if (!listing->Scan(scan, file)) {
-			if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH) {
-				listed_all = true;
-				break;
-			}
-			if (sampled.IsValid() && !in_sampled) {
-				break;
-			}
-			scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
-			continue;
-		}
-		if (!IsRootListedDataFile(file, root_prefix, comparable_root_size, *all) ||
-		    !path_evaluator.Matches(file.path)) {
-			continue;
-		}
-		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
-		if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
-			// pages come in key order, so the sampled partition's files are all seen
-			break;
-		}
-		auto owner = OwningPartition(file.path, comparable_root_size);
-		if (!owner.IsValid()) {
-			continue;
-		}
-		if (owner != last_partition) {
-			last_partition = owner;
-			last_partition_start = files.size();
-		}
-		if (!sampled.IsValid() && reading.count(owner.GetIndex())) {
-			sampled = owner;
-			sampled_prefix =
-			    ComparableLocation((*scan_info->Partitions(client_context))[owner.GetIndex()].location) + "/";
-			in_sampled = true;
-		}
-		CarryFileSecret(file, scan_info->file_secret);
-		files.push_back(file);
-		file_partitions.push_back(owner.GetIndex());
-	}
+	HiveQueryCache::Get(client_context)
+	    ->ReadDirectoryListing(
+	        client_context, root, CacheListings(client_context, *scan_info), [&](MultiFileList &listing) {
+		        MultiFileListScanData scan;
+		        listing.InitializeScan(scan);
+		        // the pages fetched so far, and more only to find a partition the scan reads or while it may continue
+		        scan.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
+		        OpenFileInfo file;
+		        while (true) {
+			        if (!listing.Scan(scan, file)) {
+				        if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH) {
+					        listed_all = true;
+					        break;
+				        }
+				        if (sampled.IsValid() && !in_sampled) {
+					        break;
+				        }
+				        scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
+				        continue;
+			        }
+			        if (!IsRootListedDataFile(file, root_prefix, comparable_root_size, *all) ||
+			            !path_evaluator.Matches(file.path)) {
+				        continue;
+			        }
+			        in_sampled =
+			            sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
+			        if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
+				        // pages come in key order, so the sampled partition's files are all seen
+				        break;
+			        }
+			        auto owner = OwningPartition(file.path, comparable_root_size);
+			        if (!owner.IsValid()) {
+				        continue;
+			        }
+			        if (owner != last_partition) {
+				        last_partition = owner;
+				        last_partition_start = files.size();
+			        }
+			        if (!sampled.IsValid() && reading.count(owner.GetIndex())) {
+				        sampled = owner;
+				        sampled_prefix =
+				            ComparableLocation((*scan_info->Partitions(client_context))[owner.GetIndex()].location) +
+				            "/";
+				        in_sampled = true;
+			        }
+			        CarryFileSecret(file, scan_info->file_secret);
+			        files.push_back(file);
+			        file_partitions.push_back(owner.GetIndex());
+		        }
+	        });
 	if (!listed_all && last_partition.IsValid() && last_partition != sampled) {
 		// the pages fetched may end inside the last partition
 		files.resize(last_partition_start);

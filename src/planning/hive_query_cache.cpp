@@ -2,6 +2,7 @@
 
 #include "core/hive_location.hpp"
 
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -22,6 +23,10 @@ class HiveListingCache : public ClientContextState {
 public:
 	shared_ptr<MultiFileList> GetListing(ClientContext &context, const string &directory) {
 		return listings.Get(context, directory);
+	}
+
+	void Drop(const string &directory, const shared_ptr<MultiFileList> &listing) {
+		listings.Drop(directory, listing);
 	}
 
 	void Clear() {
@@ -70,6 +75,22 @@ shared_ptr<MultiFileList> HiveDirectoryListings::Get(ClientContext &context, con
 		entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
 	}
 	return entry->listing;
+}
+
+void HiveDirectoryListings::Drop(const string &directory, const shared_ptr<MultiFileList> &listing) {
+	shared_ptr<HiveDirectoryListingEntry> entry;
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto found = listings.find(directory);
+		if (found == listings.end()) {
+			return;
+		}
+		entry = found->second;
+	}
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (entry->listing == listing) {
+		entry->listing.reset();
+	}
 }
 
 void HiveDirectoryListings::Clear() {
@@ -140,10 +161,15 @@ shared_ptr<HiveFooterEntry> HiveQueryCache::GetFooters(const string &key) {
 	return entry;
 }
 
-shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
-                                                              bool cache_in_connection) {
+static string ListingKey(const string &directory) {
 	auto key = directory;
 	StringUtil::RTrim(key, "/");
+	return key;
+}
+
+shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &context, const string &directory,
+                                                              bool cache_in_connection) {
+	auto key = ListingKey(directory);
 	if (cache_in_connection) {
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
 		return context.GetContext()
@@ -152,6 +178,27 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 		    ->GetListing(context, key);
 	}
 	return directory_listings.Get(context, key);
+}
+
+void HiveQueryCache::ReadDirectoryListing(ClientContext &context, const string &directory, bool cache_in_connection,
+                                          const std::function<void(MultiFileList &)> &read) {
+	auto listing = GetDirectoryListing(context, directory, cache_in_connection);
+	try {
+		read(*listing);
+	} catch (InterruptException &) {
+		throw;
+	} catch (...) {
+		auto key = ListingKey(directory);
+		if (cache_in_connection) {
+			auto cache = context.GetContext().GetRegisteredState().Get<HiveListingCache>(HIVE_LISTING_CACHE);
+			if (cache) {
+				cache->Drop(key, listing);
+			}
+		} else {
+			directory_listings.Drop(key, listing);
+		}
+		throw;
+	}
 }
 
 shared_ptr<const vector<GluePartitionInfo>> FindTablePartitions(ClientContext &context, const HiveScanInfo &info) {
